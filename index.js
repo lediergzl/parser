@@ -2,26 +2,18 @@ const express = require('express');
 const { Telegraf } = require('telegraf');
 
 // ============================================================
-// 1. Cargar el bundle (debe exponer Engine y Preprocesador)
+// 1. Cargar el bundle
 // ============================================================
-try {
-  require('./lotopro-core.bundle.js');
-} catch (err) {
-  console.error('❌ No se pudo cargar lotopro-core.bundle.js:', err.message);
-  process.exit(1);
-}
+require('./lotopro-core.bundle.js');
 
-// Extraer lo que el bundle expone
 const { Engine, Preprocesador } = global;
 
-// ──────────────────────────────────────────────────────────
-// 2. Definir limpiarMonto MANUALMENTE (no viene en el bundle)
-// ──────────────────────────────────────────────────────────
+// ============================================================
+// 2. Definir limpiarMonto (no viene en el bundle)
+// ============================================================
 function limpiarMonto(s) {
   if (s == null) return null;
-  let txt = String(s)
-    .replace(/\s+/g, '')
-    .replace(/\$/g, '');
+  let txt = String(s).replace(/\s+/g, '').replace(/\$/g, '');
   if (!txt) return null;
   txt = txt.replace(/,/g, '.');
   const dotCount = (txt.match(/\./g) || []).length;
@@ -33,53 +25,21 @@ function limpiarMonto(s) {
   return Number.isFinite(n) ? n : null;
 }
 
-// ──────────────────────────────────────────────────────────
-// 3. Expansión de D2/t3 y NxN (para que tolere mayúsculas)
-// ──────────────────────────────────────────────────────────
-function expandirParesConX(texto) {
-  return texto.replace(/(\d+)\s*[xX]\s*(?=\d)/g, (match, p1) => p1 + ' ');
-}
-
-function expandirDecenasTerminales(texto) {
-  let resultado = texto;
-  resultado = resultado.replace(/\b[Dd](\d)\b/g, (match, digito) => {
-    const decena = parseInt(digito, 10);
-    const nums = [];
-    for (let i = 0; i <= 9; i++) {
-      nums.push(String(decena * 10 + i).padStart(2, '0'));
-    }
-    return nums.join(' ');
-  });
-  resultado = resultado.replace(/\b[Tt](\d)\b/g, (match, digito) => {
-    const terminal = parseInt(digito, 10);
-    const nums = [];
-    for (let i = 0; i <= 9; i++) {
-      nums.push(String(i * 10 + terminal).padStart(2, '0'));
-    }
-    return nums.join(' ');
-  });
-  return resultado;
-}
-
-// ──────────────────────────────────────────────────────────
-// 4. Validar dependencias mínimas para arrancar
-// ──────────────────────────────────────────────────────────
-if (!Engine) {
-  console.error('❌ Engine no está disponible en el bundle');
+// ============================================================
+// 3. Verificar dependencias
+// ============================================================
+if (!Engine || !Preprocesador) {
+  console.error('❌ Motor no cargado correctamente');
   process.exit(1);
 }
-if (!Preprocesador) {
-  console.error('❌ Preprocesador no está disponible en el bundle');
-  process.exit(1);
-}
-console.log('✅ Motor cargado correctamente (limpiarMonto definido localmente)');
+console.log('✅ Motor listo');
 
-// ──────────────────────────────────────────────────────────
-// 5. Configuración de Telegram y Express
-// ──────────────────────────────────────────────────────────
+// ============================================================
+// 4. Configurar bot y Express
+// ============================================================
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
-  console.error('❌ TELEGRAM_BOT_TOKEN no definido');
+  console.error('❌ Token no configurado');
   process.exit(1);
 }
 
@@ -92,34 +52,29 @@ app.use((req, res, next) => {
 });
 
 app.get('/ping', (req, res) => res.send('pong'));
-app.get('/', (req, res) => res.send('🤖 LotoPro Bot activo'));
+app.get('/', (req, res) => res.send('🤖 LotoPro Bot'));
 
 const webhookPath = '/webhook';
 app.post(webhookPath, (req, res) => {
   bot.webhookCallback(webhookPath)(req, res);
 });
 
-bot.start((ctx) => ctx.reply('✅ Bot activo. Envía una jugada en formato DSL.'));
-bot.help((ctx) => ctx.reply(
-  'Ejemplo:\n```\nJuana\nD2 con 50 y 20 candado con 2300\nParejas d2 t3 4 5 parle con 5\n```',
-  { parse_mode: 'Markdown' }
-));
+bot.start((ctx) => ctx.reply('✅ Bot activo. Envía una jugada.'));
+bot.help((ctx) => ctx.reply('Ejemplo:\nJuana\nd2 con 50 y 20 candado con 2300\nparejas d2 t3 4 5 parle con 5'));
 
-// ──────────────────────────────────────────────────────────
-// 6. Procesamiento de mensajes (con manejo de errores detallado)
-// ──────────────────────────────────────────────────────────
+// ============================================================
+// 5. Procesamiento principal (sin expansiones manuales)
+// ============================================================
 bot.on('text', async (ctx) => {
   let rawInput = ctx.message.text;
   if (!rawInput.trim()) return;
 
-  console.log(`📥 Entrada de ${ctx.from.username || ctx.from.id}: ${rawInput.slice(0, 200)}`);
+  console.log(`📥 Entrada: ${rawInput.slice(0, 200)}`);
 
-  // Expansiones opcionales (mejoran compatibilidad)
-  rawInput = expandirParesConX(rawInput);
-  rawInput = expandirDecenasTerminales(rawInput);
+  // Convertir a minúsculas para que D2 → d2, Parle → parle, etc.
+  rawInput = rawInput.toLowerCase();
 
   try {
-    // Llamada al motor con todas las dependencias
     const resultado = Engine.calcular(
       {
         rawInput,
@@ -127,15 +82,15 @@ bot.on('text', async (ctx) => {
         sorteoId: 1,
       },
       {
-        limpiarMonto,                                     // manual
-        Expansion: global.Expansion || null,              // puede ser null, el motor lo tolera
+        limpiarMonto,
+        Expansion: global.Expansion,
         preprocesarJugada: Preprocesador.preprocesarJugada,
       }
     );
 
     if (!resultado.ok) {
       const errorMsg = resultado.errors?.map(e => e.message).join('\n') || resultado.message;
-      await ctx.reply(`❌ Error en el cálculo:\n${errorMsg}`);
+      await ctx.reply(`❌ Error:\n${errorMsg}`);
       return;
     }
 
@@ -148,14 +103,13 @@ bot.on('text', async (ctx) => {
     await ctx.reply(respuesta, { parse_mode: 'Markdown' });
 
   } catch (err) {
-    console.error('🔥 Excepción en el motor:', err);
-    // Enviamos el error real para depurar (después puedes quitar el stack)
-    await ctx.reply(`❌ Error interno del servidor:\n${err.message}\n\nStack:\n${err.stack?.slice(0, 500)}`);
+    console.error('🔥 Excepción:', err);
+    await ctx.reply(`❌ Error interno:\n${err.message}\n\n${err.stack?.slice(0, 500)}`);
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor escuchando en puerto ${PORT}`);
-  console.log(`✅ Webhook en POST ${webhookPath}`);
+  console.log(`🚀 Servidor en puerto ${PORT}`);
+  console.log(`✅ Webhook en ${webhookPath}`);
 });
