@@ -1663,6 +1663,10 @@ function aplicarRightSideRule(linea) {
       stage: 'aplicarRightSideRule:error',
       linea, ladoDer, code: result.code, message: result.message,
     });
+    const multiCon = (linea.match(/\bcon\b/gi) || []).length;
+    if (multiCon >= 2) {
+      return { linea }; // dejar intacta para dividirMultiplesCon
+    }
     return { linea: null, error: { code: result.code, message: result.message } };
   }
 
@@ -3490,7 +3494,9 @@ function preprocesarJugada(rawInput) {
   trace('INPUT_START', j);
 
   const ledger = createBetAuditLedger();
-  const lines = j.split(/\r?\n/);
+  const lines = j.split(/\r?\n/).flatMap(l =>
+    /\d/.test(l) && /  +/.test(l) ? l.split(/  +/) : [l]
+  );
   const processedLines = [];
 
   for (let i = 0; i < lines.length; i++) {
