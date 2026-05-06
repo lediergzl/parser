@@ -22,6 +22,8 @@ function stripWhatsAppMeta(line) {
   cleaned = cleaned.replace(/^\d{1,2}\/\d{1,2}\/\d{2,4},?\s+\d{1,2}:\d{2}(?:\s*[ap]\.?\s*m\.?)?\s*-\s*[^:]+:\s*/i, '');
   // +53 5 6468550: (sin fecha)
   cleaned = cleaned.replace(/^\+?\d[\d\s]{6,}:\s*/, '');
+  // Limpiar caracteres especiales (emojis, candado, etc.)
+  cleaned = cleaned.replace(/[🔒🔓💰📱]/g, '');
   return cleaned.trim();
 }
 
@@ -55,24 +57,45 @@ function normalizarSintaxis(texto) {
     // 1. Reemplazar * por x en pares (ej: 25*33 → 25x33)
     line = line.replace(/(\d+)\s*\*\s*(\d+)/g, '$1x$2');
 
-    // 2. Detectar "con X y Y" (sin palabra corrido) y dividir
-    const matchConY = line.match(/^(.+?)\s+con\s+(\d+(?:\.\d+)?)\s+y\s+(\d+(?:\.\d+)?)$/i);
+    // 2. Detectar "con X y Y" (incluyendo variantes con espacios irregulares)
+    // Busca: números/pares ... con NÚMERO y NÚMERO
+    const matchConY = line.match(/^(.+?)\s+con\s+(\d+(?:\.\d+)?)\s+y\s+(\d+(?:\.\d+)?)(.*)$/i);
     if (matchConY) {
       const nums = matchConY[1];
       const monto1 = matchConY[2];
       const monto2 = matchConY[3];
-      nuevas.push(`${nums} con ${monto1}`);
+      const resto = matchConY[4];
+      nuevas.push(`${nums} con ${monto1}${resto}`);
       nuevas.push(`${nums} corrido con ${monto2}`);
       continue;
     }
 
-    // 3. Detectar "Parle" en línea propia y la siguiente contiene la lista de pares
+    // 3. Detectar "Parle" en línea propia
     if (line.toLowerCase() === 'parle' && i + 1 < lines.length) {
       let nextLine = lines[i + 1].trim();
-      if (nextLine) {
-        // Si la siguiente línea tiene pares con * o x, ya se normalizaron
-        nuevas.push(`parle ${nextLine}`);
-        i++; // saltar la línea siguiente
+      if (nextLine && /[\dx\s]+/.test(nextLine)) {
+        // Si la siguiente línea tiene pares, buscar el monto en líneas subsecuentes
+        let pares = nextLine;
+        let monto = '';
+        // Revisar próximas líneas hasta encontrar un monto
+        for (let j = i + 2; j < lines.length; j++) {
+          const checkLine = lines[j].trim();
+          if (/^con\s+\d+/.test(checkLine)) {
+            monto = checkLine.replace(/^con\s+/, '');
+            i = j; // avanzar índice
+            break;
+          } else if (/[\dx\s]+/.test(checkLine)) {
+            pares += ' ' + checkLine;
+          } else {
+            break;
+          }
+        }
+        if (monto) {
+          nuevas.push(`parle ${pares} con ${monto}`);
+        } else {
+          nuevas.push(`parle ${pares}`);
+        }
+        i++; // saltar la línea siguiente ya procesada
         continue;
       }
     }
@@ -87,12 +110,23 @@ function normalizarSintaxis(texto) {
         const monto = montoMatch[1];
         const pares = [];
         for (let i = 0; i <= 9; i++) pares.push(String(i).repeat(2).padStart(2, '0'));
-        nuevas.push(`${pares.join(' ')} parle con ${monto}`);
+        nuevas.push(`${pares.join(' ')} con ${monto}`);
         continue;
       }
     }
 
-    // 6. Si no aplica ninguna regla, mantener la línea
+    // 6. Expandir "terminal X con N" a lista de terminales
+    const terminalMatch = line.match(/^terminal\s+(\d+)\s+con\s+(\d+)$/i);
+    if (terminalMatch) {
+      const terminal = parseInt(terminalMatch[1], 10);
+      const monto = terminalMatch[2];
+      const nums = [];
+      for (let i = 0; i <= 9; i++) nums.push(String(i * 10 + terminal).padStart(2, '0'));
+      nuevas.push(`${nums.join(' ')} con ${monto}`);
+      continue;
+    }
+
+    // 7. Si no aplica ninguna regla, mantener la línea
     nuevas.push(line);
   }
   return nuevas.join('\n');
@@ -119,7 +153,10 @@ function reconstruirBloquesConNombres(texto) {
     }
 
     // Es nombre si: solo letras (con acentos), sin dígitos, y no es palabra reservada del DSL
-    const esNombre = /^[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+$/.test(line) && !/\d/.test(line) && !/^(con|parle|candado|total|fijo|corrido|centena|parejas|terminal|decena|new|york|por|tarjeta)$/i.test(line);
+    const esNombre = /^[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+$/.test(line) && 
+                     !/\d/.test(line) && 
+                     !/^(con|parle|candado|total|fijo|corrido|centena|parejas|terminal|decena|new|york|por|tarjeta)$/i.test(line);
+    
     if (esNombre && nombreActual === null && acumulador.length === 0) {
       nombreActual = line;
       continue;
