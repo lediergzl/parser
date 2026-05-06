@@ -12,7 +12,7 @@ const { Engine, Preprocesador } = global;
 // 2. Funciones de limpieza y normalización
 // ============================================================
 
-// Limpia metadatos de WhatsApp (fechas, teléfonos, etc.)
+// Elimina metadatos de WhatsApp y líneas vacías o de solo metadatos
 function stripWhatsAppMeta(line) {
   if (!line) return '';
   let cleaned = line.trim();
@@ -25,7 +25,7 @@ function stripWhatsAppMeta(line) {
   return cleaned.trim();
 }
 
-// Expande abreviaturas dX, tX a listas de números
+// Expande dX y tX a listas de números
 function expandirDecenasTerminales(texto) {
   let resultado = texto;
   resultado = resultado.replace(/\b[Dd](\d)\b/g, (match, digito) => {
@@ -43,7 +43,7 @@ function expandirDecenasTerminales(texto) {
   return resultado;
 }
 
-// Convierte "25*33" → "25x33" y "22 con 50 y 10" → dos líneas
+// Normaliza sintaxis: * -> x, "con X y Y" -> dos líneas, "Parle" aparte, etc.
 function normalizarSintaxis(texto) {
   let lines = texto.split('\n');
   let nuevas = [];
@@ -55,7 +55,7 @@ function normalizarSintaxis(texto) {
     // 1. Reemplazar * por x en pares (ej: 25*33 → 25x33)
     line = line.replace(/(\d+)\s*\*\s*(\d+)/g, '$1x$2');
 
-    // 2. Detectar "con X y Y" (sin palabra corrido)
+    // 2. Detectar "con X y Y" (sin palabra corrido) y dividir
     const matchConY = line.match(/^(.+?)\s+con\s+(\d+(?:\.\d+)?)\s+y\s+(\d+(?:\.\d+)?)$/i);
     if (matchConY) {
       const nums = matchConY[1];
@@ -66,20 +66,21 @@ function normalizarSintaxis(texto) {
       continue;
     }
 
-    // 3. Detectar líneas que empiezan con "Parle" y la siguiente línea tiene los pares
+    // 3. Detectar "Parle" en línea propia y la siguiente contiene la lista de pares
     if (line.toLowerCase() === 'parle' && i + 1 < lines.length) {
-      const nextLine = lines[i + 1].trim();
+      let nextLine = lines[i + 1].trim();
       if (nextLine) {
+        // Si la siguiente línea tiene pares con * o x, ya se normalizaron
         nuevas.push(`parle ${nextLine}`);
         i++; // saltar la línea siguiente
         continue;
       }
     }
 
-    // 4. Convertir "parle con X" cuando X está junto (ej: "parle 2" → "parle con 2")
+    // 4. Asegurar "parle con N" cuando está pegado
     line = line.replace(/\bparle\s+(\d+)/gi, 'parle con $1');
 
-    // 5. Expandir "parejas con N" a la lista completa 00 11 ... 99 con N
+    // 5. Expandir "parejas con N" a lista completa 00 11 ... 99 con N
     if (/\bparejas?\s+con\s+\d+/i.test(line)) {
       const montoMatch = line.match(/\bparejas?\s+con\s+(\d+)/i);
       if (montoMatch) {
@@ -91,13 +92,13 @@ function normalizarSintaxis(texto) {
       }
     }
 
-    // Si no aplica ninguna regla, mantener la línea
+    // 6. Si no aplica ninguna regla, mantener la línea
     nuevas.push(line);
   }
   return nuevas.join('\n');
 }
 
-// Convierte múltiples líneas en un solo bloque con nombres detectados
+// Reconstruye bloques detectando nombres automáticamente
 function reconstruirBloquesConNombres(texto) {
   const lines = texto.split('\n');
   let resultado = [];
@@ -117,8 +118,8 @@ function reconstruirBloquesConNombres(texto) {
       continue;
     }
 
-    // Detectar si la línea es un nombre (sin dígitos y no es palabra reservada)
-    const esNombre = /^[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+$/.test(line) && !/\d/.test(line) && !/^(con|parle|candado|total|fijo|corrido|centena|parejas)$/i.test(line);
+    // Es nombre si: solo letras (con acentos), sin dígitos, y no es palabra reservada del DSL
+    const esNombre = /^[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+$/.test(line) && !/\d/.test(line) && !/^(con|parle|candado|total|fijo|corrido|centena|parejas|terminal|decena|new|york|por|tarjeta)$/i.test(line);
     if (esNombre && nombreActual === null && acumulador.length === 0) {
       nombreActual = line;
       continue;
@@ -167,11 +168,11 @@ app.post(webhookPath, (req, res) => {
   bot.webhookCallback(webhookPath)(req, res);
 });
 
-bot.start((ctx) => ctx.reply('✅ Bot activo. Envía una jugada en formato DSL.'));
-bot.help((ctx) => ctx.reply('Puedes pegar el texto tal como sale de WhatsApp. El bot lo limpiará automáticamente.'));
+bot.start((ctx) => ctx.reply('✅ Bot activo. Envía una jugada tal como sale de WhatsApp.'));
+bot.help((ctx) => ctx.reply('Puedes pegar el texto completo con múltiples jugadores. El bot lo procesará automáticamente.'));
 
 // ============================================================
-// 5. Procesamiento principal con todas las normalizaciones
+// 5. Procesamiento principal
 // ============================================================
 bot.on('text', async (ctx) => {
   let rawInput = ctx.message.text;
@@ -184,16 +185,16 @@ bot.on('text', async (ctx) => {
   const cleanedLines = lines.map(line => stripWhatsAppMeta(line)).filter(l => l.trim());
   let cleanText = cleanedLines.join('\n');
 
-  // 2. Reconstruir bloques con nombres detectados automáticamente
+  // 2. Reconstruir bloques con nombres detectados
   cleanText = reconstruirBloquesConNombres(cleanText);
 
-  // 3. Normalizar sintaxis (con X y Y, * → x, Parle anticipado)
+  // 3. Normalizar sintaxis (con X y Y, * → x, Parle anticipado, parejas)
   cleanText = normalizarSintaxis(cleanText);
 
   // 4. Expandir dX, tX
   cleanText = expandirDecenasTerminales(cleanText);
 
-  // 5. Convertir a minúsculas (para unificar)
+  // 5. Convertir a minúsculas para unificar
   cleanText = cleanText.toLowerCase();
 
   console.log(`📥 Texto preprocesado:\n${cleanText}`);
@@ -218,7 +219,7 @@ bot.on('text', async (ctx) => {
       return;
     }
 
-    // ----- Formateo compacto de la salida (igual que antes) -----
+    // ----- Formateo compacto de la salida -----
     let respuesta = `💰 *Total:* ${resultado.totalGeneral.toFixed(2)}\n\n`;
     let bloqueActual = null;
     let lineasAgrupadas = [];
