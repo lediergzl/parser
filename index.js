@@ -128,7 +128,7 @@ async function rejectDeposit(requestId, adminId, reason = '') {
     .eq('id', requestId);
 }
 
-// ================================ LÍMITES ACUMULATIVOS ================================
+// ================================ LÍMITES ACUMULATIVOS (CON LOGS) ================================
 async function getAcumuladoPorNumero(loteriaId, sorteoId, fecha) {
   const { data: bets, error } = await supabase
     .from('bets')
@@ -152,6 +152,7 @@ async function getAcumuladoPorNumero(loteriaId, sorteoId, fecha) {
       }
     } catch(e) {}
   }
+  console.log(`[LÍMITES] Acumulado por número en sorteo ${sorteoId}:`, acumulado);
   return acumulado;
 }
 
@@ -167,10 +168,15 @@ async function getLimitesGlobales(loteriaId, sorteoId) {
   if (error || !data) return {};
   const map = {};
   for (const item of data) map[item.tipo] = item.monto_maximo;
+  console.log(`[LÍMITES] Límites globales obtenidos:`, map);
   return map;
 }
 
 async function validarLimitesAcumulativos(jugadasDetalle, loteriaId, sorteoId, fecha, limites) {
+  if (!limites || Object.keys(limites).length === 0) {
+    console.log(`[LÍMITES] No hay límites configurados, se omite validación.`);
+    return null;
+  }
   const acumulado = await getAcumuladoPorNumero(loteriaId, sorteoId, fecha);
   for (const detalle of jugadasDetalle) {
     const tipoBase = (detalle.tipo === 'candado' || detalle.tipo === 'candado_global') ? 'parle' : detalle.tipo;
@@ -182,6 +188,7 @@ async function validarLimitesAcumulativos(jugadasDetalle, loteriaId, sorteoId, f
     for (const num of numeros) {
       const acumPrev = acumulado[num] || 0;
       if (acumPrev + montoUnitario > limite) {
+        console.log(`[LÍMITES] Violación: número ${num} acumulado ${acumPrev} + nuevo ${montoUnitario} > límite ${limite}`);
         return { numero: num, tipo: tipoBase, montoActual: montoUnitario, acumPrev, limite };
       }
     }
@@ -291,6 +298,10 @@ app.get('/', (req, res) => res.send('🤖 LotoPro Bot profesional'));
 const webhookPath = '/webhook';
 app.post(webhookPath, (req, res) => { bot.webhookCallback(webhookPath)(req, res); });
 
+// Estado simple en memoria para rechazo de depósitos (sin sesión)
+const rejectState = new Map(); // userId -> depositId
+
+// Estados para depósitos
 const depositStates = new Map();
 
 // ================================ BOTONERA PRINCIPAL (USUARIO) ================================
@@ -322,7 +333,6 @@ async function showMainMenu(ctx) {
   await ctx.reply(texto, { parse_mode: 'Markdown', ...keyboard });
 }
 
-// Menú de loterías
 bot.action('menu_loterias', async (ctx) => {
   const loterias = await getLoterias();
   if (!loterias.length) {
@@ -371,7 +381,6 @@ bot.action(/sel_sor_(\d+)/, async (ctx) => {
   await ctx.editMessageText(`✅ *Sorteo seleccionado:* ${sorteo.loterias.nombre} - ${sorteo.nombre}\n\nAhora puedes enviar tu jugada directamente.`, { parse_mode: 'Markdown' });
 });
 
-// Menú de moneda
 bot.action('menu_moneda', async (ctx) => {
   const keyboard = {
     reply_markup: {
@@ -394,7 +403,6 @@ bot.action(/moneda_(cup|mlc|usd)/, async (ctx) => {
   await ctx.editMessageText(`✅ *Moneda seleccionada:* ${moneda.toUpperCase()}`);
 });
 
-// Menú de mis jugadas (CORREGIDO)
 bot.action('menu_mis_jugadas', async (ctx) => {
   const pref = await getUserPreference(ctx.from.id);
   if (!pref?.sorteo_id) {
@@ -412,7 +420,7 @@ bot.action('menu_mis_jugadas', async (ctx) => {
     const status = editable ? '🟢' : '🔴';
     msg += `${status} *ID:* ${bet.id}\n💰 $${bet.total_apuesta.toFixed(2)}\n📝 ${bet.input_raw.substring(0, 80)}...\n\n`;
   }
-  // Corrección aquí: evitar `await` dentro del template literal
+  // Preparar botones sin await en plantillas
   const betsWithEditable = await Promise.all(bets.slice(0, 6).map(async (bet) => {
     const editable = await isBetEditable(bet);
     return { ...bet, editable };
@@ -432,13 +440,12 @@ bot.action('menu_mis_jugadas', async (ctx) => {
   await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Editar y eliminar jugadas (callbacks)
 bot.action(/edit_bet_(\d+)/, async (ctx) => {
   const betId = parseInt(ctx.match[1]);
   const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
   if (error || !bet) {
     await ctx.answerCbQuery('Jugada no encontrada');
-    return ctx.deleteMessage();
+    return;
   }
   if (!(await isBetEditable(bet))) {
     await ctx.answerCbQuery('⏰ El sorteo ya cerró, no se puede editar');
@@ -453,7 +460,7 @@ bot.action(/del_bet_(\d+)/, async (ctx) => {
   const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
   if (error || !bet) {
     await ctx.answerCbQuery('Jugada no encontrada');
-    return ctx.deleteMessage();
+    return;
   }
   if (!(await isBetEditable(bet))) {
     await ctx.answerCbQuery('⏰ El sorteo ya cerró, no se puede eliminar');
@@ -475,7 +482,7 @@ bot.action(/confirm_del_(\d+)/, async (ctx) => {
   const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
   if (error || !bet) {
     await ctx.answerCbQuery('Jugada no encontrada');
-    return ctx.deleteMessage();
+    return;
   }
   if (!(await isBetEditable(bet))) {
     await ctx.answerCbQuery('⏰ El sorteo ya cerró, no se puede eliminar');
@@ -496,7 +503,6 @@ bot.action('cancel_del', async (ctx) => {
   await ctx.deleteMessage();
 });
 
-// Menú depósito
 bot.action('menu_depositar', async (ctx) => {
   const keyboard = {
     reply_markup: {
@@ -520,7 +526,6 @@ bot.action(/dep_method_(.+)/, async (ctx) => {
   await ctx.editMessageText(`Método: ${method}\n✍️ *Escribe el monto a depositar:*`, { parse_mode: 'Markdown' });
 });
 
-// Menú historial
 bot.action('menu_historial', async (ctx) => {
   const { data: bets, error } = await supabase
     .from('bets')
@@ -577,7 +582,6 @@ bot.command('admin_panel', async (ctx) => {
   await ctx.reply('👑 *Panel de Administración*', { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Ver solicitudes pendientes
 bot.action('admin_pendientes', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const { data: pendings, error } = await supabase
@@ -612,9 +616,7 @@ bot.action(/admin_aprob_(\d+)/, async (ctx) => {
     await ctx.answerCbQuery(`Depósito #${id} aprobado`);
     await ctx.editMessageText(`✅ Depósito #${id} aprobado. Usuario ${userId} recibe $${amount.toFixed(2)}. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`);
     try { await bot.telegram.sendMessage(userId, `✅ Tu depósito de $${amount.toFixed(2)} ha sido aprobado. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`); } catch(e) {}
-    await bot.telegram.answerCbQuery(ctx.callbackQuery.id);
-    await ctx.deleteMessage();
-    await bot.telegram.sendMessage(ctx.chat.id, 'Lista actualizada');
+    // No eliminar el mensaje, solo actualizar
   } catch (err) {
     await ctx.answerCbQuery(`Error: ${err.message}`);
   }
@@ -623,13 +625,11 @@ bot.action(/admin_aprob_(\d+)/, async (ctx) => {
 bot.action(/admin_rech_(\d+)/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const id = parseInt(ctx.match[1]);
-  await ctx.answerCbQuery('Motivo del rechazo? (escribe en el chat)');
-  ctx.session = ctx.session || {};
-  ctx.session.rejectDepositId = id;
-  await ctx.reply(`Escribe el motivo del rechazo para el depósito #${id}:`);
+  await ctx.answerCbQuery('Escribe el motivo del rechazo en el chat.');
+  rejectState.set(ctx.from.id, id);
+  await ctx.reply(`Escribe el motivo del rechazo para la solicitud #${id}:`);
 });
 
-// Ver jugadas del día
 bot.action('admin_jugadas_hoy', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const hoy = new Date().toISOString().slice(0,10);
@@ -654,7 +654,6 @@ bot.action('admin_jugadas_hoy', async (ctx) => {
   await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Estadísticas rápidas
 bot.action('admin_estadisticas', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const hoy = new Date().toISOString().slice(0,10);
@@ -676,7 +675,6 @@ bot.action('admin_estadisticas', async (ctx) => {
   await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Gestionar límites (admin)
 bot.action('admin_limites', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const { data: limites, error } = await supabase.from('limits').select('*').is('loteria_id', null).is('sorteo_id', null);
@@ -694,6 +692,21 @@ bot.action('admin_limites', async (ctx) => {
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const state = depositStates.get(userId);
+  // Rechazar depósito (administrador)
+  if (rejectState.has(userId)) {
+    const depositId = rejectState.get(userId);
+    const reason = ctx.message.text;
+    rejectState.delete(userId);
+    try {
+      await rejectDeposit(depositId, userId, reason);
+      const { data: req } = await supabase.from('deposit_requests').select('user_telegram_id').eq('id', depositId).single();
+      if (req) await bot.telegram.sendMessage(req.user_telegram_id, `❌ Tu depósito fue rechazado. Motivo: ${reason}`);
+      await ctx.reply(`✅ Depósito #${depositId} rechazado.`);
+    } catch (err) {
+      await ctx.reply(`❌ Error: ${err.message}`);
+    }
+    return;
+  }
   // Procesar depósito en paso amount
   if (state && state.step === 'amount') {
     const amount = parseFloat(ctx.message.text.trim());
@@ -704,39 +717,24 @@ bot.on('text', async (ctx) => {
     await ctx.reply(`Monto: $${amount.toFixed(2)}\nAhora envía una imagen o documento como comprobante.`);
     return;
   }
-  // Procesar rechazo de depósito por admin
-  if (ctx.session && ctx.session.rejectDepositId) {
-    const id = ctx.session.rejectDepositId;
-    const reason = ctx.message.text;
-    delete ctx.session.rejectDepositId;
-    try {
-      await rejectDeposit(id, ctx.from.id, reason);
-      const { data: req } = await supabase.from('deposit_requests').select('user_telegram_id').eq('id', id).single();
-      if (req) await bot.telegram.sendMessage(req.user_telegram_id, `❌ Tu depósito fue rechazado. Motivo: ${reason}`);
-      await ctx.reply(`✅ Depósito #${id} rechazado.`);
-    } catch (err) {
-      await ctx.reply(`❌ Error: ${err.message}`);
-    }
-    return;
-  }
   // Si no hay flujo, procesar apuesta normal
   await processBet(ctx, ctx.message.text);
 });
 
-// Manejo de fotos/documentos (comprobante de depósito)
 bot.on(['photo', 'document'], async (ctx) => {
-  const state = depositStates.get(ctx.from.id);
+  const userId = ctx.from.id;
+  const state = depositStates.get(userId);
   if (!state || state.step !== 'proof') return ctx.reply('No estás en proceso de depósito. Usa /depositar en el menú.');
   let fileId;
   if (ctx.message.photo) fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
   else if (ctx.message.document) fileId = ctx.message.document.file_id;
   else return ctx.reply('Envía una imagen o documento.');
   try {
-    const deposit = await createDepositRequest(ctx.from.id, state.amount, state.method, fileId);
-    depositStates.delete(ctx.from.id);
+    const deposit = await createDepositRequest(userId, state.amount, state.method, fileId);
+    depositStates.delete(userId);
     await ctx.reply(`✅ Solicitud creada.\nID: ${deposit.id}\nMonto: $${deposit.amount}\nMétodo: ${deposit.payment_method}\nEl administrador revisará y aprobará.`);
     for (const adminId of ADMIN_IDS) {
-      try { await bot.telegram.sendMessage(adminId, `📥 Nueva solicitud #${deposit.id}\nUsuario: ${ctx.from.id}\nMonto: $${deposit.amount}`); } catch(e) {}
+      try { await bot.telegram.sendMessage(adminId, `📥 Nueva solicitud #${deposit.id}\nUsuario: ${userId}\nMonto: $${deposit.amount}`); } catch(e) {}
     }
   } catch (err) {
     console.error(err);
@@ -777,11 +775,14 @@ async function processBet(ctx, rawInput) {
   (resultado.jugadas || []).forEach(j => {
     (j.jugadas_detalle || []).forEach(d => allDetails.push(d));
   });
+  // Validación de límites
   const limites = await getLimitesGlobales(pref.loteria_id, pref.sorteo_id);
   const fechaHoy = new Date().toISOString().slice(0,10);
   const violacion = await validarLimitesAcumulativos(allDetails, pref.loteria_id, pref.sorteo_id, fechaHoy, limites);
   if (violacion) {
     return ctx.reply(`❌ Límite excedido para tipo "${violacion.tipo}". El número ${violacion.numero} ya acumula $${violacion.acumPrev.toFixed(2)} apostados. Máximo: $${violacion.limite.toFixed(2)}. Esta apuesta añade $${violacion.montoActual.toFixed(2)}.`);
+  } else {
+    console.log(`[LÍMITES] Validación superada. No hay violaciones.`);
   }
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
   if (user.saldo < totalApuesta) {
@@ -809,6 +810,15 @@ bot.command('start', async (ctx) => {
 bot.command('saldo', async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
   ctx.reply(`💰 Saldo actual: $${user.saldo.toFixed(2)}`);
+});
+
+bot.command('ver_limites', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.reply('⛔ Comando solo para administradores.');
+  const { data: limites, error } = await supabase.from('limits').select('*').is('loteria_id', null).is('sorteo_id', null);
+  if (error || !limites.length) return ctx.reply('No hay límites configurados. Usa /set_limit <tipo> <monto>');
+  let msg = '*Límites globales:*\n';
+  for (const l of limites) msg += `• ${l.tipo}: $${l.monto_maximo.toFixed(2)}\n`;
+  ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
 bot.command('set_limit', async (ctx) => {
