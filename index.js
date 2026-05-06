@@ -22,9 +22,8 @@ require('./lotopro-core.bundle.js');
 const { Engine, Preprocesador } = global;
 
 // ============================================================
-// 3. Funciones de limpieza y normalización (CORREGIDAS)
+// 3. Función limpiarMonto (manual)
 // ============================================================
-
 function limpiarMonto(s) {
   if (s == null) return null;
   let txt = String(s).replace(/\s+/g, '').replace(/\$/g, '');
@@ -39,6 +38,36 @@ function limpiarMonto(s) {
   return Number.isFinite(n) ? n : null;
 }
 
+// ============================================================
+// 4. Expansión de decenas y terminales (FUNCIÓN CLAVE)
+// ============================================================
+function expandirAbreviaturas(texto) {
+  // Expande d2 → 20 21 22 ... 29
+  let resultado = texto.replace(/\b[Dd](\d)\b/g, (match, digito) => {
+    const decena = parseInt(digito, 10);
+    const numeros = [];
+    for (let i = 0; i <= 9; i++) {
+      numeros.push(String(decena * 10 + i).padStart(2, '0'));
+    }
+    return numeros.join(' ');
+  });
+
+  // Expande t5 → 05 15 25 ... 95
+  resultado = resultado.replace(/\b[Tt](\d)\b/g, (match, digito) => {
+    const terminal = parseInt(digito, 10);
+    const numeros = [];
+    for (let i = 0; i <= 9; i++) {
+      numeros.push(String(i).padStart(2, '0') + terminal);
+    }
+    return numeros.join(' ');
+  });
+
+  return resultado;
+}
+
+// ============================================================
+// 5. Limpieza de metadatos de WhatsApp
+// ============================================================
 function stripWhatsAppMeta(line) {
   if (!line) return '';
   let cleaned = line.trim();
@@ -48,82 +77,15 @@ function stripWhatsAppMeta(line) {
   return cleaned.trim();
 }
 
-// ✨ CORREGIDA: ahora expande correctamente t5 → 03 13 23 ... 93
-function expandirDecenasTerminales(texto) {
-  let resultado = texto;
-  // Expandir decenas: d2 → 20 21 22 ... 29
-  resultado = resultado.replace(/\b[Dd](\d)\b/g, (match, digito) => {
-    const decena = parseInt(digito, 10);
-    const nums = [];
-    for (let i = 0; i <= 9; i++) {
-      nums.push(String(decena * 10 + i).padStart(2, '0'));
-    }
-    return nums.join(' ');
-  });
-  // Expandir terminales: t5 → 05 15 25 ... 95
-  // Nota: el terminal va de 0 a 9, se genera el número de dos dígitos con terminación fija
-  resultado = resultado.replace(/\b[Tt](\d)\b/g, (match, digito) => {
-    const terminal = parseInt(digito, 10);
-    const nums = [];
-    for (let i = 0; i <= 9; i++) {
-      nums.push(String(i).padStart(2, '0') + terminal);
-    }
-    return nums.join(' ');
-  });
-  return resultado;
-}
-
-// Normaliza sintaxis: * → x, "con X y Y" → dos líneas, "Parle" en línea aparte, etc.
-function normalizarSintaxis(texto) {
-  let lines = texto.split('\n');
-  let nuevas = [];
-  for (let i = 0; i < lines.length; i++) {
-    let line = lines[i].trim();
-    if (!line) continue;
-    // Reemplazar * por x (pares)
-    line = line.replace(/(\d+)\s*\*\s*(\d+)/g, '$1x$2');
-    // Dividir "con X y Y"
-    const matchConY = line.match(/^(.+?)\s+con\s+(\d+(?:\.\d+)?)\s+y\s+(\d+(?:\.\d+)?)$/i);
-    if (matchConY) {
-      const nums = matchConY[1];
-      const monto1 = matchConY[2];
-      const monto2 = matchConY[3];
-      nuevas.push(`${nums} con ${monto1}`);
-      nuevas.push(`${nums} corrido con ${monto2}`);
-      continue;
-    }
-    // "Parle" en línea aparte
-    if (line.toLowerCase() === 'parle' && i + 1 < lines.length) {
-      let nextLine = lines[i + 1].trim();
-      if (nextLine) {
-        nuevas.push(`parle ${nextLine}`);
-        i++;
-        continue;
-      }
-    }
-    // "parle N" → "parle con N"
-    line = line.replace(/\bparle\s+(\d+)/gi, 'parle con $1');
-    // "parejas con N" → lista completa 00 11 ... 99 parle con N
-    if (/\bparejas?\s+con\s+\d+/i.test(line)) {
-      const montoMatch = line.match(/\bparejas?\s+con\s+(\d+)/i);
-      if (montoMatch) {
-        const monto = montoMatch[1];
-        const pares = [];
-        for (let i = 0; i <= 9; i++) pares.push(String(i).repeat(2).padStart(2, '0'));
-        nuevas.push(`${pares.join(' ')} parle con ${monto}`);
-        continue;
-      }
-    }
-    nuevas.push(line);
-  }
-  return nuevas.join('\n');
-}
-
+// ============================================================
+// 6. Detección de nombres y reconstrucción de bloques
+// ============================================================
 function reconstruirBloquesConNombres(texto) {
   const lines = texto.split('\n');
-  let resultado = [];
+  const resultado = [];
   let nombreActual = null;
   let acumulador = [];
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) {
@@ -136,6 +98,7 @@ function reconstruirBloquesConNombres(texto) {
       }
       continue;
     }
+    // Detecta nombres: solo letras (con acentos), sin dígitos, y no es palabra reservada
     const esNombre = /^[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+$/.test(line) && !/\d/.test(line) && !/^(con|parle|candado|total|fijo|corrido|centena|parejas|terminal|decena|new|york|por|tarjeta)$/i.test(line);
     if (esNombre && nombreActual === null && acumulador.length === 0) {
       nombreActual = line;
@@ -151,7 +114,61 @@ function reconstruirBloquesConNombres(texto) {
 }
 
 // ============================================================
-// 4. Helpers: obtener o registrar usuario
+// 7. Normalización adicional (con X y Y, * → x, etc.)
+// ============================================================
+function normalizarSintaxis(texto) {
+  let lines = texto.split('\n');
+  let nuevas = [];
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i].trim();
+    if (!line) continue;
+
+    // * → x
+    line = line.replace(/(\d+)\s*\*\s*(\d+)/g, '$1x$2');
+
+    // con X y Y → dos líneas (fijo + corrido)
+    const matchConY = line.match(/^(.+?)\s+con\s+(\d+(?:\.\d+)?)\s+y\s+(\d+(?:\.\d+)?)$/i);
+    if (matchConY) {
+      const nums = matchConY[1];
+      const monto1 = matchConY[2];
+      const monto2 = matchConY[3];
+      nuevas.push(`${nums} con ${monto1}`);
+      nuevas.push(`${nums} corrido con ${monto2}`);
+      continue;
+    }
+
+    // "Parle" en línea propia
+    if (line.toLowerCase() === 'parle' && i + 1 < lines.length) {
+      const nextLine = lines[i + 1].trim();
+      if (nextLine) {
+        nuevas.push(`parle ${nextLine}`);
+        i++;
+        continue;
+      }
+    }
+
+    // "parle N" → "parle con N"
+    line = line.replace(/\bparle\s+(\d+)/gi, 'parle con $1');
+
+    // "parejas con N" → lista completa 00 11 ... 99 parle con N
+    if (/\bparejas?\s+con\s+\d+/i.test(line)) {
+      const montoMatch = line.match(/\bparejas?\s+con\s+(\d+)/i);
+      if (montoMatch) {
+        const monto = montoMatch[1];
+        const pares = [];
+        for (let i = 0; i <= 9; i++) pares.push(String(i).repeat(2).padStart(2, '0'));
+        nuevas.push(`${pares.join(' ')} parle con ${monto}`);
+        continue;
+      }
+    }
+
+    nuevas.push(line);
+  }
+  return nuevas.join('\n');
+}
+
+// ============================================================
+// 8. Helpers de base de datos
 // ============================================================
 async function getOrCreateUser(telegramId, username, firstName) {
   let { data: user, error } = await supabase
@@ -187,11 +204,7 @@ async function updateUserSaldo(telegramId, nuevoSaldo) {
     .from('users')
     .update({ saldo: nuevoSaldo, updated_at: new Date() })
     .eq('telegram_id', telegramId);
-
-  if (error) {
-    console.error('Error al actualizar saldo:', error);
-    throw error;
-  }
+  if (error) console.error('Error al actualizar saldo:', error);
 }
 
 async function saveBet(userTelegramId, inputRaw, totalApuesta, detalle, saldoAntes, saldoDespues) {
@@ -207,7 +220,7 @@ async function saveBet(userTelegramId, inputRaw, totalApuesta, detalle, saldoAnt
 }
 
 // ============================================================
-// 5. Verificar dependencias
+// 9. Verificar dependencias
 // ============================================================
 if (!Engine || !Preprocesador) {
   console.error('❌ Motor no cargado correctamente');
@@ -216,7 +229,7 @@ if (!Engine || !Preprocesador) {
 console.log('✅ Motor listo');
 
 // ============================================================
-// 6. Configuración del bot y Express
+// 10. Configuración del bot y Express
 // ============================================================
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -241,7 +254,7 @@ app.post(webhookPath, (req, res) => {
 });
 
 // ============================================================
-// 7. Comandos
+// 11. Comandos
 // ============================================================
 bot.start(async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
@@ -251,7 +264,8 @@ bot.start(async (ctx) => {
     `Envía una jugada en formato DSL para apostar.\n` +
     `Usa /deposito <monto> para recargar (solo pruebas).\n` +
     `Usa /saldo para consultar tu saldo.\n` +
-    `Usa /historial para ver tus últimas jugadas.`
+    `Usa /historial para ver tus últimas jugadas.\n` +
+    `Usa /test para probar la expansión de abreviaturas sin gastar saldo.`
   );
 });
 
@@ -286,8 +300,17 @@ bot.command('historial', async (ctx) => {
   ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
+// Comando de prueba (no gasta saldo)
+bot.command('test', async (ctx) => {
+  const args = ctx.message.text.split(' ');
+  if (args.length < 2) return ctx.reply('❌ Uso: /test <texto_con_abreviaturas> (ej: /test t5 con 10)');
+  const testText = args.slice(1).join(' ');
+  const expandido = expandirAbreviaturas(testText);
+  ctx.reply(`🔍 Texto original: ${testText}\n\n✅ Texto expandido:\n${expandido}`);
+});
+
 // ============================================================
-// 8. Procesamiento de mensajes (jugadas) con orden corregido
+// 12. Procesamiento de mensajes (jugadas) con orden CORREGIDO
 // ============================================================
 bot.on('text', async (ctx) => {
   if (ctx.message.text.startsWith('/')) return;
@@ -295,32 +318,34 @@ bot.on('text', async (ctx) => {
   let rawInput = ctx.message.text;
   if (!rawInput.trim()) return;
 
-  console.log(`📥 Entrada original:\n${rawInput}`);
+  console.log(`\n📥 [${ctx.from.id}] Entrada original:\n${rawInput}`);
 
+  // --- PREPROCESAMIENTO EN ORDEN ---
   // 1. Limpiar metadatos de WhatsApp
-  const lines = rawInput.split('\n');
-  const cleanedLines = lines.map(line => stripWhatsAppMeta(line)).filter(l => l.trim());
-  let cleanText = cleanedLines.join('\n');
+  let cleaned = rawInput.split('\n').map(line => stripWhatsAppMeta(line)).filter(l => l.trim()).join('\n');
+  console.log(`📥 Después de limpiar WhatsApp:\n${cleaned}`);
 
-  // 2. Reconstruir bloques con nombres
-  cleanText = reconstruirBloquesConNombres(cleanText);
+  // 2. Expandir dX y tX (¡LO MÁS IMPORTANTE!)
+  let expanded = expandirAbreviaturas(cleaned);
+  console.log(`📥 Después de expandir abreviaturas:\n${expanded}`);
 
-  // 3. Expandir decenas y terminales (¡ANTES de normalizar sintaxis!)
-  cleanText = expandirDecenasTerminales(cleanText);
+  // 3. Reconstruir bloques con nombres
+  let withNames = reconstruirBloquesConNombres(expanded);
+  console.log(`📥 Después de reconstruir nombres:\n${withNames}`);
 
-  // 4. Normalizar sintaxis (división de líneas, * → x, etc.)
-  cleanText = normalizarSintaxis(cleanText);
+  // 4. Normalizar sintaxis (con X y Y, * → x, etc.)
+  let normalized = normalizarSintaxis(withNames);
+  console.log(`📥 Después de normalizar sintaxis:\n${normalized}`);
 
   // 5. Convertir a minúsculas
-  cleanText = cleanText.toLowerCase();
+  let finalText = normalized.toLowerCase();
+  console.log(`📥 Texto FINAL que irá al motor:\n${finalText}`);
 
-  console.log(`📥 Texto preprocesado:\n${cleanText}`);
-
-  // 6. Llamar al motor
+  // --- LLAMADA AL MOTOR ---
   let resultado;
   try {
     resultado = Engine.calcular(
-      { rawInput: cleanText, loteriaId: 1, sorteoId: 1 },
+      { rawInput: finalText, loteriaId: 1, sorteoId: 1 },
       {
         limpiarMonto,
         Expansion: global.Expansion,
@@ -342,7 +367,7 @@ bot.on('text', async (ctx) => {
     return ctx.reply('❌ La jugada no tiene monto válido. Revisa la sintaxis.');
   }
 
-  // 7. Verificar saldo
+  // --- VERIFICAR SALDO Y APOSTAR ---
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
   if (user.saldo < totalApuesta) {
     return ctx.reply(
@@ -353,13 +378,12 @@ bot.on('text', async (ctx) => {
     );
   }
 
-  // 8. Deducir saldo y guardar
   const saldoAntes = user.saldo;
   const saldoDespues = saldoAntes - totalApuesta;
   await updateUserSaldo(ctx.from.id, saldoDespues);
   await saveBet(ctx.from.id, rawInput, totalApuesta, resultado.detalleTexto || '', saldoAntes, saldoDespues);
 
-  // 9. Formatear respuesta
+  // --- FORMATEAR RESPUESTA ---
   let respuesta = `💰 *Total apostado:* $${totalApuesta.toFixed(2)}\n`;
   respuesta += `💰 *Saldo restante:* $${saldoDespues.toFixed(2)}\n\n`;
 
@@ -402,6 +426,9 @@ bot.on('text', async (ctx) => {
   await ctx.reply(respuesta, { parse_mode: 'Markdown' });
 });
 
+// ============================================================
+// 13. Iniciar servidor
+// ============================================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor escuchando en puerto ${PORT}`);
