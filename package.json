@@ -1,7 +1,7 @@
 {
   "name": "telegram-bot-lotopro",
   "version": "1.0.0",
-  "description": "Bot de Telegram para apuestas con motor LotoPro, gestión de usuarios y saldos en MongoDB",
+  "description": "Bot de Telegram para apuestas con motor LotoPro, gestión de usuarios y saldos en Supabase",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -9,8 +9,8 @@
   "dependencies": {
     "express": "^4.18.2",
     "telegraf": "^4.12.2",
-    "mongoose": "^7.5.0"
+    "@supabase/supabase-js": "^2.39.0"
   },
-  "author": "Tu nombre o tu organización",
+  "author": "Tu nombre",
   "license": "MIT"
 }
