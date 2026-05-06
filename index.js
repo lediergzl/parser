@@ -296,8 +296,9 @@ const depositStates = new Map();
 // ================================ BOTONERA PRINCIPAL (USUARIO) ================================
 async function showMainMenu(ctx) {
   const pref = await getUserPreference(ctx.from.id);
+  const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
   let texto = '🏠 *Menú Principal*\n\n';
-  texto += `💰 *Saldo:* $${(await getOrCreateUser(ctx.from.id)).saldo.toFixed(2)}\n`;
+  texto += `💰 *Saldo:* $${user.saldo.toFixed(2)}\n`;
   if (pref && pref.loteria_id && pref.sorteo_id) {
     const { data: lot } = await supabase.from('loterias').select('nombre').eq('id', pref.loteria_id).single();
     const { data: sor } = await supabase.from('sorteos').select('nombre').eq('id', pref.sorteo_id).single();
@@ -360,13 +361,14 @@ bot.action(/sel_lot_(\d+)/, async (ctx) => {
 bot.action(/sel_sor_(\d+)/, async (ctx) => {
   const sorId = parseInt(ctx.match[1]);
   const { data: sorteo, error } = await supabase.from('sorteos').select('*, loterias!inner(nombre)').eq('id', sorId).single();
-  if (error) await ctx.answerCbQuery('Error al seleccionar sorteo');
-  else {
-    const pref = await getUserPreference(ctx.from.id) || {};
-    await saveUserPreference(ctx.from.id, sorteo.loteria_id, sorId, pref.moneda || 'cup');
-    await ctx.answerCbQuery(`Sorteo ${sorteo.nombre} seleccionado`);
-    await ctx.editMessageText(`✅ *Sorteo seleccionado:* ${sorteo.loterias.nombre} - ${sorteo.nombre}\n\nAhora puedes enviar tu jugada directamente.`, { parse_mode: 'Markdown' });
+  if (error) {
+    await ctx.answerCbQuery('Error al seleccionar sorteo');
+    return;
   }
+  const pref = await getUserPreference(ctx.from.id) || {};
+  await saveUserPreference(ctx.from.id, sorteo.loteria_id, sorId, pref.moneda || 'cup');
+  await ctx.answerCbQuery(`Sorteo ${sorteo.nombre} seleccionado`);
+  await ctx.editMessageText(`✅ *Sorteo seleccionado:* ${sorteo.loterias.nombre} - ${sorteo.nombre}\n\nAhora puedes enviar tu jugada directamente.`, { parse_mode: 'Markdown' });
 });
 
 // Menú de moneda
@@ -392,7 +394,7 @@ bot.action(/moneda_(cup|mlc|usd)/, async (ctx) => {
   await ctx.editMessageText(`✅ *Moneda seleccionada:* ${moneda.toUpperCase()}`);
 });
 
-// Menú de mis jugadas
+// Menú de mis jugadas (CORREGIDO)
 bot.action('menu_mis_jugadas', async (ctx) => {
   const pref = await getUserPreference(ctx.from.id);
   if (!pref?.sorteo_id) {
@@ -410,9 +412,14 @@ bot.action('menu_mis_jugadas', async (ctx) => {
     const status = editable ? '🟢' : '🔴';
     msg += `${status} *ID:* ${bet.id}\n💰 $${bet.total_apuesta.toFixed(2)}\n📝 ${bet.input_raw.substring(0, 80)}...\n\n`;
   }
-  const inlineButtons = bets.slice(0, 6).map(bet => [
-    { text: `${await isBetEditable(bet) ? '✏️' : '🔒'} Editar #${bet.id}`, callback_data: `edit_bet_${bet.id}` },
-    { text: `${await isBetEditable(bet) ? '❌' : '🔒'} Eliminar #${bet.id}`, callback_data: `del_bet_${bet.id}` }
+  // Corrección aquí: evitar `await` dentro del template literal
+  const betsWithEditable = await Promise.all(bets.slice(0, 6).map(async (bet) => {
+    const editable = await isBetEditable(bet);
+    return { ...bet, editable };
+  }));
+  const inlineButtons = betsWithEditable.map(bet => [
+    { text: `${bet.editable ? '✏️' : '🔒'} Editar #${bet.id}`, callback_data: `edit_bet_${bet.id}` },
+    { text: `${bet.editable ? '❌' : '🔒'} Eliminar #${bet.id}`, callback_data: `del_bet_${bet.id}` }
   ]).flat();
   const keyboard = {
     reply_markup: {
@@ -604,13 +611,10 @@ bot.action(/admin_aprob_(\d+)/, async (ctx) => {
     const { userId, amount, nuevoSaldo } = await approveDeposit(id, ctx.from.id);
     await ctx.answerCbQuery(`Depósito #${id} aprobado`);
     await ctx.editMessageText(`✅ Depósito #${id} aprobado. Usuario ${userId} recibe $${amount.toFixed(2)}. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`);
-    // Notificar al usuario
     try { await bot.telegram.sendMessage(userId, `✅ Tu depósito de $${amount.toFixed(2)} ha sido aprobado. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`); } catch(e) {}
-    // Volver al listado actualizado
     await bot.telegram.answerCbQuery(ctx.callbackQuery.id);
-    ctx.callbackQuery.message.editReplyMarkup = undefined;
     await ctx.deleteMessage();
-    await bot.telegram.sendMessage(ctx.chat.id, 'Lista actualizada', { reply_to_message_id: ctx.message.message_id });
+    await bot.telegram.sendMessage(ctx.chat.id, 'Lista actualizada');
   } catch (err) {
     await ctx.answerCbQuery(`Error: ${err.message}`);
   }
@@ -620,18 +624,15 @@ bot.action(/admin_rech_(\d+)/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const id = parseInt(ctx.match[1]);
   await ctx.answerCbQuery('Motivo del rechazo? (escribe en el chat)');
-  // Guardamos el id para procesar el texto siguiente
   ctx.session = ctx.session || {};
   ctx.session.rejectDepositId = id;
   await ctx.reply(`Escribe el motivo del rechazo para el depósito #${id}:`);
-  // Esperar respuesta de texto (se manejará en bot.on('text') con estado)
 });
 
 // Ver jugadas del día
 bot.action('admin_jugadas_hoy', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const hoy = new Date().toISOString().slice(0,10);
-  const pref = await getUserPreference(ctx.from.id); // no importa, listamos todas
   const { data: bets, error } = await supabase
     .from('bets')
     .select('*, users(first_name, username), sorteos(nombre)')
@@ -734,7 +735,6 @@ bot.on(['photo', 'document'], async (ctx) => {
     const deposit = await createDepositRequest(ctx.from.id, state.amount, state.method, fileId);
     depositStates.delete(ctx.from.id);
     await ctx.reply(`✅ Solicitud creada.\nID: ${deposit.id}\nMonto: $${deposit.amount}\nMétodo: ${deposit.payment_method}\nEl administrador revisará y aprobará.`);
-    // Notificar a admins
     for (const adminId of ADMIN_IDS) {
       try { await bot.telegram.sendMessage(adminId, `📥 Nueva solicitud #${deposit.id}\nUsuario: ${ctx.from.id}\nMonto: $${deposit.amount}`); } catch(e) {}
     }
