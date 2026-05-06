@@ -3,26 +3,24 @@ const { Telegraf } = require('telegraf');
 const { createClient } = require('@supabase/supabase-js');
 
 // ============================================================
-// 1. Configuración de Supabase
+// 1. SUPABASE
 // ============================================================
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
 if (!supabaseUrl || !supabaseKey) {
   console.error('❌ SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY no definidas');
   process.exit(1);
 }
-
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ============================================================
-// 2. Cargar el motor DSL (bundle)
+// 2. MOTOR DSL
 // ============================================================
 require('./lotopro-core.bundle.js');
 const { Engine, Preprocesador } = global;
 
 // ============================================================
-// 3. Función limpiarMonto (manual)
+// 3. LIMPIAR MONTO
 // ============================================================
 function limpiarMonto(s) {
   if (s == null) return null;
@@ -39,34 +37,7 @@ function limpiarMonto(s) {
 }
 
 // ============================================================
-// 4. Expansión de decenas y terminales (FUNCIÓN CLAVE)
-// ============================================================
-function expandirAbreviaturas(texto) {
-  // Expande d2 → 20 21 22 ... 29
-  let resultado = texto.replace(/\b[Dd](\d)\b/g, (match, digito) => {
-    const decena = parseInt(digito, 10);
-    const numeros = [];
-    for (let i = 0; i <= 9; i++) {
-      numeros.push(String(decena * 10 + i).padStart(2, '0'));
-    }
-    return numeros.join(' ');
-  });
-
-  // Expande t5 → 05 15 25 ... 95
-  resultado = resultado.replace(/\b[Tt](\d)\b/g, (match, digito) => {
-    const terminal = parseInt(digito, 10);
-    const numeros = [];
-    for (let i = 0; i <= 9; i++) {
-      numeros.push(String(i).padStart(2, '0') + terminal);
-    }
-    return numeros.join(' ');
-  });
-
-  return resultado;
-}
-
-// ============================================================
-// 5. Limpieza de metadatos de WhatsApp
+// 4. LIMPIEZA DE METADATOS WHATSAPP
 // ============================================================
 function stripWhatsAppMeta(line) {
   if (!line) return '';
@@ -78,43 +49,114 @@ function stripWhatsAppMeta(line) {
 }
 
 // ============================================================
-// 6. Detección de nombres y reconstrucción de bloques
+// 5. DETECCIÓN DE NOMBRES (NO se eliminan)
+// ============================================================
+function esPosibleNombre(linea) {
+  if (!linea) return false;
+  const trimmed = linea.trim();
+  // Debe tener al menos una letra, sin dígitos
+  if (!/[a-zA-ZáéíóúñÁÉÍÓÚÑ]/.test(trimmed)) return false;
+  if (/\d/.test(trimmed)) return false;
+  // Palabras reservadas del DSL no son nombres
+  const reservadas = ['con', 'parle', 'candado', 'total', 'fijo', 'corrido', 'centena', 'parejas', 'terminal', 'decena', 'new', 'york', 'por', 'tarjeta', 'las', 'los', 'y', 'el', 'la'];
+  const lower = trimmed.toLowerCase();
+  if (reservadas.includes(lower)) return false;
+  // Si tiene más de 3 palabras y contiene "de", "en", etc., probable no es nombre
+  const palabras = trimmed.split(/\s+/);
+  if (palabras.length > 3) return false;
+  return true;
+}
+
+// ============================================================
+// 6. EXPANSIÓN DE ABREVIATURAS (dX, tX)
+// ============================================================
+function expandirAbreviaturas(texto) {
+  let resultado = texto;
+  // d2 -> 20 21 22 ... 29
+  resultado = resultado.replace(/\b[Dd](\d)\b/g, (match, digito) => {
+    const decena = parseInt(digito, 10);
+    const nums = [];
+    for (let i = 0; i <= 9; i++) nums.push(String(decena * 10 + i).padStart(2, '0'));
+    return nums.join(' ');
+  });
+  // t5 -> 05 15 25 ... 95
+  resultado = resultado.replace(/\b[Tt](\d)\b/g, (match, digito) => {
+    const terminal = parseInt(digito, 10);
+    const nums = [];
+    for (let i = 0; i <= 9; i++) nums.push(String(i).padStart(2, '0') + terminal);
+    return nums.join(' ');
+  });
+  return resultado;
+}
+
+// ============================================================
+// 7. NORMALIZACIÓN DE SÍMBOLOS (🔒 → candado)
+// ============================================================
+function normalizarSimbolos(texto) {
+  return texto.replace(/🔒/g, ' candado ');
+}
+
+// ============================================================
+// 8. RECONSTRUCCIÓN DE BLOQUES (CONSERVA NOMBRES Y ORDEN)
 // ============================================================
 function reconstruirBloquesConNombres(texto) {
   const lines = texto.split('\n');
   const resultado = [];
-  let nombreActual = null;
-  let acumulador = [];
+  let bloqueActual = null;   // { nombre, lineasNumeros }
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
-    if (!line) {
-      if (acumulador.length) {
-        if (nombreActual) resultado.unshift(nombreActual);
-        resultado.push(...acumulador);
-        resultado.push('');
-        nombreActual = null;
-        acumulador = [];
+    if (line === '') {
+      // Línea vacía: separador entre bloques
+      if (bloqueActual && bloqueActual.lineasNumeros.length > 0) {
+        // Guardar bloque actual
+        if (bloqueActual.nombre) resultado.push(bloqueActual.nombre);
+        resultado.push(...bloqueActual.lineasNumeros);
+        resultado.push(''); // línea vacía separadora
+        bloqueActual = null;
       }
       continue;
     }
-    // Detecta nombres: solo letras (con acentos), sin dígitos, y no es palabra reservada
-    const esNombre = /^[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+$/.test(line) && !/\d/.test(line) && !/^(con|parle|candado|total|fijo|corrido|centena|parejas|terminal|decena|new|york|por|tarjeta)$/i.test(line);
-    if (esNombre && nombreActual === null && acumulador.length === 0) {
-      nombreActual = line;
+
+    // Determinar si la línea es un nombre o parte de la jugada
+    if (esPosibleNombre(line) && (bloqueActual === null || bloqueActual.lineasNumeros.length === 0)) {
+      // Es un nombre que inicia un nuevo bloque
+      if (bloqueActual && bloqueActual.lineasNumeros.length > 0) {
+        // Guardar bloque anterior
+        if (bloqueActual.nombre) resultado.push(bloqueActual.nombre);
+        resultado.push(...bloqueActual.lineasNumeros);
+        resultado.push('');
+        bloqueActual = null;
+      }
+      bloqueActual = { nombre: line, lineasNumeros: [] };
       continue;
     }
-    acumulador.push(line);
+
+    // Es una línea de jugada (contiene números o keywords)
+    if (/\d/.test(line) || /(con|parle|candado|total)/i.test(line)) {
+      if (!bloqueActual) {
+        // Sin nombre asignado, creamos bloque anónimo
+        bloqueActual = { nombre: null, lineasNumeros: [] };
+      }
+      bloqueActual.lineasNumeros.push(line);
+      continue;
+    }
+
+    // Cualquier otra línea (p.ej. metadata residual) la ignoramos
   }
-  if (acumulador.length) {
-    if (nombreActual) resultado.unshift(nombreActual);
-    resultado.push(...acumulador);
+
+  // Cerrar último bloque
+  if (bloqueActual && bloqueActual.lineasNumeros.length > 0) {
+    if (bloqueActual.nombre) resultado.push(bloqueActual.nombre);
+    resultado.push(...bloqueActual.lineasNumeros);
   }
+
+  // Unir líneas con saltos
   return resultado.join('\n');
 }
 
 // ============================================================
-// 7. Normalización adicional (con X y Y, * → x, etc.)
+// 9. NORMALIZACIÓN SINTÁCTICA (con X y Y, * → x, parejas, parle)
 // ============================================================
 function normalizarSintaxis(texto) {
   let lines = texto.split('\n');
@@ -123,10 +165,10 @@ function normalizarSintaxis(texto) {
     let line = lines[i].trim();
     if (!line) continue;
 
-    // * → x
+    // * -> x
     line = line.replace(/(\d+)\s*\*\s*(\d+)/g, '$1x$2');
 
-    // con X y Y → dos líneas (fijo + corrido)
+    // con X y Y -> dos líneas (fijo + corrido)
     const matchConY = line.match(/^(.+?)\s+con\s+(\d+(?:\.\d+)?)\s+y\s+(\d+(?:\.\d+)?)$/i);
     if (matchConY) {
       const nums = matchConY[1];
@@ -137,7 +179,7 @@ function normalizarSintaxis(texto) {
       continue;
     }
 
-    // "Parle" en línea propia
+    // "Parle" en línea propia + siguiente línea con pares
     if (line.toLowerCase() === 'parle' && i + 1 < lines.length) {
       const nextLine = lines[i + 1].trim();
       if (nextLine) {
@@ -147,10 +189,10 @@ function normalizarSintaxis(texto) {
       }
     }
 
-    // "parle N" → "parle con N"
+    // "parle N" -> "parle con N"
     line = line.replace(/\bparle\s+(\d+)/gi, 'parle con $1');
 
-    // "parejas con N" → lista completa 00 11 ... 99 parle con N
+    // "parejas con N" -> lista completa 00 11 ... 99 parle con N
     if (/\bparejas?\s+con\s+\d+/i.test(line)) {
       const montoMatch = line.match(/\bparejas?\s+con\s+(\d+)/i);
       if (montoMatch) {
@@ -168,7 +210,7 @@ function normalizarSintaxis(texto) {
 }
 
 // ============================================================
-// 8. Helpers de base de datos
+// 10. HELPERS DB
 // ============================================================
 async function getOrCreateUser(telegramId, username, firstName) {
   let { data: user, error } = await supabase
@@ -176,39 +218,25 @@ async function getOrCreateUser(telegramId, username, firstName) {
     .select('*')
     .eq('telegram_id', telegramId)
     .single();
-
-  if (error && error.code !== 'PGRST116') {
-    console.error('Error al buscar usuario:', error);
-    return null;
-  }
-
+  if (error && error.code !== 'PGRST116') return null;
   if (!user) {
     const { data: newUser, error: insertError } = await supabase
       .from('users')
       .insert([{ telegram_id: telegramId, username, first_name: firstName, saldo: 0 }])
       .select()
       .single();
-
-    if (insertError) {
-      console.error('Error al crear usuario:', insertError);
-      return null;
-    }
+    if (insertError) return null;
     user = newUser;
-    console.log(`🆕 Nuevo usuario registrado: ${telegramId} (${firstName || username})`);
   }
   return user;
 }
 
 async function updateUserSaldo(telegramId, nuevoSaldo) {
-  const { error } = await supabase
-    .from('users')
-    .update({ saldo: nuevoSaldo, updated_at: new Date() })
-    .eq('telegram_id', telegramId);
-  if (error) console.error('Error al actualizar saldo:', error);
+  await supabase.from('users').update({ saldo: nuevoSaldo, updated_at: new Date() }).eq('telegram_id', telegramId);
 }
 
 async function saveBet(userTelegramId, inputRaw, totalApuesta, detalle, saldoAntes, saldoDespues) {
-  const { error } = await supabase.from('bets').insert([{
+  await supabase.from('bets').insert([{
     user_telegram_id: userTelegramId,
     input_raw: inputRaw,
     total_apuesta: totalApuesta,
@@ -216,183 +244,131 @@ async function saveBet(userTelegramId, inputRaw, totalApuesta, detalle, saldoAnt
     saldo_antes: saldoAntes,
     saldo_despues: saldoDespues
   }]);
-  if (error) console.error('Error al guardar apuesta:', error);
 }
 
 // ============================================================
-// 9. Verificar dependencias
-// ============================================================
-if (!Engine || !Preprocesador) {
-  console.error('❌ Motor no cargado correctamente');
-  process.exit(1);
-}
-console.log('✅ Motor listo');
-
-// ============================================================
-// 10. Configuración del bot y Express
+// 11. CONFIGURAR BOT Y EXPRESS
 // ============================================================
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-if (!BOT_TOKEN) {
-  console.error('❌ TELEGRAM_BOT_TOKEN no definido');
-  process.exit(1);
-}
-
+if (!BOT_TOKEN) { console.error('❌ Token no definido'); process.exit(1); }
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
-app.use((req, res, next) => {
-  console.log(`📨 [${req.method}] ${req.path}`);
-  next();
-});
-
+app.use((req, res, next) => { console.log(`📨 [${req.method}] ${req.path}`); next(); });
 app.get('/ping', (req, res) => res.send('pong'));
-app.get('/', (req, res) => res.send('🤖 LotoPro Bot activo'));
+app.get('/', (req, res) => res.send('🤖 LotoPro Bot'));
 
 const webhookPath = '/webhook';
-app.post(webhookPath, (req, res) => {
-  bot.webhookCallback(webhookPath)(req, res);
-});
+app.post(webhookPath, (req, res) => { bot.webhookCallback(webhookPath)(req, res); });
 
-// ============================================================
-// 11. Comandos
-// ============================================================
+// Comandos
 bot.start(async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
-  ctx.reply(
-    `✅ Bienvenido ${ctx.from.first_name || 'usuario'}.\n` +
-    `💰 Tu saldo actual es: $${user.saldo.toFixed(2)}\n\n` +
-    `Envía una jugada en formato DSL para apostar.\n` +
-    `Usa /deposito <monto> para recargar (solo pruebas).\n` +
-    `Usa /saldo para consultar tu saldo.\n` +
-    `Usa /historial para ver tus últimas jugadas.\n` +
-    `Usa /test para probar la expansión de abreviaturas sin gastar saldo.`
-  );
+  ctx.reply(`✅ Bienvenido ${ctx.from.first_name}.\n💰 Saldo: $${user.saldo.toFixed(2)}\n\nEnvía una jugada.\n/deposito <monto>\n/saldo\n/historial\n/test <texto>`);
 });
-
 bot.command('saldo', async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
-  ctx.reply(`💰 Tu saldo actual es: $${user.saldo.toFixed(2)}`);
+  ctx.reply(`💰 Saldo: $${user.saldo.toFixed(2)}`);
 });
-
 bot.command('deposito', async (ctx) => {
   const args = ctx.message.text.split(' ');
-  if (args.length < 2) return ctx.reply('❌ Uso: /deposito <monto>');
+  if (args.length < 2) return ctx.reply('Uso: /deposito <monto>');
   const monto = parseFloat(args[1]);
-  if (isNaN(monto) || monto <= 0) return ctx.reply('❌ Monto inválido.');
+  if (isNaN(monto) || monto <= 0) return ctx.reply('Monto inválido');
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
-  const nuevoSaldo = user.saldo + monto;
-  await updateUserSaldo(ctx.from.id, nuevoSaldo);
-  ctx.reply(`✅ Se acreditaron $${monto.toFixed(2)}.\n💰 Nuevo saldo: $${nuevoSaldo.toFixed(2)}`);
+  const nuevo = user.saldo + monto;
+  await updateUserSaldo(ctx.from.id, nuevo);
+  ctx.reply(`✅ Depositado $${monto.toFixed(2)}. Nuevo saldo: $${nuevo.toFixed(2)}`);
 });
-
 bot.command('historial', async (ctx) => {
-  const { data: bets, error } = await supabase
-    .from('bets')
-    .select('*')
-    .eq('user_telegram_id', ctx.from.id)
-    .order('created_at', { ascending: false })
-    .limit(5);
-  if (error || !bets || !bets.length) return ctx.reply('📭 No tienes jugadas registradas aún.');
-  let msg = '📜 *Tus últimas 5 jugadas:*\n\n';
-  bets.forEach(b => {
-    msg += `💰 *Monto:* $${b.total_apuesta.toFixed(2)}\n📅 *Fecha:* ${new Date(b.created_at).toLocaleString()}\n📝 *Detalle:*\n${b.detalle?.substring(0, 200) || ''}${b.detalle?.length > 200 ? '…' : ''}\n\n`;
-  });
+  const { data: bets } = await supabase.from('bets').select('*').eq('user_telegram_id', ctx.from.id).order('created_at', { ascending: false }).limit(5);
+  if (!bets?.length) return ctx.reply('No hay jugadas.');
+  let msg = '📜 *Últimas 5 jugadas:*\n\n';
+  bets.forEach(b => { msg += `💰 $${b.total_apuesta.toFixed(2)} - ${new Date(b.created_at).toLocaleString()}\n${b.detalle?.substring(0,100)}…\n\n`; });
   ctx.reply(msg, { parse_mode: 'Markdown' });
 });
-
-// Comando de prueba (no gasta saldo)
 bot.command('test', async (ctx) => {
   const args = ctx.message.text.split(' ');
-  if (args.length < 2) return ctx.reply('❌ Uso: /test <texto_con_abreviaturas> (ej: /test t5 con 10)');
+  if (args.length < 2) return ctx.reply('Uso: /test <texto>');
   const testText = args.slice(1).join(' ');
   const expandido = expandirAbreviaturas(testText);
-  ctx.reply(`🔍 Texto original: ${testText}\n\n✅ Texto expandido:\n${expandido}`);
+  ctx.reply(`🔍 Original: ${testText}\n✅ Expandido: ${expandido}`);
 });
 
 // ============================================================
-// 12. Procesamiento de mensajes (jugadas) con orden CORREGIDO
+// 12. PROCESAMIENTO PRINCIPAL (PIPELINE CORREGIDO)
 // ============================================================
 bot.on('text', async (ctx) => {
   if (ctx.message.text.startsWith('/')) return;
+  let raw = ctx.message.text;
+  if (!raw.trim()) return;
 
-  let rawInput = ctx.message.text;
-  if (!rawInput.trim()) return;
+  console.log(`\n📥 [${ctx.from.id}] RAW:\n${raw}`);
 
-  console.log(`\n📥 [${ctx.from.id}] Entrada original:\n${rawInput}`);
+  // Paso 1: limpiar metadatos WhatsApp
+  let cleaned = raw.split('\n').map(l => stripWhatsAppMeta(l)).filter(l => l.trim()).join('\n');
+  console.log(`📥 Cleaned:\n${cleaned}`);
 
-  // --- PREPROCESAMIENTO EN ORDEN ---
-  // 1. Limpiar metadatos de WhatsApp
-  let cleaned = rawInput.split('\n').map(line => stripWhatsAppMeta(line)).filter(l => l.trim()).join('\n');
-  console.log(`📥 Después de limpiar WhatsApp:\n${cleaned}`);
+  // Paso 2: normalizar símbolos (🔒 → candado)
+  let withSymbols = normalizarSimbolos(cleaned);
+  console.log(`📥 After symbols:\n${withSymbols}`);
 
-  // 2. Expandir dX y tX (¡LO MÁS IMPORTANTE!)
-  let expanded = expandirAbreviaturas(cleaned);
-  console.log(`📥 Después de expandir abreviaturas:\n${expanded}`);
+  // Paso 3: expandir abreviaturas (dX, tX)
+  let expanded = expandirAbreviaturas(withSymbols);
+  console.log(`📥 Expanded:\n${expanded}`);
 
-  // 3. Reconstruir bloques con nombres
+  // Paso 4: reconstruir bloques conservando nombres y orden
   let withNames = reconstruirBloquesConNombres(expanded);
-  console.log(`📥 Después de reconstruir nombres:\n${withNames}`);
+  console.log(`📥 With names:\n${withNames}`);
 
-  // 4. Normalizar sintaxis (con X y Y, * → x, etc.)
+  // Paso 5: normalizar sintaxis (con X y Y, * → x, parle, parejas)
   let normalized = normalizarSintaxis(withNames);
-  console.log(`📥 Después de normalizar sintaxis:\n${normalized}`);
+  console.log(`📥 Normalized:\n${normalized}`);
 
-  // 5. Convertir a minúsculas
-  let finalText = normalized.toLowerCase();
-  console.log(`📥 Texto FINAL que irá al motor:\n${finalText}`);
+  // Paso 6: convertir a minúsculas para el motor
+  let final = normalized.toLowerCase();
+  console.log(`📥 FINAL:\n${final}`);
 
-  // --- LLAMADA AL MOTOR ---
-  let resultado;
+  // Llamar al motor
+  let result;
   try {
-    resultado = Engine.calcular(
-      { rawInput: finalText, loteriaId: 1, sorteoId: 1 },
-      {
-        limpiarMonto,
-        Expansion: global.Expansion,
-        preprocesarJugada: Preprocesador.preprocesarJugada,
-      }
+    result = Engine.calcular(
+      { rawInput: final, loteriaId: 1, sorteoId: 1 },
+      { limpiarMonto, Expansion: global.Expansion, preprocesarJugada: Preprocesador.preprocesarJugada }
     );
   } catch (err) {
-    console.error('🔥 Error en motor:', err);
-    return ctx.reply(`❌ Error interno del motor: ${err.message}`);
+    console.error(err);
+    return ctx.reply(`❌ Error interno: ${err.message}`);
   }
 
-  if (!resultado.ok) {
-    const errorMsg = resultado.errors?.map(e => e.message).join('\n') || resultado.message;
-    return ctx.reply(`❌ Error en la jugada:\n${errorMsg}`);
+  if (!result.ok) {
+    const errorMsg = result.errors?.map(e => e.message).join('\n') || result.message;
+    return ctx.reply(`❌ ${errorMsg}`);
   }
 
-  const totalApuesta = resultado.totalGeneral;
-  if (totalApuesta === 0) {
-    return ctx.reply('❌ La jugada no tiene monto válido. Revisa la sintaxis.');
-  }
+  const total = result.totalGeneral;
+  if (total === 0) return ctx.reply('❌ Monto cero. Revisa sintaxis.');
 
-  // --- VERIFICAR SALDO Y APOSTAR ---
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
-  if (user.saldo < totalApuesta) {
-    return ctx.reply(
-      `❌ Saldo insuficiente.\n` +
-      `💰 Necesitas: $${totalApuesta.toFixed(2)}\n` +
-      `💰 Tu saldo: $${user.saldo.toFixed(2)}\n` +
-      `Usa /deposito para recargar.`
-    );
+  if (user.saldo < total) {
+    return ctx.reply(`❌ Saldo insuficiente. Necesitas $${total.toFixed(2)}, tienes $${user.saldo.toFixed(2)}. Usa /deposito`);
   }
 
-  const saldoAntes = user.saldo;
-  const saldoDespues = saldoAntes - totalApuesta;
-  await updateUserSaldo(ctx.from.id, saldoDespues);
-  await saveBet(ctx.from.id, rawInput, totalApuesta, resultado.detalleTexto || '', saldoAntes, saldoDespues);
+  const antes = user.saldo;
+  const despues = antes - total;
+  await updateUserSaldo(ctx.from.id, despues);
+  await saveBet(ctx.from.id, raw, total, result.detalleTexto || '', antes, despues);
 
-  // --- FORMATEAR RESPUESTA ---
-  let respuesta = `💰 *Total apostado:* $${totalApuesta.toFixed(2)}\n`;
-  respuesta += `💰 *Saldo restante:* $${saldoDespues.toFixed(2)}\n\n`;
-
+  // Formateo de respuesta (sin duplicados)
+  let respuesta = `💰 *Total apostado:* $${total.toFixed(2)}\n💰 *Saldo restante:* $${despues.toFixed(2)}\n\n`;
   let bloqueActual = null;
   let lineasAgrupadas = [];
-  const linesOut = (resultado.detalleTexto || '').split('\n');
+
+  const linesOut = (result.detalleTexto || '').split('\n');
   for (let line of linesOut) {
     line = line.trim();
     if (!line) continue;
+
     const matchJugador = line.match(/^=== JUGADOR:\s*(.+?)\s*===/i);
     if (matchJugador) {
       if (bloqueActual) {
@@ -404,18 +380,22 @@ bot.on('text', async (ctx) => {
       bloqueActual = { nombre: matchJugador[1], total: 0 };
       continue;
     }
+
     const matchTipo = line.match(/^(Fijos|Corridos|Centena|Parle):\s*(.*)/i);
     if (matchTipo && bloqueActual) {
       lineasAgrupadas.push(`${matchTipo[1]}: ${matchTipo[2]}`);
       continue;
     }
+
     const matchTotal = line.match(/^TOTAL\s+(\S+):\s+([\d.]+)/i);
     if (matchTotal && bloqueActual) {
       bloqueActual.total = parseFloat(matchTotal[2]);
       continue;
     }
+
     if (bloqueActual) lineasAgrupadas.push(line);
   }
+
   if (bloqueActual) {
     respuesta += `*${bloqueActual.nombre}*\n`;
     for (const item of lineasAgrupadas) respuesta += `  ${item}\n`;
@@ -426,11 +406,5 @@ bot.on('text', async (ctx) => {
   await ctx.reply(respuesta, { parse_mode: 'Markdown' });
 });
 
-// ============================================================
-// 13. Iniciar servidor
-// ============================================================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor escuchando en puerto ${PORT}`);
-  console.log(`✅ Webhook en POST ${webhookPath}`);
-});
+app.listen(PORT, () => console.log(`🚀 Puerto ${PORT}, webhook ${webhookPath}`));
