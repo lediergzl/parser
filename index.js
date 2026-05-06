@@ -30,7 +30,7 @@ function expandirDecenasTerminales(texto) {
   let resultado = texto;
   resultado = resultado.replace(/\b[Dd](\d)\b/g, (match, digito) => {
     const decena = parseInt(digito, 10);
-    const nums = [];
+    const nums = []; 
     for (let i = 0; i <= 9; i++) nums.push(String(decena * 10 + i).padStart(2, '0'));
     return nums.join(' ');
   });
