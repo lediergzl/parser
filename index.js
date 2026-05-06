@@ -2,98 +2,151 @@ const express = require('express');
 const { Telegraf } = require('telegraf');
 
 // ============================================================
-// FUNCIÓN limpiarMonto (extraída de la lógica del bundle)
+// 1. Cargar el bundle del motor (expone globales)
 // ============================================================
-function limpiarMonto(s) {
-  if (s == null) return null;
-  let txt = String(s)
-    .replace(/\s+/g, '')   // eliminar espacios
-    .replace(/\$/g, '');   // eliminar símbolo de moneda
-  if (!txt) return null;
-  // Normalizar separador decimal: comas → puntos
-  txt = txt.replace(/,/g, '.');
-  // Si hay más de un punto, el último es el decimal
-  const dotCount = (txt.match(/\./g) || []).length;
-  if (dotCount > 1) {
-    const lastDot = txt.lastIndexOf('.');
-    txt = txt.slice(0, lastDot).replace(/\./g, '') + '.' + txt.slice(lastDot + 1);
-  }
-  const n = parseFloat(txt);
-  return Number.isFinite(n) ? n : null;
-}
+require('./lotopro-core.bundle.js');
 
-// ============================================================
-// Carga del motor (lotopro-core.bundle.js)
-// ============================================================
-try {
-  require('./lotopro-core.bundle.js');
-} catch (error) {
-  console.error("❌ Error al cargar 'lotopro-core.bundle.js':", error.message);
-  process.exit(1);
-}
+// Extraer las funciones que el motor necesita
+const { Engine, Expansion, Preprocesador, limpiarMonto } = global;
 
-const { Engine, Expansion } = global;
-
+// Verificar que todo esté presente
 if (!Engine || typeof Engine.calcular !== 'function') {
-  console.error("❌ Engine.calcular no está disponible");
+  console.error('❌ Engine.calcular no está disponible');
+  process.exit(1);
+}
+if (!Preprocesador || typeof Preprocesador.preprocesarJugada !== 'function') {
+  console.error('❌ Preprocesador.preprocesarJugada no está disponible');
   process.exit(1);
 }
 
 // ============================================================
-// Configuración de Telegram y Express
+// 2. Funciones de expansión opcionales (para más tolerancia)
+//    (puedes mantenerlas o no; el preprocesador ya hace mucho)
 // ============================================================
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-if (!TELEGRAM_BOT_TOKEN) {
-  console.error("❌ TELEGRAM_BOT_TOKEN no configurado en variables de entorno");
+function expandirParesConX(texto) {
+  // Convierte "28x82x14x41" en "28 82 14 41"
+  return texto.replace(/(\d+)\s*[xX]\s*(?=\d)/g, (match, p1) => p1 + ' ');
+}
+
+function expandirDecenasTerminales(texto) {
+  // Convierte D2 → 20 21 ... 29,  t3 → 03 13 ... 93
+  let resultado = texto;
+  resultado = resultado.replace(/\b[Dd](\d)\b/g, (match, digito) => {
+    const decena = parseInt(digito, 10);
+    const nums = [];
+    for (let i = 0; i <= 9; i++) {
+      nums.push(String(decena * 10 + i).padStart(2, '0'));
+    }
+    return nums.join(' ');
+  });
+  resultado = resultado.replace(/\b[Tt](\d)\b/g, (match, digito) => {
+    const terminal = parseInt(digito, 10);
+    const nums = [];
+    for (let i = 0; i <= 9; i++) {
+      nums.push(String(i * 10 + terminal).padStart(2, '0'));
+    }
+    return nums.join(' ');
+  });
+  return resultado;
+}
+
+// ============================================================
+// 3. Configuración de Telegram y Express
+// ============================================================
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+if (!BOT_TOKEN) {
+  console.error('❌ TELEGRAM_BOT_TOKEN no definido en variables de entorno');
   process.exit(1);
 }
 
-const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
+const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
-// Logging de todas las peticiones
+// Logging de todas las peticiones (útil para depurar)
 app.use((req, res, next) => {
   console.log(`📨 [${req.method}] ${req.path}`);
   next();
 });
 
-// Ruta de health check (para cron-job.org)
+// Ruta de salud para mantener el bot despierto (ping)
 app.get('/ping', (req, res) => res.send('pong'));
+app.get('/', (req, res) => res.send('🤖 Bot de loterías activo'));
 
-// Ruta raíz
-app.get('/', (req, res) => res.send('🤖 Bot de apuestas activo'));
-
-// Webhook (sin express.json() para no interferir)
+// Webhook: sin express.json() para no interferir con el callback de Telegraf
 const webhookPath = '/webhook';
 app.post(webhookPath, (req, res) => {
   bot.webhookCallback(webhookPath)(req, res);
 });
 
-// Comandos del bot
-bot.start((ctx) => ctx.reply('✅ Bot de apuestas activo. Envía una jugada en formato DSL.'));
-bot.help((ctx) => ctx.reply(`Ejemplo:
-\`\`\`
-23 45 con 10
-67 89 parle con 20
-\`\`\``, { parse_mode: 'Markdown' }));
+// ============================================================
+// 4. Comandos y mensajes del bot
+// ============================================================
+bot.start((ctx) => {
+  ctx.reply(
+    '✅ Bot de apuestas activo.\n\n' +
+    'Envía una jugada en formato DSL.\n' +
+    'Ejemplo:\n' +
+    '```\n' +
+    'Juana\n' +
+    '20 21 22 23 24 25 26 27 28 29 con 50\n' +
+    '20 21 22 23 24 25 26 27 28 29 corrido con 20\n' +
+    '20 21 22 23 24 25 26 27 28 29 candado con 2300\n' +
+    'Parejas d2 t3 4 5 parle con 5\n' +
+    '```',
+    { parse_mode: 'Markdown' }
+  );
+});
 
-// Procesamiento de mensajes
+bot.help((ctx) => {
+  ctx.reply(
+    'ℹ️ *Instrucciones*\n' +
+    '• Los números se separan por espacios.\n' +
+    '• Usa "con" para indicar el monto.\n' +
+    '• Para parlés: `nums parle con monto`\n' +
+    '• Para candados: `nums candado con monto`\n' +
+    '• Para centenas: `centenas con monto`\n' +
+    '• Para decenas/terminales: `d2` (20-29), `t3` (03,13,...,93)\n' +
+    '• Para pares con "x": `28x82x14x41 parle con 2`\n\n' +
+    'Ejemplo completo:\n' +
+    '```\n' +
+    'Juana\n' +
+    '20 21 22 23 24 25 26 27 28 29 con 50\n' +
+    'D2 corrido con 20\n' +
+    'D2 candado con 2300\n' +
+    'd2 t3 4 5 parle con 5\n' +
+    '```',
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// Procesamiento de mensajes de texto
 bot.on('text', async (ctx) => {
-  const rawInput = ctx.message.text;
+  let rawInput = ctx.message.text;
   if (!rawInput.trim()) return;
 
-  console.log(`⚙️ Procesando jugada de ${ctx.from.username || ctx.from.id}: ${rawInput}`);
+  console.log(`⚙️ Procesando jugada de ${ctx.from.username || ctx.from.id}: ${rawInput.slice(0, 100)}`);
+
+  // (Opcional) Expansiones adicionales para mayor comodidad
+  // Si ya usas D2, t3, etc., el preprocesador las maneja; pero estas funciones ayudan
+  // con notaciones como "28x82x14x41" y mayúsculas "D2".
+  rawInput = expandirParesConX(rawInput);
+  rawInput = expandirDecenasTerminales(rawInput);
+
+  // Parámetros fijos (lotería y sorteo por defecto, se pueden hacer dinámicos)
+  const loteriaId = 1;
+  const sorteoId = 1;
 
   try {
     const resultado = Engine.calcular(
       {
         rawInput,
-        loteriaId: 1,      // Ajusta según tu lógica
-        sorteoId: 1,       // Ajusta según tu lógica
+        loteriaId,
+        sorteoId,
       },
       {
-        limpiarMonto,      // Nuestra función personalizada
-        Expansion,
+        limpiarMonto,                // función de limpieza de montos
+        Expansion,                   // expansor de centenas, rangos, etc.
+        preprocesarJugada: Preprocesador.preprocesarJugada,  // ← CLAVE: el preprocesador completo
       }
     );
 
@@ -115,9 +168,11 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// Iniciar servidor
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`🚀 Servidor Express escuchando en el puerto ${port}`);
+// ============================================================
+// 5. Iniciar servidor Express
+// ============================================================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor Express escuchando en el puerto ${PORT}`);
   console.log(`✅ Webhook configurado en POST ${webhookPath}`);
 });
