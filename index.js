@@ -67,7 +67,10 @@ async function getOrCreateUser(telegramId, username, firstName) {
       .insert([{ telegram_id: telegramId, username, first_name: firstName, saldo: 0 }])
       .select()
       .single();
-    if (insertError) return null;
+    if (insertError) {
+      console.error('Error al crear usuario:', insertError);
+      return null;
+    }
     user = newUser;
     console.log(`🆕 Nuevo usuario: ${telegramId} (${firstName || username})`);
   }
@@ -161,7 +164,8 @@ async function getHorario(loteriaId, sorteoId) {
   return data;
 }
 
-async function validarLimites(tipoMontoMap, loteriaId, sorteoId) {
+// CORREGIDA: valida el monto unitario, no el total acumulado
+async function validarLimites(jugadasDetalle, loteriaId, sorteoId) {
   let query = supabase.from('limits').select('*');
   if (loteriaId && sorteoId) {
     query = query.or(`loteria_id.eq.${loteriaId},loteria_id.is.null`)
@@ -171,27 +175,27 @@ async function validarLimites(tipoMontoMap, loteriaId, sorteoId) {
   }
   const { data: limites } = await query;
   if (!limites) return null;
-  for (const [tipo, monto] of Object.entries(tipoMontoMap)) {
+
+  for (const detalle of jugadasDetalle) {
+    const tipo = detalle.tipo;
+    const montoUnitario = detalle.monto_unitario;
+    if (montoUnitario === undefined || montoUnitario === null) continue;
+
+    // Buscar límite para este tipo (coincidencia exacta de tipo)
     const limite = limites.find(l => l.tipo === tipo);
-    if (limite && monto > limite.monto_maximo) {
-      return { tipo, monto, maximo: limite.monto_maximo };
+    if (limite && montoUnitario > limite.monto_maximo) {
+      return { tipo, montoUnitario, maximo: limite.monto_maximo };
     }
   }
   return null;
 }
 
 // Función que calcula el premio para una apuesta dado el número ganador
-// Basado en la lógica del APK (fijo, corrido, centena, parle, candado)
 function calcularPremioParaApuesta(bet, numeroGanador, pagosConfig) {
   try {
-    // Parsear detalles de la apuesta (están en JSON en bet.detalle)
-    // Por simplicidad, asumimos que bet.detalle es un array o string JSON.
-    // En el APK real, se guarda el detalle estructurado. Aquí haremos una versión simplificada.
-    // Para producción, deberías guardar los detalles en un campo JSONB en la tabla bets.
     const detalles = typeof bet.detalle === 'string' ? JSON.parse(bet.detalle) : bet.detalle;
     if (!detalles || !detalles.length) return 0;
 
-    // Extraer los números del número ganador (centena, decenas, terminales, pares)
     const num = numeroGanador.toString().replace(/\s/g, '');
     const centena = num.length >= 3 ? num.slice(0, 3) : num.padStart(3, '0').slice(0, 3);
     const fijo = centena.slice(-2);
@@ -383,16 +387,36 @@ bot.command('pendientes', async (ctx) => {
 bot.command('set_limit', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const args = ctx.message.text.split(' ');
-  if (args.length < 3) return ctx.reply('Uso: /set_limit <tipo> <monto_maximo>');
+  if (args.length < 3) return ctx.reply('Uso: /set_limit <tipo> <monto_maximo_por_numero>');
   const tipo = args[1].toLowerCase();
   const monto = parseFloat(args[2]);
-  if (isNaN(monto) || monto <= 0) return ctx.reply('Monto inválido');
-  const { error } = await supabase.from('limits').upsert({
-    tipo, monto_maximo: monto, loteria_id: null, sorteo_id: null,
-    updated_at: new Date()
-  }, { onConflict: 'tipo,loteria_id,sorteo_id' });
-  if (error) return ctx.reply(`Error: ${error.message}`);
-  ctx.reply(`✅ Límite para ${tipo} establecido en $${monto.toFixed(2)} (global)`);
+  if (isNaN(monto) || monto <= 0) return ctx.reply('Monto inválido (debe ser número positivo).');
+
+  // Verificar si ya existe un límite global para este tipo
+  const { data: existing, error: findError } = await supabase
+    .from('limits')
+    .select('id')
+    .eq('tipo', tipo)
+    .is('loteria_id', null)
+    .is('sorteo_id', null)
+    .maybeSingle();
+
+  if (findError) return ctx.reply(`Error: ${findError.message}`);
+
+  if (existing) {
+    const { error: updateError } = await supabase
+      .from('limits')
+      .update({ monto_maximo: monto, updated_at: new Date() })
+      .eq('id', existing.id);
+    if (updateError) return ctx.reply(`Error: ${updateError.message}`);
+    ctx.reply(`✅ Límite para ${tipo} actualizado a $${monto.toFixed(2)} (máximo por número/combinación)`);
+  } else {
+    const { error: insertError } = await supabase
+      .from('limits')
+      .insert([{ tipo, monto_maximo: monto, loteria_id: null, sorteo_id: null, updated_at: new Date() }]);
+    if (insertError) return ctx.reply(`Error: ${insertError.message}`);
+    ctx.reply(`✅ Límite para ${tipo} establecido en $${monto.toFixed(2)} (máximo por número/combinación)`);
+  }
 });
 
 bot.command('set_horario', async (ctx) => {
@@ -437,7 +461,6 @@ bot.command('procesar_ganadores', async (ctx) => {
   const lot_id = parseInt(args[2]);
   const sor_id = parseInt(args[3]);
 
-  // Obtener resultado
   const { data: resultado, error: resErr } = await supabase
     .from('resultados')
     .select('*')
@@ -448,7 +471,6 @@ bot.command('procesar_ganadores', async (ctx) => {
   if (resErr || !resultado) return ctx.reply('No se encontró el resultado. Usa /set_resultado primero.');
   if (resultado.procesado) return ctx.reply('Este resultado ya fue procesado.');
 
-  // Obtener apuestas del sorteo
   const { data: apuestas, error: betErr } = await supabase
     .from('bets')
     .select('*')
@@ -457,10 +479,7 @@ bot.command('procesar_ganadores', async (ctx) => {
     .eq('fecha_apuesta', fecha);
   if (betErr) return ctx.reply(`Error al obtener apuestas: ${betErr.message}`);
 
-  // Obtener configuración de pagos (multiplicadores)
-  // Puedes cargar desde configuración o usar valores por defecto
   const pagos = { fijo: 80, corrido: 40, centena: 500, parle: 500, candado: 500 };
-
   let totalPremios = 0;
   let ganadores = [];
 
@@ -477,7 +496,6 @@ bot.command('procesar_ganadores', async (ctx) => {
         await updateUserSaldo(bet.user_telegram_id, nuevoSaldo);
         totalPremios += premio;
         ganadores.push({ user: bet.user_telegram_id, premio });
-        // Notificar al usuario
         try {
           await bot.telegram.sendMessage(bet.user_telegram_id, `🎉 ¡Felicidades! Ganaste $${premio.toFixed(2)} con tu apuesta del ${fecha}. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`);
         } catch(e) {}
@@ -485,9 +503,7 @@ bot.command('procesar_ganadores', async (ctx) => {
     }
   }
 
-  // Marcar resultado como procesado
   await supabase.from('resultados').update({ procesado: true }).eq('id', resultado.id);
-
   ctx.reply(`✅ Procesamiento completado.\nNúmero ganador: ${resultado.numero_ganador}\nTotal pagado: $${totalPremios.toFixed(2)}\nGanadores: ${ganadores.length}`);
 });
 
@@ -560,7 +576,7 @@ bot.on(['photo', 'document'], async (ctx) => {
 });
 
 // ============================================================
-// 11. Función principal de apuesta (con validaciones)
+// 11. Función principal de apuesta (con validaciones corregidas)
 // ============================================================
 async function processBet(ctx, rawInput) {
   if (!rawInput.trim()) return;
@@ -585,13 +601,13 @@ async function processBet(ctx, rawInput) {
 
   if (!resultado.ok) {
     const errorMsg = resultado.errors?.map(e => e.message).join('\n') || resultado.message;
-    return ctx.reply(`❌ Error: ${errorMsg}`);
+    return ctx.reply(`❌ Error en la jugada:\n${errorMsg}`);
   }
 
   const totalApuesta = resultado.totalGeneral;
   if (totalApuesta === 0) return ctx.reply('❌ La jugada no tiene monto válido.');
 
-  // Verificar horario del sorteo (asumiendo loteriaId=1, sorteoId=1)
+  // Verificar horario del sorteo (asumimos loteriaId=1, sorteoId=1)
   const hoy = new Date().toISOString().slice(0,10);
   const ahora = new Date();
   const horaActual = ahora.getHours().toString().padStart(2,'0') + ':' + ahora.getMinutes().toString().padStart(2,'0');
@@ -601,19 +617,18 @@ async function processBet(ctx, rawInput) {
     if (horaActual >= horario.cierre) return ctx.reply(`⏰ El sorteo cerró a las ${horario.cierre}.`);
   }
 
-  // Extraer tipos y montos para validar límites
-  const tipoMontoMap = {};
+  // ------------------------------
+  // Validación de límite CORREGIDA
+  // Extraemos TODOS los detalles de todas las jugadas y validamos monto unitario
+  const allDetails = [];
   (resultado.jugadas || []).forEach(j => {
     (j.jugadas_detalle || []).forEach(d => {
-      const tipo = d.tipo;
-      const monto = d.monto;
-      if (!tipoMontoMap[tipo]) tipoMontoMap[tipo] = 0;
-      tipoMontoMap[tipo] += monto;
+      allDetails.push(d);
     });
   });
-  const limiteExcedido = await validarLimites(tipoMontoMap, 1, 1);
+  const limiteExcedido = await validarLimites(allDetails, 1, 1);
   if (limiteExcedido) {
-    return ctx.reply(`❌ Límite excedido para tipo "${limiteExcedido.tipo}". Máximo: $${limiteExcedido.maximo.toFixed(2)}. Apostaste: $${limiteExcedido.monto.toFixed(2)}.`);
+    return ctx.reply(`❌ Límite excedido para tipo "${limiteExcedido.tipo}". Máximo por número/combinación: $${limiteExcedido.maximo.toFixed(2)}. Apostaste: $${limiteExcedido.montoUnitario.toFixed(2)} por número/combinación.`);
   }
 
   // Verificar saldo
@@ -626,7 +641,7 @@ async function processBet(ctx, rawInput) {
   const saldoAntes = user.saldo;
   const saldoDespues = saldoAntes - totalApuesta;
   await updateUserSaldo(ctx.from.id, saldoDespues);
-  await saveBet(ctx.from.id, 1, 1, hoy, rawInput, totalApuesta, JSON.stringify(resultado.jugadas_detalle || []), saldoAntes, saldoDespues);
+  await saveBet(ctx.from.id, 1, 1, hoy, rawInput, totalApuesta, JSON.stringify(allDetails), saldoAntes, saldoDespues);
 
   // Formatear respuesta
   let respuesta = `💰 *Total apostado:* $${totalApuesta.toFixed(2)}\n💰 *Saldo restante:* $${saldoDespues.toFixed(2)}\n\n`;
