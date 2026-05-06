@@ -129,9 +129,7 @@ async function rejectDeposit(requestId, adminId, reason = '') {
 }
 
 // ================================ LÍMITES ACUMULATIVOS POR NÚMERO ================================
-// Devuelve un mapa: { "numero": total_acentos_apostados_hasta_ahora }
 async function getAcumuladoPorNumero(loteriaId, sorteoId, fecha) {
-  // Obtener todas las apuestas del sorteo (sin la actual)
   const { data: bets, error } = await supabase
     .from('bets')
     .select('detalle')
@@ -139,7 +137,6 @@ async function getAcumuladoPorNumero(loteriaId, sorteoId, fecha) {
     .eq('sorteo_id', sorteoId)
     .eq('fecha_apuesta', fecha);
   if (error || !bets) return {};
-
   const acumulado = {};
   for (const bet of bets) {
     try {
@@ -158,17 +155,27 @@ async function getAcumuladoPorNumero(loteriaId, sorteoId, fecha) {
   return acumulado;
 }
 
-// Valida que ningún número de la nueva apuesta supere el límite acumulado
-async function validarLimitesAcumulativos(jugadasDetalle, loteriaId, sorteoId, fecha, limiteGlobalPorTipo) {
-  // Obtener acumulado previo
-  const acumulado = await getAcumuladoPorNumero(loteriaId, sorteoId, fecha);
+async function getLimitesGlobales(loteriaId, sorteoId) {
+  let query = supabase.from('limits').select('*');
+  if (loteriaId && sorteoId) {
+    query = query.or(`loteria_id.eq.${loteriaId},loteria_id.is.null`)
+                 .or(`sorteo_id.eq.${sorteoId},sorteo_id.is.null`);
+  } else {
+    query = query.is('loteria_id', null).is('sorteo_id', null);
+  }
+  const { data, error } = await query;
+  if (error || !data) return {};
+  const map = {};
+  for (const item of data) map[item.tipo] = item.monto_maximo;
+  return map;
+}
 
-  // Para cada detalle, por cada número, sumar el nuevo monto y comparar con límite
+async function validarLimitesAcumulativos(jugadasDetalle, loteriaId, sorteoId, fecha, limites) {
+  const acumulado = await getAcumuladoPorNumero(loteriaId, sorteoId, fecha);
   for (const detalle of jugadasDetalle) {
     const tipoBase = (detalle.tipo === 'candado' || detalle.tipo === 'candado_global') ? 'parle' : detalle.tipo;
-    const limite = limiteGlobalPorTipo[tipoBase];
-    if (!limite) continue; // sin límite configurado, omitir validación
-
+    const limite = limites[tipoBase];
+    if (!limite) continue;
     const montoUnitario = detalle.monto_unitario;
     if (!montoUnitario) continue;
     const numeros = detalle.numeros || [];
@@ -236,23 +243,129 @@ async function validarHorarioSorteo(sorteoId) {
   return { open: true };
 }
 
-// Obtener límites globales por tipo (para el comercial)
-async function getLimitesGlobales(loteriaId, sorteoId) {
-  let query = supabase.from('limits').select('*');
-  if (loteriaId && sorteoId) {
-    query = query.or(`loteria_id.eq.${loteriaId},loteria_id.is.null`)
-                 .or(`sorteo_id.eq.${sorteoId},sorteo_id.is.null`);
-  } else {
-    query = query.is('loteria_id', null).is('sorteo_id', null);
-  }
+// ==================== GESTIÓN DE JUGADAS (EDITAR, ELIMINAR) ====================
+async function getUserBets(telegramId, sorteoId = null, fecha = null) {
+  let query = supabase
+    .from('bets')
+    .select(`
+      *,
+      sorteos!inner (hora_cierre, nombre)
+    `)
+    .eq('user_telegram_id', telegramId)
+    .order('created_at', { ascending: false });
+  if (sorteoId) query = query.eq('sorteo_id', sorteoId);
+  if (fecha) query = query.eq('fecha_apuesta', fecha);
   const { data, error } = await query;
-  if (error || !data) return {};
-  const map = {};
-  for (const item of data) {
-    map[item.tipo] = item.monto_maximo;
-  }
-  return map;
+  if (error) return [];
+  return data;
 }
+
+async function isBetEditable(bet) {
+  const hoy = new Date().toISOString().slice(0,10);
+  if (bet.fecha_apuesta !== hoy) return false;
+  const ahora = new Date();
+  const horaActual = ahora.getHours().toString().padStart(2,'0') + ':' + ahora.getMinutes().toString().padStart(2,'0');
+  const { data: sorteo, error } = await supabase
+    .from('sorteos')
+    .select('hora_cierre')
+    .eq('id', bet.sorteo_id)
+    .single();
+  if (error || !sorteo) return false;
+  return horaActual < sorteo.hora_cierre;
+}
+
+bot.command('mis_jugadas', async (ctx) => {
+  const userId = ctx.from.id;
+  const pref = await getUserPreference(userId);
+  if (!pref || !pref.sorteo_id) {
+    return ctx.reply('Primero selecciona un sorteo con /loterias y /sorteos');
+  }
+  const bets = await getUserBets(userId, pref.sorteo_id, new Date().toISOString().slice(0,10));
+  if (!bets.length) {
+    return ctx.reply('No tienes jugadas registradas en el sorteo actual.');
+  }
+  let msg = '📋 *Tus jugadas de hoy:*\n\n';
+  for (const bet of bets) {
+    const editable = await isBetEditable(bet);
+    const status = editable ? '🟢' : '🔴';
+    msg += `${status} *ID:* ${bet.id}\n💰 *Monto:* $${bet.total_apuesta.toFixed(2)}\n📝 *Detalle:*\n${bet.input_raw.substring(0, 100)}...\n\n`;
+  }
+  msg += '\nSelecciona una acción:';
+  const inlineKeyboard = bets.map(bet => [
+    { text: `✏️ Editar #${bet.id}`, callback_data: `edit_bet_${bet.id}` },
+    { text: `❌ Eliminar #${bet.id}`, callback_data: `del_bet_${bet.id}` }
+  ]).flat();
+  const keyboard = { reply_markup: { inline_keyboard: inlineKeyboard.length ? [inlineKeyboard.slice(0, 8)] : [] } };
+  await ctx.reply(msg, { parse_mode: 'Markdown', ...keyboard });
+});
+
+bot.action(/edit_bet_(\d+)/, async (ctx) => {
+  const betId = parseInt(ctx.match[1]);
+  const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
+  if (error || !bet) {
+    await ctx.answerCbQuery('Jugada no encontrada');
+    return ctx.deleteMessage();
+  }
+  if (!(await isBetEditable(bet))) {
+    await ctx.answerCbQuery('⏰ El sorteo ya cerró, no se puede editar');
+    return;
+  }
+  // Cargar texto en el editor (esto es solo para usuario; el bot no modifica directamente)
+  await ctx.answerCbQuery('Jugada cargada en el editor. Modifícala y guarda normalmente.');
+  await ctx.reply(`✅ Jugada #${betId} cargada. Puedes modificarla y luego guardar (se creará una nueva; elimina la original si deseas reemplazarla).\n\nTexto original:\n\`\`\`\n${bet.input_raw}\n\`\`\``);
+});
+
+bot.action(/del_bet_(\d+)/, async (ctx) => {
+  const betId = parseInt(ctx.match[1]);
+  const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
+  if (error || !bet) {
+    await ctx.answerCbQuery('Jugada no encontrada');
+    return ctx.deleteMessage();
+  }
+  if (!(await isBetEditable(bet))) {
+    await ctx.answerCbQuery('⏰ El sorteo ya cerró, no se puede eliminar');
+    return;
+  }
+  const confirmKeyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '✅ Sí, eliminar', callback_data: `confirm_del_${betId}` }],
+        [{ text: '❌ Cancelar', callback_data: 'cancel_del' }]
+      ]
+    }
+  };
+  await ctx.editMessageText(`⚠️ ¿Eliminar jugada #${betId}?\nMonto: $${bet.total_apuesta.toFixed(2)}`, confirmKeyboard);
+});
+
+bot.action(/confirm_del_(\d+)/, async (ctx) => {
+  const betId = parseInt(ctx.match[1]);
+  const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
+  if (error || !bet) {
+    await ctx.answerCbQuery('Jugada no encontrada');
+    return ctx.deleteMessage();
+  }
+  if (!(await isBetEditable(bet))) {
+    await ctx.answerCbQuery('⏰ El sorteo ya cerró, no se puede eliminar');
+    return;
+  }
+  const { error: delError } = await supabase.from('bets').delete().eq('id', betId);
+  if (delError) {
+    await ctx.answerCbQuery('Error al eliminar');
+    return;
+  }
+  const { data: user, error: userError } = await supabase.from('users').select('saldo').eq('telegram_id', bet.user_telegram_id).single();
+  if (!userError) {
+    const nuevoSaldo = (user.saldo || 0) + bet.total_apuesta;
+    await updateUserSaldo(bet.user_telegram_id, nuevoSaldo);
+  }
+  await ctx.answerCbQuery('Jugada eliminada');
+  await ctx.editMessageText(`✅ Jugada #${betId} eliminada. Se reintegraron $${bet.total_apuesta.toFixed(2)} a tu saldo.`);
+});
+
+bot.action('cancel_del', async (ctx) => {
+  await ctx.answerCbQuery('Eliminación cancelada');
+  await ctx.deleteMessage();
+});
 
 // ================================ CONFIGURACIÓN DEL BOT ================================
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -266,12 +379,11 @@ const app = express();
 
 app.use((req, res, next) => { console.log(`📨 [${req.method}] ${req.path}`); next(); });
 app.get('/ping', (req, res) => res.send('pong'));
-app.get('/', (req, res) => res.send('🤖 LotoPro Bot - límites acumulativos'));
+app.get('/', (req, res) => res.send('🤖 LotoPro Bot completo'));
 
 const webhookPath = '/webhook';
 app.post(webhookPath, (req, res) => { bot.webhookCallback(webhookPath)(req, res); });
 
-// ================================ ESTADOS DEPÓSITOS ================================
 const depositStates = new Map();
 
 // ================================ COMANDOS PÚBLICOS ================================
@@ -286,8 +398,8 @@ bot.start(async (ctx) => {
   } else {
     msg += `⚠️ Selecciona lotería, sorteo y moneda:\n`;
   }
-  msg += `/loterias - elegir lotería\n/sorteos - elegir sorteo\n/moneda - elegir moneda\n/saldo\n/depositar\n/mis_depositos\n/historial\n\n`;
-  msg += `Ejemplo de jugada:\npepe\nt5 con 500\n\n(El límite por tipo se aplica acumulativamente por número)`;
+  msg += `/loterias - elegir lotería\n/sorteos - elegir sorteo\n/moneda - elegir moneda\n/saldo\n/depositar\n/mis_depositos\n/historial\n/mis_jugadas - ver y gestionar tus jugadas\n\n`;
+  msg += `Ejemplo de jugada:\npepe\nt5 con 500`;
   ctx.reply(msg);
 });
 
@@ -421,33 +533,15 @@ bot.command('set_limit', async (ctx) => {
   if (args.length < 3) return ctx.reply('Uso: /set_limit <tipo> <monto_maximo_por_numero> (tipos: fijo, corrido, parle, centena)');
   const tipo = args[1].toLowerCase();
   const monto = parseFloat(args[2]);
-  if (isNaN(monto) || monto <= 0) return ctx.reply('Monto inválido (debe ser número positivo).');
-
+  if (isNaN(monto) || monto <= 0) return ctx.reply('Monto inválido');
   const tiposPermitidos = ['fijo', 'corrido', 'parle', 'centena'];
   if (!tiposPermitidos.includes(tipo)) return ctx.reply(`Tipo inválido. Permitidos: ${tiposPermitidos.join(', ')}`);
-
-  const { data: existing, error: findError } = await supabase
-    .from('limits')
-    .select('id')
-    .eq('tipo', tipo)
-    .is('loteria_id', null)
-    .is('sorteo_id', null)
-    .maybeSingle();
-
-  if (findError) return ctx.reply(`Error: ${findError.message}`);
-
+  const { data: existing } = await supabase.from('limits').select('id').eq('tipo', tipo).is('loteria_id', null).is('sorteo_id', null).maybeSingle();
   if (existing) {
-    const { error: updateError } = await supabase
-      .from('limits')
-      .update({ monto_maximo: monto, updated_at: new Date() })
-      .eq('id', existing.id);
-    if (updateError) return ctx.reply(`Error: ${updateError.message}`);
+    await supabase.from('limits').update({ monto_maximo: monto, updated_at: new Date() }).eq('id', existing.id);
     ctx.reply(`✅ Límite para ${tipo} actualizado a $${monto.toFixed(2)} (acumulativo por número)`);
   } else {
-    const { error: insertError } = await supabase
-      .from('limits')
-      .insert([{ tipo, monto_maximo: monto, loteria_id: null, sorteo_id: null, updated_at: new Date() }]);
-    if (insertError) return ctx.reply(`Error: ${insertError.message}`);
+    await supabase.from('limits').insert([{ tipo, monto_maximo: monto, loteria_id: null, sorteo_id: null, updated_at: new Date() }]);
     ctx.reply(`✅ Límite para ${tipo} establecido en $${monto.toFixed(2)} (acumulativo por número)`);
   }
 });
@@ -500,10 +594,9 @@ bot.on(['photo', 'document'], async (ctx) => {
   }
 });
 
-// ================================ APUESTA PRINCIPAL ================================
+// ================================ FUNCIÓN PRINCIPAL DE APUESTA ================================
 async function processBet(ctx, rawInput) {
   if (!rawInput.trim() || rawInput.startsWith('/')) return;
-
   const pref = await getUserPreference(ctx.from.id);
   if (!pref || !pref.loteria_id || !pref.sorteo_id) {
     return ctx.reply('⚠️ Primero selecciona una lotería y un sorteo con /loterias y /sorteos.');
@@ -511,12 +604,9 @@ async function processBet(ctx, rawInput) {
   const moneda = pref.moneda || 'cup';
   const horario = await validarHorarioSorteo(pref.sorteo_id);
   if (!horario || !horario.open) return ctx.reply(horario?.message || 'Error de horario.');
-
   console.log(`📥 Apuesta de ${ctx.from.id}: ${rawInput.substring(0,200)}`);
-
   let processed = rawInput.toLowerCase();
   processed = preprocesarLineasMixtas(processed);
-
   let resultado;
   try {
     resultado = Engine.calcular(
@@ -527,44 +617,31 @@ async function processBet(ctx, rawInput) {
     console.error(err);
     return ctx.reply(`❌ Error interno: ${err.message}`);
   }
-
   if (!resultado.ok) {
     const errorMsg = resultado.errors?.map(e => e.message).join('\n') || resultado.message;
     return ctx.reply(`❌ Error en la jugada:\n${errorMsg}`);
   }
-
   const totalApuesta = resultado.totalGeneral;
   if (totalApuesta === 0) return ctx.reply('❌ La jugada no tiene monto válido.');
-
-  // Extraer todos los detalles de apuesta
   const allDetails = [];
   (resultado.jugadas || []).forEach(j => {
     (j.jugadas_detalle || []).forEach(d => allDetails.push(d));
   });
-
-  // Obtener límites globales por tipo
   const limites = await getLimitesGlobales(pref.loteria_id, pref.sorteo_id);
   const fechaHoy = new Date().toISOString().slice(0,10);
-
-  // Validación acumulativa por número
   const violacion = await validarLimitesAcumulativos(allDetails, pref.loteria_id, pref.sorteo_id, fechaHoy, limites);
   if (violacion) {
     return ctx.reply(`❌ Límite excedido para tipo "${violacion.tipo}". El número ${violacion.numero} ya acumula $${violacion.acumPrev.toFixed(2)} apostados. Máximo: $${violacion.limite.toFixed(2)}. Esta apuesta añade $${violacion.montoActual.toFixed(2)}.`);
   }
-
-  // Verificar saldo
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
   if (user.saldo < totalApuesta) {
     return ctx.reply(`❌ Saldo insuficiente. Necesitas $${totalApuesta.toFixed(2)} (${moneda.toUpperCase()}). Usa /depositar.`);
   }
-
   const saldoAntes = user.saldo;
   const saldoDespues = saldoAntes - totalApuesta;
   await updateUserSaldo(ctx.from.id, saldoDespues);
   await saveBet(ctx.from.id, pref.loteria_id, pref.sorteo_id, fechaHoy, rawInput, totalApuesta, JSON.stringify(allDetails), saldoAntes, saldoDespues, moneda);
-
-  let respuesta = `💰 *Total apostado:* $${totalApuesta.toFixed(2)} (${moneda.toUpperCase()})\n`;
-  respuesta += `💰 *Saldo restante:* $${saldoDespues.toFixed(2)}\n\n`;
+  let respuesta = `💰 *Total apostado:* $${totalApuesta.toFixed(2)} (${moneda.toUpperCase()})\n💰 *Saldo restante:* $${saldoDespues.toFixed(2)}\n\n`;
   if (resultado.detalleTexto) respuesta += resultado.detalleTexto;
   if (resultado.flaggedWarnings?.length) {
     respuesta += '\n⚠️ Revisiones pendientes:\n' + resultado.flaggedWarnings.map(w => `• ${w.message}`).join('\n');
