@@ -1,25 +1,60 @@
 const express = require('express');
 const { Telegraf } = require('telegraf');
 
-// Cargar tu motor lotopro-core.bundle.js
-// Asegúrate de que el archivo esté en la misma carpeta
-require('./lotopro-core.bundle.js');
+// --- Importación de tu motor lotopro-core ---
+// Asegúrate de que este archivo esté en la misma carpeta y se llame exactamente igual.
+try {
+  require('./lotopro-core.bundle.js');
+} catch (error) {
+  console.error("Error al cargar 'lotopro-core.bundle.js'. Verifica que el archivo exista.");
+  process.exit(1);
+}
 
 // Usa las funciones globales que expone el bundle
 const { Engine, limpiarMonto, Expansion } = global;
 
-// Token del bot (lo pones como variable de entorno en Render)
-const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+if (!Engine || typeof Engine.calcular !== 'function') {
+  console.error("Error: El motor 'lotopro-core.bundle.js' no se cargó correctamente o no expone 'Engine.calcular'.");
+  process.exit(1);
+}
+
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+if (!TELEGRAM_BOT_TOKEN) {
+  console.error("Error: La variable de entorno 'TELEGRAM_BOT_TOKEN' no está configurada.");
+  process.exit(1);
+}
+
+const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 const app = express();
-app.use(express.json());
 
-// Webhook endpoint (puedes cambiar la ruta)
-app.use(bot.webhookCallback('/webhook'));
+// ---- Middleware de LOG para depuración ----
+// Esto te permitirá ver en los logs de Render si Telegram está llegando a tu servidor.
+app.use((req, res, next) => {
+  console.log(`📨 Solicitud entrante: ${req.method} ${req.path}`);
+  next();
+});
 
-// Comando start
+// ---- Ruta de prueba para confirmar que el servicio está activo ----
+app.get('/ping', (req, res) => {
+  console.log("📡 Ping recibido");
+  res.send('pong');
+});
+
+// ---- WEBHOOK - Ruta que Telegram llamará ----
+const webhookPath = '/webhook';
+// `bot.webhookCallback` crea un middleware que procesa el update y le responde a Telegram.
+// Es *fundamental* usar `app.use` sin añadir `express.json()`, ya que el middleware lo maneja internamente.
+app.use(webhookPath, bot.webhookCallback(webhookPath));
+console.log(`✅ Middleware de webhook configurado en la ruta: ${webhookPath}`);
+
+// Puedes añadir más rutas si necesitas un frontend simple
+app.get('/', (req, res) => {
+  res.send('🤖 Bot de Apuestas LotoPro activo. El webhook está funcionando.');
+});
+
+// ---- Comandos del bot ----
 bot.start((ctx) => ctx.reply('✅ Bot de apuestas activo. Envíame una jugada en el formato DSL.'));
 
-// Procesar mensajes de texto
 bot.on('text', async (ctx) => {
   const rawInput = ctx.message.text;
   if (!rawInput.trim()) return;
@@ -52,8 +87,8 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// Ruta de salud (para mantener vivo el servicio con cron-job.org)
-app.get('/ping', (req, res) => res.send('pong'));
-
+// ---- Inicio del servidor Express ----
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Bot listening on port ${port}`));
+app.listen(port, () => {
+  console.log(`🚀 Servidor Express escuchando en el puerto ${port}`);
+});

@@ -3423,6 +3423,13 @@ function stripWhatsAppMeta(line) {
     ''
   );
 
+  // 1b. FORMATO SIN DOS PUNTOS: [5/5, 4:56 p. m.] Yode86
+  // Solo el bracket de fecha/hora, el nombre queda como contenido util.
+  cleaned = cleaned.replace(
+    /^\[\d{1,2}\/\d{1,2},?\s+\d{1,2}:\d{2}(?:\s*[ap]\.?\s*m\.?)?\]\s*/i,
+    ''
+  );
+
   // 2. FORMATO EXPORT WHATSAPP:
   // 5/5/26, 1:49 p. m. - Nombre: Mensaje
   cleaned = cleaned.replace(
@@ -3469,19 +3476,34 @@ function preprocesarJugada(rawInput) {
   for (let i = 0; i < lines.length; i++) {
     const _rawStripped = stripWhatsAppMeta(lines[i]);
 
-    // FIX BUG2: separar nombre de texto contextual en headers de WhatsApp.
-    // "[hora] +tel: Kirenia NY por tarjeta" → stripWhatsAppMeta → "Kirenia NY por tarjeta"
-    // que falla el scoring de nombre (>3 palabras, "por" → penalización -4 -5).
-    // Si el header era de WA y la primera palabra es capitalizada, emitirla sola como nombre;
-    // el resto se inserta como línea extra (se procesará en la siguiente iteración con score bajo).
+    // FIX BUG2: extraer nombre real de headers WA con contexto geográfico/descriptivo.
+    // Formato: "[hora] +tel: [nombre] [ciudad/contexto]"
+    // Estrategia: la primera palabra capitalizada es el nombre; todo lo posterior se descarta.
+    // Ejemplos:
+    //   "Kirenia NY por tarjeta" → "Kirenia"  (primera palabra, el resto es contexto)
+    //   "New york yasi"          → "yasi"     (última palabra — las anteriores son ciudad)
+    //   "Zuzel"                  → "Zuzel"    (1 sola palabra, sin cambio)
+    //
+    // Heurística: si existe una palabra funcional (por/de/con/para/a) en el texto,
+    // tomar todo lo que va ANTES de ella y quedarse con la última de esas palabras.
+    // Si no hay funcional, tomar la última palabra del conjunto.
     const _wasWAHeader = /^\[/.test(lines[i].trim()) ||
                          /^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(lines[i].trim());
     let line = _rawStripped;
     if (_wasWAHeader && _rawStripped && !/\d/.test(_rawStripped)) {
       const _words = _rawStripped.trim().split(/\s+/);
-      if (_words.length >= 2 && /^\p{Lu}/u.test(_words[0])) {
-        line = _words[0];                               // solo el nombre
-        lines.splice(i + 1, 0, _words.slice(1).join(' ')); // resto → próxima iteración
+      if (_words.length >= 2) {
+        // Encontrar índice de la primera palabra funcional
+        const _funcIdx = _words.findIndex(w => /^(por|de|con|para|a|al|y)$/i.test(w));
+        const _nameCandidates = _funcIdx > 0 ? _words.slice(0, _funcIdx) : _words;
+        // El nombre es la última palabra del grupo pre-funcional
+        // (ej: "New york yasi" sin funcional → "yasi"; "Kirenia NY por" → "Kirenia")
+        // Con funcional: "Kirenia NY por tarjeta" → candidates=["Kirenia","NY"] → primera = "Kirenia"
+        // Sin funcional: "New york yasi" → candidates=["New","york","yasi"] → última = "yasi"
+        const _namePick = _funcIdx > 0
+          ? _nameCandidates[0]
+          : _nameCandidates[_nameCandidates.length - 1];
+        line = _namePick;
       }
     }
 
