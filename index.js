@@ -2,9 +2,7 @@ const express = require('express');
 const { Telegraf } = require('telegraf');
 const { createClient } = require('@supabase/supabase-js');
 
-// ============================================================
-// 1. SUPABASE
-// ============================================================
+// ================================ SUPABASE =================================
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!supabaseUrl || !supabaseKey) {
@@ -13,15 +11,11 @@ if (!supabaseUrl || !supabaseKey) {
 }
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// ============================================================
-// 2. Cargar el motor DSL
-// ============================================================
+// ================================ MOTOR DSL ================================
 require('./lotopro-core.bundle.js');
 const { Engine, Preprocesador } = global;
 
-// ============================================================
-// 3. Funciones auxiliares (limpiarMonto, expansiones, etc.)
-// ============================================================
+// ================================ UTILIDADES ================================
 function limpiarMonto(s) {
   if (s == null) return null;
   let txt = String(s).replace(/\s+/g, '').replace(/\$/g, '');
@@ -51,9 +45,7 @@ function preprocesarLineasMixtas(texto) {
   return texto.split('\n').map(linea => expandirLineaMixta(linea.trim())).join('\n');
 }
 
-// ============================================================
-// 4. Helpers de base de datos
-// ============================================================
+// ================================ HELPERS BD ================================
 async function getOrCreateUser(telegramId, username, firstName) {
   let { data: user, error } = await supabase
     .from('users')
@@ -67,12 +59,8 @@ async function getOrCreateUser(telegramId, username, firstName) {
       .insert([{ telegram_id: telegramId, username, first_name: firstName, saldo: 0 }])
       .select()
       .single();
-    if (insertError) {
-      console.error('Error al crear usuario:', insertError);
-      return null;
-    }
+    if (insertError) return null;
     user = newUser;
-    console.log(`🆕 Nuevo usuario: ${telegramId} (${firstName || username})`);
   }
   return user;
 }
@@ -84,7 +72,7 @@ async function updateUserSaldo(telegramId, nuevoSaldo) {
     .eq('telegram_id', telegramId);
 }
 
-async function saveBet(userTelegramId, loteriaId, sorteoId, fecha, inputRaw, totalApuesta, detalle, saldoAntes, saldoDespues) {
+async function saveBet(userTelegramId, loteriaId, sorteoId, fecha, inputRaw, totalApuesta, detalle, saldoAntes, saldoDespues, moneda) {
   await supabase.from('bets').insert([{
     user_telegram_id: userTelegramId,
     loteria_id: loteriaId,
@@ -94,7 +82,8 @@ async function saveBet(userTelegramId, loteriaId, sorteoId, fecha, inputRaw, tot
     total_apuesta: totalApuesta,
     detalle: detalle,
     saldo_antes: saldoAntes,
-    saldo_despues: saldoDespues
+    saldo_despues: saldoDespues,
+    moneda: moneda || 'cup'
   }]);
 }
 
@@ -110,16 +99,6 @@ async function createDepositRequest(userTelegramId, amount, paymentMethod, proof
   return data;
 }
 
-async function getPendingDeposits() {
-  const { data, error } = await supabase
-    .from('deposit_requests')
-    .select('*, users!inner(telegram_id, username, first_name)')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true });
-  if (error) throw error;
-  return data;
-}
-
 async function approveDeposit(requestId, adminId) {
   const { data: req, error: fetchError } = await supabase
     .from('deposit_requests')
@@ -127,11 +106,10 @@ async function approveDeposit(requestId, adminId) {
     .eq('id', requestId)
     .single();
   if (fetchError || !req) throw new Error('Solicitud no encontrada');
-  const { error: updateError } = await supabase
+  await supabase
     .from('deposit_requests')
     .update({ status: 'approved', admin_notes: `Aprobado por ${adminId}`, updated_at: new Date() })
     .eq('id', requestId);
-  if (updateError) throw updateError;
   const { data: user, error: userError } = await supabase
     .from('users')
     .select('saldo')
@@ -150,22 +128,9 @@ async function rejectDeposit(requestId, adminId, reason = '') {
     .eq('id', requestId);
 }
 
-// ============================================================
-// 5. Funciones para límites, horarios y ganadores
-// ============================================================
-async function getHorario(loteriaId, sorteoId) {
-  const { data, error } = await supabase
-    .from('sorteo_hours')
-    .select('*')
-    .eq('loteria_id', loteriaId)
-    .eq('sorteo_id', sorteoId)
-    .single();
-  if (error) return null;
-  return data;
-}
-
-// CORREGIDA: valida el monto unitario, no el total acumulado
-async function validarLimites(jugadasDetalle, loteriaId, sorteoId) {
+// ================================ LÍMITES POR TIPO (SIN NÚMEROS INDIVIDUALES) ================================
+async function validarLimitesPorTipo(jugadasDetalle, loteriaId, sorteoId) {
+  // Obtener límites configurados (globales o por lotería/sorteo)
   let query = supabase.from('limits').select('*');
   if (loteriaId && sorteoId) {
     query = query.or(`loteria_id.eq.${loteriaId},loteria_id.is.null`)
@@ -178,101 +143,154 @@ async function validarLimites(jugadasDetalle, loteriaId, sorteoId) {
 
   for (const detalle of jugadasDetalle) {
     const tipo = detalle.tipo;
+    // Para candado, también usamos el tipo 'parle' (porque comparte límite)
+    const tipoBase = (tipo === 'candado' || tipo === 'candado_global') ? 'parle' : tipo;
     const montoUnitario = detalle.monto_unitario;
     if (montoUnitario === undefined || montoUnitario === null) continue;
 
-    // Buscar límite para este tipo (coincidencia exacta de tipo)
-    const limite = limites.find(l => l.tipo === tipo);
+    const limite = limites.find(l => l.tipo === tipoBase);
     if (limite && montoUnitario > limite.monto_maximo) {
-      return { tipo, montoUnitario, maximo: limite.monto_maximo };
+      return { tipo: tipoBase, montoUnitario, maximo: limite.monto_maximo };
     }
   }
   return null;
 }
 
-// Función que calcula el premio para una apuesta dado el número ganador
-function calcularPremioParaApuesta(bet, numeroGanador, pagosConfig) {
-  try {
-    const detalles = typeof bet.detalle === 'string' ? JSON.parse(bet.detalle) : bet.detalle;
-    if (!detalles || !detalles.length) return 0;
-
-    const num = numeroGanador.toString().replace(/\s/g, '');
-    const centena = num.length >= 3 ? num.slice(0, 3) : num.padStart(3, '0').slice(0, 3);
-    const fijo = centena.slice(-2);
-    const decena1 = num.length >= 5 ? num.slice(3, 5) : null;
-    const decena2 = num.length >= 7 ? num.slice(5, 7) : null;
-    const paresGanadores = [];
-    if (fijo && decena1) paresGanadores.push(fijo + decena1, decena1 + fijo);
-    if (fijo && decena2) paresGanadores.push(fijo + decena2, decena2 + fijo);
-    if (decena1 && decena2) paresGanadores.push(decena1 + decena2, decena2 + decena1);
-
-    let premioTotal = 0;
-
-    for (const det of detalles) {
-      const tipo = det.tipo;
-      const numeros = det.numeros || [];
-      const montoUnitario = det.monto_unitario || (det.monto / (numeros.length || 1));
-      const multiplicador = pagosConfig[tipo] || (tipo === 'fijo' ? 80 : tipo === 'corrido' ? 40 : tipo === 'centena' ? 500 : tipo === 'parle' ? 500 : 0);
-      let aciertos = 0;
-
-      if (tipo === 'fijo') {
-        aciertos = numeros.filter(n => n === fijo).length;
-      } else if (tipo === 'corrido') {
-        if (decena1) aciertos += numeros.filter(n => n === decena1).length;
-        if (decena2) aciertos += numeros.filter(n => n === decena2).length;
-      } else if (tipo === 'centena') {
-        aciertos = numeros.filter(n => n === centena).length;
-      } else if (tipo === 'parle' || tipo === 'candado') {
-        const combinaciones = det.combinaciones || det.pares || [];
-        aciertos = combinaciones.filter(c => paresGanadores.includes(c)).length;
-      }
-      if (aciertos > 0) {
-        premioTotal += aciertos * montoUnitario * multiplicador;
-      }
-    }
-    return premioTotal;
-  } catch (e) {
-    console.error('Error calculando premio:', e);
-    return 0;
-  }
+// ================================ CATÁLOGOS Y PREFERENCIAS ================================
+async function getLoterias() {
+  const { data, error } = await supabase.from('loterias').select('*').eq('activo', true).order('id');
+  if (error) throw error;
+  return data;
 }
 
-// ============================================================
-// 6. Configurar bot y Express
-// ============================================================
+async function getSorteos(loteriaId) {
+  const { data, error } = await supabase
+    .from('sorteos')
+    .select('*')
+    .eq('loteria_id', loteriaId)
+    .eq('activo', true)
+    .order('hora_apertura');
+  if (error) throw error;
+  return data;
+}
+
+async function getUserPreference(telegramId) {
+  const { data, error } = await supabase
+    .from('user_preferences')
+    .select('*')
+    .eq('telegram_id', telegramId)
+    .single();
+  if (error && error.code !== 'PGRST116') return null;
+  return data;
+}
+
+async function saveUserPreference(telegramId, loteriaId, sorteoId, moneda) {
+  await supabase
+    .from('user_preferences')
+    .upsert({
+      telegram_id: telegramId,
+      loteria_id: loteriaId,
+      sorteo_id: sorteoId,
+      moneda: moneda,
+      updated_at: new Date()
+    }, { onConflict: 'telegram_id' });
+}
+
+async function validarHorarioSorteo(sorteoId) {
+  const { data: sorteo, error } = await supabase
+    .from('sorteos')
+    .select('hora_apertura, hora_cierre')
+    .eq('id', sorteoId)
+    .single();
+  if (error || !sorteo) return null;
+  const ahora = new Date();
+  const horaActual = ahora.getHours().toString().padStart(2,'0') + ':' + ahora.getMinutes().toString().padStart(2,'0');
+  if (horaActual < sorteo.hora_apertura) return { open: false, message: `⏰ El sorteo abre a las ${sorteo.hora_apertura}.` };
+  if (horaActual >= sorteo.hora_cierre) return { open: false, message: `⏰ El sorteo cerró a las ${sorteo.hora_cierre}.` };
+  return { open: true };
+}
+
+// ================================ CONFIGURACIÓN DEL BOT ================================
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
   console.error('❌ Token no definido');
   process.exit(1);
 }
-
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
 app.use((req, res, next) => { console.log(`📨 [${req.method}] ${req.path}`); next(); });
 app.get('/ping', (req, res) => res.send('pong'));
-app.get('/', (req, res) => res.send('🤖 LotoPro Bot completo'));
+app.get('/', (req, res) => res.send('🤖 LotoPro Bot con límites por tipo'));
 
 const webhookPath = '/webhook';
 app.post(webhookPath, (req, res) => { bot.webhookCallback(webhookPath)(req, res); });
 
-// ============================================================
-// 7. Comandos públicos
-// ============================================================
+// ================================ ESTADOS DEPÓSITOS ================================
+const depositStates = new Map();
+
+// ================================ COMANDOS PÚBLICOS ================================
 bot.start(async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
-  ctx.reply(
-    `✅ Bienvenido ${ctx.from.first_name || 'usuario'}.\n` +
-    `💰 Saldo actual: $${user.saldo.toFixed(2)}\n\n` +
-    `Comandos:\n` +
-    `/saldo - ver saldo\n` +
-    `/depositar - solicitar recarga\n` +
-    `/mis_depositos - estado de solicitudes\n` +
-    `/historial - últimas 5 jugadas\n\n` +
-    `Ejemplo de jugada:\n` +
-    `Juana\nd2 con 50 y 20 candado con 2300\nparejas d2 t3 4 5 parle con 5`
-  );
+  const pref = await getUserPreference(ctx.from.id);
+  let msg = `✅ Bienvenido ${ctx.from.first_name || 'usuario'}.\n💰 Saldo: $${user.saldo.toFixed(2)}\n\n`;
+  if (pref) {
+    const { data: lot } = await supabase.from('loterias').select('nombre').eq('id', pref.loteria_id).single();
+    const { data: sor } = await supabase.from('sorteos').select('nombre').eq('id', pref.sorteo_id).single();
+    msg += `🎰 Configuración actual: ${lot?.nombre || '?'} / ${sor?.nombre || '?'}\n💵 Moneda: ${pref.moneda?.toUpperCase() || 'CUP'}\n\n`;
+  } else {
+    msg += `⚠️ Selecciona lotería, sorteo y moneda:\n`;
+  }
+  msg += `/loterias - elegir lotería\n/sorteos - elegir sorteo\n/moneda - elegir moneda\n/saldo\n/depositar\n/mis_depositos\n/historial\n\n`;
+  msg += `Ejemplo de jugada:\npepe\nt5 con 10\n\n(El límite por tipo se aplica al monto por número o combinación)`;
+  ctx.reply(msg);
+});
+
+bot.command('loterias', async (ctx) => {
+  const loterias = await getLoterias();
+  if (!loterias.length) return ctx.reply('No hay loterías activas.');
+  const keyboard = { reply_markup: { inline_keyboard: loterias.map(l => [{ text: l.nombre, callback_data: `sel_lot_${l.id}` }]) } };
+  ctx.reply('Selecciona una lotería:', keyboard);
+});
+
+bot.action(/sel_lot_(\d+)/, async (ctx) => {
+  const lotId = parseInt(ctx.match[1]);
+  const pref = await getUserPreference(ctx.from.id) || {};
+  await saveUserPreference(ctx.from.id, lotId, pref.sorteo_id || null, pref.moneda || 'cup');
+  await ctx.answerCbQuery(`Lotería seleccionada. Ahora usa /sorteos.`);
+  ctx.editMessageText(`✅ Lotería seleccionada. Ahora usa /sorteos para elegir el sorteo.`);
+});
+
+bot.command('sorteos', async (ctx) => {
+  const pref = await getUserPreference(ctx.from.id);
+  if (!pref || !pref.loteria_id) return ctx.reply('Primero selecciona una lotería con /loterias');
+  const sorteos = await getSorteos(pref.loteria_id);
+  if (!sorteos.length) return ctx.reply('No hay sorteos activos.');
+  const keyboard = { reply_markup: { inline_keyboard: sorteos.map(s => [{ text: `${s.nombre} (${s.hora_apertura} - ${s.hora_cierre})`, callback_data: `sel_sor_${s.id}` }]) } };
+  ctx.reply('Selecciona un sorteo:', keyboard);
+});
+
+bot.action(/sel_sor_(\d+)/, async (ctx) => {
+  const sorId = parseInt(ctx.match[1]);
+  const pref = await getUserPreference(ctx.from.id);
+  if (!pref) return ctx.answerCbQuery('Primero selecciona lotería', true);
+  await saveUserPreference(ctx.from.id, pref.loteria_id, sorId, pref.moneda || 'cup');
+  await ctx.answerCbQuery(`Sorteo seleccionado.`);
+  ctx.editMessageText(`✅ Sorteo seleccionado. Ya puedes enviar tu jugada.`);
+});
+
+bot.command('moneda', async (ctx) => {
+  const keyboard = { reply_markup: { inline_keyboard: [[{ text: '🇨🇺 CUP', callback_data: 'moneda_cup' }],[{ text: '💳 MLC', callback_data: 'moneda_mlc' }],[{ text: '🇺🇸 USD', callback_data: 'moneda_usd' }]] } };
+  ctx.reply('Selecciona la moneda:', keyboard);
+});
+
+bot.action(/moneda_(cup|mlc|usd)/, async (ctx) => {
+  const moneda = ctx.match[1];
+  const pref = await getUserPreference(ctx.from.id);
+  await saveUserPreference(ctx.from.id, pref?.loteria_id || null, pref?.sorteo_id || null, moneda);
+  await ctx.answerCbQuery(`Moneda ${moneda.toUpperCase()} seleccionada.`);
+  ctx.editMessageText(`✅ Moneda ${moneda.toUpperCase()} seleccionada.`);
 });
 
 bot.command('saldo', async (ctx) => {
@@ -281,59 +299,34 @@ bot.command('saldo', async (ctx) => {
 });
 
 bot.command('depositar', async (ctx) => {
-  if (depositStates.has(ctx.from.id)) depositStates.delete(ctx.from.id);
   depositStates.set(ctx.from.id, { step: 'method' });
-  const keyboard = {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '💳 Tarjeta', callback_data: 'dep_method_tarjeta' }],
-        [{ text: '🏦 Transferencia', callback_data: 'dep_method_transferencia' }],
-        [{ text: '📱 Monedero', callback_data: 'dep_method_monedero' }]
-      ]
-    }
-  };
+  const keyboard = { reply_markup: { inline_keyboard: [[{ text: '💳 Tarjeta', callback_data: 'dep_method_tarjeta' }],[{ text: '🏦 Transferencia', callback_data: 'dep_method_transferencia' }],[{ text: '📱 Monedero', callback_data: 'dep_method_monedero' }]] } };
   await ctx.reply('Selecciona método de pago:', keyboard);
 });
 
 bot.command('mis_depositos', async (ctx) => {
-  const { data: requests, error } = await supabase
-    .from('deposit_requests')
-    .select('*')
-    .eq('user_telegram_id', ctx.from.id)
-    .order('created_at', { ascending: false });
-  if (error || !requests.length) return ctx.reply('No hay solicitudes.');
+  const { data: requests } = await supabase.from('deposit_requests').select('*').eq('user_telegram_id', ctx.from.id).order('created_at', { ascending: false });
+  if (!requests?.length) return ctx.reply('No hay solicitudes.');
   let msg = '📋 *Tus solicitudes de depósito:*\n\n';
   for (const r of requests) {
     const statusEmoji = r.status === 'pending' ? '⏳' : (r.status === 'approved' ? '✅' : '❌');
-    msg += `${statusEmoji} *${r.status.toUpperCase()}* - $${r.amount.toFixed(2)} (${r.payment_method})\n`;
-    msg += `ID: ${r.id} - ${new Date(r.created_at).toLocaleString()}\n`;
-    if (r.admin_notes) msg += `Nota: ${r.admin_notes}\n\n`;
+    msg += `${statusEmoji} *${r.status.toUpperCase()}* - $${r.amount.toFixed(2)} (${r.payment_method})\nID: ${r.id} - ${new Date(r.created_at).toLocaleString()}\n${r.admin_notes ? `Nota: ${r.admin_notes}\n` : ''}\n`;
   }
   ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
 bot.command('historial', async (ctx) => {
-  const { data: bets, error } = await supabase
-    .from('bets')
-    .select('*')
-    .eq('user_telegram_id', ctx.from.id)
-    .order('created_at', { ascending: false })
-    .limit(5);
-  if (error || !bets || !bets.length) return ctx.reply('No hay jugadas.');
+  const { data: bets } = await supabase.from('bets').select('*').eq('user_telegram_id', ctx.from.id).order('created_at', { ascending: false }).limit(5);
+  if (!bets?.length) return ctx.reply('No hay jugadas.');
   let msg = '📜 *Últimas 5 jugadas:*\n\n';
   bets.forEach(b => {
-    msg += `💰 $${b.total_apuesta.toFixed(2)} - ${new Date(b.created_at).toLocaleString()}\n`;
-    msg += `📝 ${b.detalle?.substring(0, 150)}…\n\n`;
+    msg += `💰 $${b.total_apuesta.toFixed(2)} - ${new Date(b.created_at).toLocaleString()}\n📝 ${b.detalle?.substring(0, 150)}…\n\n`;
   });
   ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
-// ============================================================
-// 8. Comandos de administrador
-// ============================================================
-function isAdmin(userId) {
-  return ADMIN_IDS.includes(userId);
-}
+// ================================ COMANDOS ADMIN ================================
+function isAdmin(userId) { return ADMIN_IDS.includes(userId); }
 
 bot.command('aprobar', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply('⛔ Solo administradores.');
@@ -344,12 +337,8 @@ bot.command('aprobar', async (ctx) => {
   try {
     const { userId, amount, nuevoSaldo } = await approveDeposit(id, ctx.from.id);
     await ctx.reply(`✅ Depósito aprobado. $${amount.toFixed(2)} a usuario ${userId}. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`);
-    try {
-      await bot.telegram.sendMessage(userId, `✅ Tu depósito de $${amount.toFixed(2)} fue aprobado. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`);
-    } catch (e) {}
-  } catch (err) {
-    ctx.reply(`❌ Error: ${err.message}`);
-  }
+    try { await bot.telegram.sendMessage(userId, `✅ Tu depósito de $${amount.toFixed(2)} fue aprobado. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`); } catch(e) {}
+  } catch (err) { ctx.reply(`❌ Error: ${err.message}`); }
 });
 
 bot.command('rechazar', async (ctx) => {
@@ -364,35 +353,38 @@ bot.command('rechazar', async (ctx) => {
     const { data: req } = await supabase.from('deposit_requests').select('user_telegram_id').eq('id', id).single();
     if (req) await bot.telegram.sendMessage(req.user_telegram_id, `❌ Tu depósito fue rechazado. Motivo: ${reason}`);
     ctx.reply(`✅ Depósito ${id} rechazado.`);
-  } catch (err) {
-    ctx.reply(`❌ Error: ${err.message}`);
-  }
+  } catch (err) { ctx.reply(`❌ Error: ${err.message}`); }
 });
 
 bot.command('pendientes', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply('⛔ Solo administradores.');
-  try {
-    const pendings = await getPendingDeposits();
-    if (!pendings.length) return ctx.reply('No hay solicitudes pendientes.');
-    let msg = '📋 *Solicitudes pendientes:*\n\n';
-    for (const p of pendings) {
-      msg += `ID: ${p.id}\nUsuario: ${p.users.first_name || p.users.username || p.users.telegram_id} (${p.users.telegram_id})\nMonto: $${p.amount.toFixed(2)}\nMétodo: ${p.payment_method}\nComprobante: <a href="https://t.me/file/${p.proof_file_id}">Ver</a>\nFecha: ${new Date(p.created_at).toLocaleString()}\n\nAprobar: /aprobar ${p.id}\nRechazar: /rechazar ${p.id}\n\n`;
-    }
-    ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
-  } catch (err) {
-    ctx.reply(`❌ Error: ${err.message}`);
+  const { data: pendings, error } = await supabase
+    .from('deposit_requests')
+    .select('*, users!inner(telegram_id, username, first_name)')
+    .eq('status', 'pending')
+    .order('created_at');
+  if (error || !pendings.length) return ctx.reply('No hay solicitudes pendientes.');
+  let msg = '📋 *Solicitudes pendientes:*\n\n';
+  for (const p of pendings) {
+    msg += `ID: ${p.id}\nUsuario: ${p.users.first_name || p.users.username || p.users.telegram_id} (${p.users.telegram_id})\nMonto: $${p.amount.toFixed(2)}\nMétodo: ${p.payment_method}\nComprobante: <a href="https://t.me/file/${p.proof_file_id}">Ver</a>\nFecha: ${new Date(p.created_at).toLocaleString()}\n\nAprobar: /aprobar ${p.id}\nRechazar: /rechazar ${p.id}\n\n`;
   }
+  ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
 });
 
+// Comando para establecer límite por tipo (admin)
 bot.command('set_limit', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const args = ctx.message.text.split(' ');
-  if (args.length < 3) return ctx.reply('Uso: /set_limit <tipo> <monto_maximo_por_numero>');
+  if (args.length < 3) return ctx.reply('Uso: /set_limit <tipo> <monto_maximo_por_numero> (tipos: fijo, corrido, parle, centena)');
   const tipo = args[1].toLowerCase();
   const monto = parseFloat(args[2]);
   if (isNaN(monto) || monto <= 0) return ctx.reply('Monto inválido (debe ser número positivo).');
 
-  // Verificar si ya existe un límite global para este tipo
+  // Validar tipo permitido
+  const tiposPermitidos = ['fijo', 'corrido', 'parle', 'centena'];
+  if (!tiposPermitidos.includes(tipo)) return ctx.reply(`Tipo inválido. Permitidos: ${tiposPermitidos.join(', ')}`);
+
+  // Buscar si ya existe límite global para este tipo
   const { data: existing, error: findError } = await supabase
     .from('limits')
     .select('id')
@@ -419,99 +411,7 @@ bot.command('set_limit', async (ctx) => {
   }
 });
 
-bot.command('set_horario', async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return;
-  const args = ctx.message.text.split(' ');
-  if (args.length < 5) return ctx.reply('Uso: /set_horario <loteria_id> <sorteo_id> <apertura> <cierre> (HH:MM)');
-  const lot_id = parseInt(args[1]);
-  const sor_id = parseInt(args[2]);
-  const apertura = args[3];
-  const cierre = args[4];
-  if (!/^\d{2}:\d{2}$/.test(apertura) || !/^\d{2}:\d{2}$/.test(cierre))
-    return ctx.reply('Formato de hora inválido (HH:MM)');
-  const { error } = await supabase.from('sorteo_hours').upsert({
-    loteria_id: lot_id, sorteo_id: sor_id, apertura, cierre,
-    updated_at: new Date()
-  }, { onConflict: 'loteria_id,sorteo_id' });
-  if (error) return ctx.reply(`Error: ${error.message}`);
-  ctx.reply(`✅ Horario configurado: lotería ${lot_id} sorteo ${sor_id} apertura ${apertura} cierre ${cierre}`);
-});
-
-bot.command('set_resultado', async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return;
-  const args = ctx.message.text.split(' ');
-  if (args.length < 6) return ctx.reply('Uso: /set_resultado <loteria_id> <sorteo_id> <fecha> <numero>');
-  const lot_id = parseInt(args[1]);
-  const sor_id = parseInt(args[2]);
-  const fecha = args[3];
-  const numero = args[4];
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return ctx.reply('Fecha inválida (YYYY-MM-DD)');
-  const { error } = await supabase.from('resultados').insert({
-    loteria_id: lot_id, sorteo_id: sor_id, fecha, numero_ganador: numero, procesado: false
-  });
-  if (error) return ctx.reply(`Error: ${error.message}`);
-  ctx.reply(`✅ Resultado guardado. Luego ejecuta /procesar_ganadores ${fecha} ${lot_id} ${sor_id} para pagar.`);
-});
-
-bot.command('procesar_ganadores', async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return;
-  const args = ctx.message.text.split(' ');
-  if (args.length < 4) return ctx.reply('Uso: /procesar_ganadores <fecha> <loteria_id> <sorteo_id>');
-  const fecha = args[1];
-  const lot_id = parseInt(args[2]);
-  const sor_id = parseInt(args[3]);
-
-  const { data: resultado, error: resErr } = await supabase
-    .from('resultados')
-    .select('*')
-    .eq('loteria_id', lot_id)
-    .eq('sorteo_id', sor_id)
-    .eq('fecha', fecha)
-    .single();
-  if (resErr || !resultado) return ctx.reply('No se encontró el resultado. Usa /set_resultado primero.');
-  if (resultado.procesado) return ctx.reply('Este resultado ya fue procesado.');
-
-  const { data: apuestas, error: betErr } = await supabase
-    .from('bets')
-    .select('*')
-    .eq('loteria_id', lot_id)
-    .eq('sorteo_id', sor_id)
-    .eq('fecha_apuesta', fecha);
-  if (betErr) return ctx.reply(`Error al obtener apuestas: ${betErr.message}`);
-
-  const pagos = { fijo: 80, corrido: 40, centena: 500, parle: 500, candado: 500 };
-  let totalPremios = 0;
-  let ganadores = [];
-
-  for (const bet of apuestas) {
-    const premio = calcularPremioParaApuesta(bet, resultado.numero_ganador, pagos);
-    if (premio > 0) {
-      const { data: user, error: userErr } = await supabase
-        .from('users')
-        .select('saldo')
-        .eq('telegram_id', bet.user_telegram_id)
-        .single();
-      if (!userErr) {
-        const nuevoSaldo = user.saldo + premio;
-        await updateUserSaldo(bet.user_telegram_id, nuevoSaldo);
-        totalPremios += premio;
-        ganadores.push({ user: bet.user_telegram_id, premio });
-        try {
-          await bot.telegram.sendMessage(bet.user_telegram_id, `🎉 ¡Felicidades! Ganaste $${premio.toFixed(2)} con tu apuesta del ${fecha}. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`);
-        } catch(e) {}
-      }
-    }
-  }
-
-  await supabase.from('resultados').update({ procesado: true }).eq('id', resultado.id);
-  ctx.reply(`✅ Procesamiento completado.\nNúmero ganador: ${resultado.numero_ganador}\nTotal pagado: $${totalPremios.toFixed(2)}\nGanadores: ${ganadores.length}`);
-});
-
-// ============================================================
-// 9. Estados para depósitos
-// ============================================================
-const depositStates = new Map();
-
+// ================================ MANEJO DE DEPÓSITOS ================================
 bot.action(/dep_method_(.+)/, async (ctx) => {
   const method = ctx.match[1];
   const state = depositStates.get(ctx.from.id);
@@ -525,20 +425,15 @@ bot.action(/dep_method_(.+)/, async (ctx) => {
   await ctx.editMessageText(`Método: ${method}\nAhora escribe el monto a depositar (número):`);
 });
 
-// ============================================================
-// 10. Manejo de texto (flujo de depósito y apuestas)
-// ============================================================
+// ================================ MANEJO DE TEXTO Y COMPROBANTES ================================
 bot.on('text', async (ctx) => {
-  const userId = ctx.from.id;
-  const state = depositStates.get(userId);
+  const state = depositStates.get(ctx.from.id);
   if (state && state.step === 'amount') {
     const amount = parseFloat(ctx.message.text.trim());
-    if (isNaN(amount) || amount <= 0) {
-      return ctx.reply('❌ Monto inválido, escribe un número positivo.');
-    }
+    if (isNaN(amount) || amount <= 0) return ctx.reply('❌ Monto inválido.');
     state.amount = amount;
     state.step = 'proof';
-    depositStates.set(userId, state);
+    depositStates.set(ctx.from.id, state);
     await ctx.reply(`Monto: $${amount.toFixed(2)}\nAhora envía una imagen o documento como comprobante.`);
     return;
   }
@@ -547,27 +442,18 @@ bot.on('text', async (ctx) => {
 });
 
 bot.on(['photo', 'document'], async (ctx) => {
-  const userId = ctx.from.id;
-  const state = depositStates.get(userId);
-  if (!state || state.step !== 'proof') {
-    return ctx.reply('No estás en proceso de depósito. Usa /depositar.');
-  }
+  const state = depositStates.get(ctx.from.id);
+  if (!state || state.step !== 'proof') return ctx.reply('No estás en proceso de depósito. Usa /depositar.');
   let fileId;
-  if (ctx.message.photo) {
-    fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-  } else if (ctx.message.document) {
-    fileId = ctx.message.document.file_id;
-  } else {
-    return ctx.reply('Envía una imagen o documento.');
-  }
+  if (ctx.message.photo) fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+  else if (ctx.message.document) fileId = ctx.message.document.file_id;
+  else return ctx.reply('Envía una imagen o documento.');
   try {
-    const deposit = await createDepositRequest(userId, state.amount, state.method, fileId);
-    depositStates.delete(userId);
-    await ctx.reply(`✅ Solicitud creada.\nID: ${deposit.id}\nMonto: $${deposit.amount}\nMétodo: ${deposit.payment_method}\nEl administrador revisará y aprobará.`);
+    const deposit = await createDepositRequest(ctx.from.id, state.amount, state.method, fileId);
+    depositStates.delete(ctx.from.id);
+    await ctx.reply(`✅ Solicitud creada.\nID: ${deposit.id}\nMonto: $${deposit.amount}\nMétodo: ${deposit.payment_method}\nEl administrador revisará.`);
     for (const adminId of ADMIN_IDS) {
-      try {
-        await bot.telegram.sendMessage(adminId, `📥 Nueva solicitud #${deposit.id}\nUsuario: ${userId}\nMonto: $${deposit.amount}`);
-      } catch(e) {}
+      try { await bot.telegram.sendMessage(adminId, `📥 Nueva solicitud #${deposit.id}\nUsuario: ${ctx.from.id}\nMonto: $${deposit.amount}`); } catch(e) {}
     }
   } catch (err) {
     console.error(err);
@@ -575,23 +461,27 @@ bot.on(['photo', 'document'], async (ctx) => {
   }
 });
 
-// ============================================================
-// 11. Función principal de apuesta (con validaciones corregidas)
-// ============================================================
+// ================================ FUNCIÓN PRINCIPAL DE APUESTA ================================
 async function processBet(ctx, rawInput) {
-  if (!rawInput.trim()) return;
-  if (rawInput.startsWith('/')) return;
+  if (!rawInput.trim() || rawInput.startsWith('/')) return;
 
-  console.log(`📥 Apuesta de ${ctx.from.id}: ${rawInput.substring(0, 200)}`);
+  const pref = await getUserPreference(ctx.from.id);
+  if (!pref || !pref.loteria_id || !pref.sorteo_id) {
+    return ctx.reply('⚠️ Primero selecciona una lotería y un sorteo con /loterias y /sorteos.');
+  }
+  const moneda = pref.moneda || 'cup';
+  const horario = await validarHorarioSorteo(pref.sorteo_id);
+  if (!horario || !horario.open) return ctx.reply(horario?.message || 'Error de horario.');
 
-  // Preprocesar
+  console.log(`📥 Apuesta de ${ctx.from.id}: ${rawInput.substring(0,200)}`);
+
   let processed = rawInput.toLowerCase();
   processed = preprocesarLineasMixtas(processed);
 
   let resultado;
   try {
     resultado = Engine.calcular(
-      { rawInput: processed, loteriaId: 1, sorteoId: 1 },
+      { rawInput: processed, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id },
       { limpiarMonto, Expansion: global.Expansion, preprocesarJugada: Preprocesador.preprocesarJugada }
     );
   } catch (err) {
@@ -607,26 +497,14 @@ async function processBet(ctx, rawInput) {
   const totalApuesta = resultado.totalGeneral;
   if (totalApuesta === 0) return ctx.reply('❌ La jugada no tiene monto válido.');
 
-  // Verificar horario del sorteo (asumimos loteriaId=1, sorteoId=1)
-  const hoy = new Date().toISOString().slice(0,10);
-  const ahora = new Date();
-  const horaActual = ahora.getHours().toString().padStart(2,'0') + ':' + ahora.getMinutes().toString().padStart(2,'0');
-  const horario = await getHorario(1, 1);
-  if (horario) {
-    if (horaActual < horario.apertura) return ctx.reply(`⏰ El sorteo abre a las ${horario.apertura}. Vuelve más tarde.`);
-    if (horaActual >= horario.cierre) return ctx.reply(`⏰ El sorteo cerró a las ${horario.cierre}.`);
-  }
-
-  // ------------------------------
-  // Validación de límite CORREGIDA
-  // Extraemos TODOS los detalles de todas las jugadas y validamos monto unitario
+  // Extraer detalles para validar límites por tipo
   const allDetails = [];
   (resultado.jugadas || []).forEach(j => {
-    (j.jugadas_detalle || []).forEach(d => {
-      allDetails.push(d);
-    });
+    (j.jugadas_detalle || []).forEach(d => allDetails.push(d));
   });
-  const limiteExcedido = await validarLimites(allDetails, 1, 1);
+
+  // Validación de límite por tipo (monto unitario)
+  const limiteExcedido = await validarLimitesPorTipo(allDetails, pref.loteria_id, pref.sorteo_id);
   if (limiteExcedido) {
     return ctx.reply(`❌ Límite excedido para tipo "${limiteExcedido.tipo}". Máximo por número/combinación: $${limiteExcedido.maximo.toFixed(2)}. Apostaste: $${limiteExcedido.montoUnitario.toFixed(2)} por número/combinación.`);
   }
@@ -634,17 +512,16 @@ async function processBet(ctx, rawInput) {
   // Verificar saldo
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
   if (user.saldo < totalApuesta) {
-    return ctx.reply(`❌ Saldo insuficiente. Necesitas $${totalApuesta.toFixed(2)}. Usa /depositar.`);
+    return ctx.reply(`❌ Saldo insuficiente. Necesitas $${totalApuesta.toFixed(2)} (${moneda.toUpperCase()}). Usa /depositar.`);
   }
 
-  // Deducir saldo y guardar apuesta
   const saldoAntes = user.saldo;
   const saldoDespues = saldoAntes - totalApuesta;
   await updateUserSaldo(ctx.from.id, saldoDespues);
-  await saveBet(ctx.from.id, 1, 1, hoy, rawInput, totalApuesta, JSON.stringify(allDetails), saldoAntes, saldoDespues);
+  await saveBet(ctx.from.id, pref.loteria_id, pref.sorteo_id, new Date().toISOString().slice(0,10), rawInput, totalApuesta, JSON.stringify(allDetails), saldoAntes, saldoDespues, moneda);
 
-  // Formatear respuesta
-  let respuesta = `💰 *Total apostado:* $${totalApuesta.toFixed(2)}\n💰 *Saldo restante:* $${saldoDespues.toFixed(2)}\n\n`;
+  let respuesta = `💰 *Total apostado:* $${totalApuesta.toFixed(2)} (${moneda.toUpperCase()})\n`;
+  respuesta += `💰 *Saldo restante:* $${saldoDespues.toFixed(2)}\n\n`;
   if (resultado.detalleTexto) respuesta += resultado.detalleTexto;
   if (resultado.flaggedWarnings?.length) {
     respuesta += '\n⚠️ Revisiones pendientes:\n' + resultado.flaggedWarnings.map(w => `• ${w.message}`).join('\n');
@@ -653,9 +530,7 @@ async function processBet(ctx, rawInput) {
   await ctx.reply(respuesta, { parse_mode: 'Markdown' });
 }
 
-// ============================================================
-// 12. Iniciar servidor
-// ============================================================
+// ================================ INICIAR SERVIDOR ================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor en puerto ${PORT}`);
