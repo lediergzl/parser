@@ -128,29 +128,55 @@ async function rejectDeposit(requestId, adminId, reason = '') {
     .eq('id', requestId);
 }
 
-// ================================ LÍMITES POR TIPO (SIN NÚMEROS INDIVIDUALES) ================================
-async function validarLimitesPorTipo(jugadasDetalle, loteriaId, sorteoId) {
-  // Obtener límites configurados (globales o por lotería/sorteo)
-  let query = supabase.from('limits').select('*');
-  if (loteriaId && sorteoId) {
-    query = query.or(`loteria_id.eq.${loteriaId},loteria_id.is.null`)
-                 .or(`sorteo_id.eq.${sorteoId},sorteo_id.is.null`);
-  } else {
-    query = query.is('loteria_id', null).is('sorteo_id', null);
+// ================================ LÍMITES ACUMULATIVOS POR NÚMERO ================================
+// Devuelve un mapa: { "numero": total_acentos_apostados_hasta_ahora }
+async function getAcumuladoPorNumero(loteriaId, sorteoId, fecha) {
+  // Obtener todas las apuestas del sorteo (sin la actual)
+  const { data: bets, error } = await supabase
+    .from('bets')
+    .select('detalle')
+    .eq('loteria_id', loteriaId)
+    .eq('sorteo_id', sorteoId)
+    .eq('fecha_apuesta', fecha);
+  if (error || !bets) return {};
+
+  const acumulado = {};
+  for (const bet of bets) {
+    try {
+      const detalles = JSON.parse(bet.detalle);
+      for (const det of detalles) {
+        const montoUnit = det.monto_unitario;
+        if (!montoUnit) continue;
+        const numeros = det.numeros || [];
+        for (const num of numeros) {
+          const key = String(num);
+          acumulado[key] = (acumulado[key] || 0) + montoUnit;
+        }
+      }
+    } catch(e) {}
   }
-  const { data: limites } = await query;
-  if (!limites) return null;
+  return acumulado;
+}
 
+// Valida que ningún número de la nueva apuesta supere el límite acumulado
+async function validarLimitesAcumulativos(jugadasDetalle, loteriaId, sorteoId, fecha, limiteGlobalPorTipo) {
+  // Obtener acumulado previo
+  const acumulado = await getAcumuladoPorNumero(loteriaId, sorteoId, fecha);
+
+  // Para cada detalle, por cada número, sumar el nuevo monto y comparar con límite
   for (const detalle of jugadasDetalle) {
-    const tipo = detalle.tipo;
-    // Para candado, también usamos el tipo 'parle' (porque comparte límite)
-    const tipoBase = (tipo === 'candado' || tipo === 'candado_global') ? 'parle' : tipo;
-    const montoUnitario = detalle.monto_unitario;
-    if (montoUnitario === undefined || montoUnitario === null) continue;
+    const tipoBase = (detalle.tipo === 'candado' || detalle.tipo === 'candado_global') ? 'parle' : detalle.tipo;
+    const limite = limiteGlobalPorTipo[tipoBase];
+    if (!limite) continue; // sin límite configurado, omitir validación
 
-    const limite = limites.find(l => l.tipo === tipoBase);
-    if (limite && montoUnitario > limite.monto_maximo) {
-      return { tipo: tipoBase, montoUnitario, maximo: limite.monto_maximo };
+    const montoUnitario = detalle.monto_unitario;
+    if (!montoUnitario) continue;
+    const numeros = detalle.numeros || [];
+    for (const num of numeros) {
+      const acumPrev = acumulado[num] || 0;
+      if (acumPrev + montoUnitario > limite) {
+        return { numero: num, tipo: tipoBase, montoActual: montoUnitario, acumPrev, limite };
+      }
     }
   }
   return null;
@@ -210,6 +236,24 @@ async function validarHorarioSorteo(sorteoId) {
   return { open: true };
 }
 
+// Obtener límites globales por tipo (para el comercial)
+async function getLimitesGlobales(loteriaId, sorteoId) {
+  let query = supabase.from('limits').select('*');
+  if (loteriaId && sorteoId) {
+    query = query.or(`loteria_id.eq.${loteriaId},loteria_id.is.null`)
+                 .or(`sorteo_id.eq.${sorteoId},sorteo_id.is.null`);
+  } else {
+    query = query.is('loteria_id', null).is('sorteo_id', null);
+  }
+  const { data, error } = await query;
+  if (error || !data) return {};
+  const map = {};
+  for (const item of data) {
+    map[item.tipo] = item.monto_maximo;
+  }
+  return map;
+}
+
 // ================================ CONFIGURACIÓN DEL BOT ================================
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -222,7 +266,7 @@ const app = express();
 
 app.use((req, res, next) => { console.log(`📨 [${req.method}] ${req.path}`); next(); });
 app.get('/ping', (req, res) => res.send('pong'));
-app.get('/', (req, res) => res.send('🤖 LotoPro Bot con límites por tipo'));
+app.get('/', (req, res) => res.send('🤖 LotoPro Bot - límites acumulativos'));
 
 const webhookPath = '/webhook';
 app.post(webhookPath, (req, res) => { bot.webhookCallback(webhookPath)(req, res); });
@@ -243,7 +287,7 @@ bot.start(async (ctx) => {
     msg += `⚠️ Selecciona lotería, sorteo y moneda:\n`;
   }
   msg += `/loterias - elegir lotería\n/sorteos - elegir sorteo\n/moneda - elegir moneda\n/saldo\n/depositar\n/mis_depositos\n/historial\n\n`;
-  msg += `Ejemplo de jugada:\npepe\nt5 con 10\n\n(El límite por tipo se aplica al monto por número o combinación)`;
+  msg += `Ejemplo de jugada:\npepe\nt5 con 500\n\n(El límite por tipo se aplica acumulativamente por número)`;
   ctx.reply(msg);
 });
 
@@ -371,7 +415,6 @@ bot.command('pendientes', async (ctx) => {
   ctx.reply(msg, { parse_mode: 'HTML', disable_web_page_preview: true });
 });
 
-// Comando para establecer límite por tipo (admin)
 bot.command('set_limit', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const args = ctx.message.text.split(' ');
@@ -380,11 +423,9 @@ bot.command('set_limit', async (ctx) => {
   const monto = parseFloat(args[2]);
   if (isNaN(monto) || monto <= 0) return ctx.reply('Monto inválido (debe ser número positivo).');
 
-  // Validar tipo permitido
   const tiposPermitidos = ['fijo', 'corrido', 'parle', 'centena'];
   if (!tiposPermitidos.includes(tipo)) return ctx.reply(`Tipo inválido. Permitidos: ${tiposPermitidos.join(', ')}`);
 
-  // Buscar si ya existe límite global para este tipo
   const { data: existing, error: findError } = await supabase
     .from('limits')
     .select('id')
@@ -401,13 +442,13 @@ bot.command('set_limit', async (ctx) => {
       .update({ monto_maximo: monto, updated_at: new Date() })
       .eq('id', existing.id);
     if (updateError) return ctx.reply(`Error: ${updateError.message}`);
-    ctx.reply(`✅ Límite para ${tipo} actualizado a $${monto.toFixed(2)} (máximo por número/combinación)`);
+    ctx.reply(`✅ Límite para ${tipo} actualizado a $${monto.toFixed(2)} (acumulativo por número)`);
   } else {
     const { error: insertError } = await supabase
       .from('limits')
       .insert([{ tipo, monto_maximo: monto, loteria_id: null, sorteo_id: null, updated_at: new Date() }]);
     if (insertError) return ctx.reply(`Error: ${insertError.message}`);
-    ctx.reply(`✅ Límite para ${tipo} establecido en $${monto.toFixed(2)} (máximo por número/combinación)`);
+    ctx.reply(`✅ Límite para ${tipo} establecido en $${monto.toFixed(2)} (acumulativo por número)`);
   }
 });
 
@@ -425,7 +466,6 @@ bot.action(/dep_method_(.+)/, async (ctx) => {
   await ctx.editMessageText(`Método: ${method}\nAhora escribe el monto a depositar (número):`);
 });
 
-// ================================ MANEJO DE TEXTO Y COMPROBANTES ================================
 bot.on('text', async (ctx) => {
   const state = depositStates.get(ctx.from.id);
   if (state && state.step === 'amount') {
@@ -437,7 +477,6 @@ bot.on('text', async (ctx) => {
     await ctx.reply(`Monto: $${amount.toFixed(2)}\nAhora envía una imagen o documento como comprobante.`);
     return;
   }
-  // Si no hay estado activo, procesar apuesta
   await processBet(ctx, ctx.message.text);
 });
 
@@ -461,7 +500,7 @@ bot.on(['photo', 'document'], async (ctx) => {
   }
 });
 
-// ================================ FUNCIÓN PRINCIPAL DE APUESTA ================================
+// ================================ APUESTA PRINCIPAL ================================
 async function processBet(ctx, rawInput) {
   if (!rawInput.trim() || rawInput.startsWith('/')) return;
 
@@ -497,16 +536,20 @@ async function processBet(ctx, rawInput) {
   const totalApuesta = resultado.totalGeneral;
   if (totalApuesta === 0) return ctx.reply('❌ La jugada no tiene monto válido.');
 
-  // Extraer detalles para validar límites por tipo
+  // Extraer todos los detalles de apuesta
   const allDetails = [];
   (resultado.jugadas || []).forEach(j => {
     (j.jugadas_detalle || []).forEach(d => allDetails.push(d));
   });
 
-  // Validación de límite por tipo (monto unitario)
-  const limiteExcedido = await validarLimitesPorTipo(allDetails, pref.loteria_id, pref.sorteo_id);
-  if (limiteExcedido) {
-    return ctx.reply(`❌ Límite excedido para tipo "${limiteExcedido.tipo}". Máximo por número/combinación: $${limiteExcedido.maximo.toFixed(2)}. Apostaste: $${limiteExcedido.montoUnitario.toFixed(2)} por número/combinación.`);
+  // Obtener límites globales por tipo
+  const limites = await getLimitesGlobales(pref.loteria_id, pref.sorteo_id);
+  const fechaHoy = new Date().toISOString().slice(0,10);
+
+  // Validación acumulativa por número
+  const violacion = await validarLimitesAcumulativos(allDetails, pref.loteria_id, pref.sorteo_id, fechaHoy, limites);
+  if (violacion) {
+    return ctx.reply(`❌ Límite excedido para tipo "${violacion.tipo}". El número ${violacion.numero} ya acumula $${violacion.acumPrev.toFixed(2)} apostados. Máximo: $${violacion.limite.toFixed(2)}. Esta apuesta añade $${violacion.montoActual.toFixed(2)}.`);
   }
 
   // Verificar saldo
@@ -518,7 +561,7 @@ async function processBet(ctx, rawInput) {
   const saldoAntes = user.saldo;
   const saldoDespues = saldoAntes - totalApuesta;
   await updateUserSaldo(ctx.from.id, saldoDespues);
-  await saveBet(ctx.from.id, pref.loteria_id, pref.sorteo_id, new Date().toISOString().slice(0,10), rawInput, totalApuesta, JSON.stringify(allDetails), saldoAntes, saldoDespues, moneda);
+  await saveBet(ctx.from.id, pref.loteria_id, pref.sorteo_id, fechaHoy, rawInput, totalApuesta, JSON.stringify(allDetails), saldoAntes, saldoDespues, moneda);
 
   let respuesta = `💰 *Total apostado:* $${totalApuesta.toFixed(2)} (${moneda.toUpperCase()})\n`;
   respuesta += `💰 *Saldo restante:* $${saldoDespues.toFixed(2)}\n\n`;
