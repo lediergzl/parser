@@ -1,86 +1,98 @@
 const express = require('express');
 const { Telegraf } = require('telegraf');
 
-// 1. Carga de tu motor de apuestas local
+// ============================================================
+// FUNCIÓN limpiarMonto (extraída de la lógica del bundle)
+// ============================================================
+function limpiarMonto(s) {
+  if (s == null) return null;
+  let txt = String(s)
+    .replace(/\s+/g, '')   // eliminar espacios
+    .replace(/\$/g, '');   // eliminar símbolo de moneda
+  if (!txt) return null;
+  // Normalizar separador decimal: comas → puntos
+  txt = txt.replace(/,/g, '.');
+  // Si hay más de un punto, el último es el decimal
+  const dotCount = (txt.match(/\./g) || []).length;
+  if (dotCount > 1) {
+    const lastDot = txt.lastIndexOf('.');
+    txt = txt.slice(0, lastDot).replace(/\./g, '') + '.' + txt.slice(lastDot + 1);
+  }
+  const n = parseFloat(txt);
+  return Number.isFinite(n) ? n : null;
+}
+
+// ============================================================
+// Carga del motor (lotopro-core.bundle.js)
+// ============================================================
 try {
   require('./lotopro-core.bundle.js');
 } catch (error) {
-  console.error("Error FATAL: No se pudo cargar 'lotopro-core.bundle.js'. Verifica que el archivo exista en el directorio.");
-  // En un entorno de producción, es mejor que el proceso termine aquí si el core es vital.
-  // process.exit(1);
+  console.error("❌ Error al cargar 'lotopro-core.bundle.js':", error.message);
+  process.exit(1);
 }
 
-// Verificación de que el motor se cargó correctamente en el objeto global
-const { Engine, limpiarMonto, Expansion } = global;
+const { Engine, Expansion } = global;
+
 if (!Engine || typeof Engine.calcular !== 'function') {
-  console.error("Error FATAL: El motor 'lotopro-core.bundle.js' no se cargó o no expone 'Engine.calcular'.");
-  // process.exit(1);
+  console.error("❌ Engine.calcular no está disponible");
+  process.exit(1);
 }
 
-// 2. Configuración Básica
+// ============================================================
+// Configuración de Telegram y Express
+// ============================================================
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TELEGRAM_BOT_TOKEN) {
-  console.error("Error FATAL: La variable de entorno 'TELEGRAM_BOT_TOKEN' no está configurada.");
-  // process.exit(1);
+  console.error("❌ TELEGRAM_BOT_TOKEN no configurado en variables de entorno");
+  process.exit(1);
 }
 
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 const app = express();
 
-// --- Middleware de LOG (Siempre útil para depurar) ---
+// Logging de todas las peticiones
 app.use((req, res, next) => {
-  console.log(`📨 [${req.method}] Solicitud entrante a: ${req.path}`);
+  console.log(`📨 [${req.method}] ${req.path}`);
   next();
 });
 
-// --- Ruta de prueba para mantener el servicio despierto y hacer health checks ---
-app.get('/ping', (req, res) => {
-  console.log("📡 Ping recibido en /ping");
-  res.send('pong');
-});
+// Ruta de health check (para cron-job.org)
+app.get('/ping', (req, res) => res.send('pong'));
 
-// --- Ruta raíz para verificar que el servidor está activo y responderá ---
-app.get('/', (req, res) => {
-  res.send('🤖 Bot de Apuestas LotoPro activo. El webhook está funcionando.');
-});
+// Ruta raíz
+app.get('/', (req, res) => res.send('🤖 Bot de apuestas activo'));
 
-// --- WEBHOOK (La parte crucial) ---
+// Webhook (sin express.json() para no interferir)
 const webhookPath = '/webhook';
-// 🔥 La clave está aquí: NO usamos app.use(express.json()) de forma global.
-// app.use(bot.webhookCallback(webhookPath)) ya incluye su propio parser para la petición POST de Telegram.
 app.post(webhookPath, (req, res) => {
-  // req.body se pasa directamente al middleware de Telegraf.
   bot.webhookCallback(webhookPath)(req, res);
 });
-console.log(`✅ Middleware de webhook configurado manualmente en la ruta POST: ${webhookPath}`);
 
-// --- Comandos del Bot ---
-bot.start((ctx) => ctx.reply('✅ Bot de apuestas activo. Envíame una jugada en el formato DSL.'));
-
-// Comando de ayuda para que los usuarios sepan qué hacer
-bot.help((ctx) => ctx.reply(`ℹ️ *Instrucciones:* escribe los números y el monto siguiendo el formato DSL. Por ejemplo:
+// Comandos del bot
+bot.start((ctx) => ctx.reply('✅ Bot de apuestas activo. Envía una jugada en formato DSL.'));
+bot.help((ctx) => ctx.reply(`Ejemplo:
 \`\`\`
 23 45 con 10
 67 89 parle con 20
 \`\`\``, { parse_mode: 'Markdown' }));
 
-// Procesador de mensajes de texto (Aquí va tu lógica de negocio)
+// Procesamiento de mensajes
 bot.on('text', async (ctx) => {
   const rawInput = ctx.message.text;
   if (!rawInput.trim()) return;
 
   console.log(`⚙️ Procesando jugada de ${ctx.from.username || ctx.from.id}: ${rawInput}`);
 
-  // Parámetros fijos que espera tu motor. Ajusta si son necesarios.
   try {
     const resultado = Engine.calcular(
       {
         rawInput,
-        loteriaId: 1,
-        sorteoId: 1,
+        loteriaId: 1,      // Ajusta según tu lógica
+        sorteoId: 1,       // Ajusta según tu lógica
       },
       {
-        limpiarMonto,
+        limpiarMonto,      // Nuestra función personalizada
         Expansion,
       }
     );
@@ -88,7 +100,7 @@ bot.on('text', async (ctx) => {
     if (resultado.ok) {
       let respuesta = `💰 *Total:* ${resultado.totalGeneral.toFixed(2)}\n\n`;
       if (resultado.detalleTexto) respuesta += resultado.detalleTexto;
-      if (resultado.flaggedWarnings && resultado.flaggedWarnings.length > 0) {
+      if (resultado.flaggedWarnings && resultado.flaggedWarnings.length) {
         respuesta += '\n⚠️ *Revisiones pendientes:*\n';
         respuesta += resultado.flaggedWarnings.map(w => `• ${w.message}`).join('\n');
       }
@@ -98,14 +110,14 @@ bot.on('text', async (ctx) => {
       await ctx.reply(`❌ *Error:*\n${errorMsg}`, { parse_mode: 'Markdown' });
     }
   } catch (err) {
-    console.error(`🔥 Error crítico en el motor de apuestas: ${err.message}`);
-    console.error(err.stack);
+    console.error('🔥 Error en el motor:', err);
     await ctx.reply('❌ Error interno del servidor. El administrador ha sido notificado.');
   }
 });
 
-// --- Inicio del Servidor Express ---
+// Iniciar servidor
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`🚀 Servidor Express escuchando en el puerto ${port} y listo para recibir webhooks.`);
+  console.log(`🚀 Servidor Express escuchando en el puerto ${port}`);
+  console.log(`✅ Webhook configurado en POST ${webhookPath}`);
 });
