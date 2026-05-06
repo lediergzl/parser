@@ -3430,6 +3430,22 @@ function stripWhatsAppMeta(line) {
     ''
   );
 
+  // 1c. FORMATO SIN FECHA: "Yode86: contenido"  (nombre sin bracket de timestamp)
+  // Solo aplica si la linea aun empieza con "Palabra:" (el paso 1 no hizo match).
+  // Regex conservador: max 30 chars, solo alfanum+guion+punto, seguido de ": ".
+  // Tras eliminar el prefijo "Nombre: ", el resto puede ser otro header WA reenviado —
+  // re-aplicamos los pasos 1 y 2 sobre lo que queda.
+  if (/^[A-Za-zÀ-ɏ0-9_\-\.]{1,30}:\s+/.test(cleaned)) {
+    cleaned = cleaned.replace(/^[A-Za-zÀ-ɏ0-9_\-\.]{1,30}:\s+/, '');
+    // Re-strip paso 1 (puede ser un header WA reenviado)
+    cleaned = cleaned.replace(
+      /^\[\d{1,2}\/\d{1,2},?\s+\d{1,2}:\d{2}(?:\s*[ap]\.?\s*m\.?)?\]\s*[^:]+:\s*/i, ''
+    );
+    cleaned = cleaned.replace(
+      /^\[\d{1,2}\/\d{1,2},?\s+\d{1,2}:\d{2}(?:\s*[ap]\.?\s*m\.?)?\]\s*/i, ''
+    );
+  }
+
   // 2. FORMATO EXPORT WHATSAPP:
   // 5/5/26, 1:49 p. m. - Nombre: Mensaje
   cleaned = cleaned.replace(
@@ -3487,8 +3503,14 @@ function preprocesarJugada(rawInput) {
     // Heurística: si existe una palabra funcional (por/de/con/para/a) en el texto,
     // tomar todo lo que va ANTES de ella y quedarse con la última de esas palabras.
     // Si no hay funcional, tomar la última palabra del conjunto.
-    const _wasWAHeader = /^\[/.test(lines[i].trim()) ||
-                         /^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(lines[i].trim());
+    // _wasWAHeader: la línea original era un header de WA (con bracket de fecha)
+    // O era "Nombre: [header_reenviado]" — el strip 1c lo resuelve y _rawStripped
+    // empieza con el contenido del header interno (puede ser texto ciudad+nombre).
+    // Detectamos ambos casos para aplicar el Bug2 fix correctamente.
+    const _origTrim = lines[i].trim();
+    const _wasWAHeader = /^\[/.test(_origTrim) ||
+                         /^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(_origTrim) ||
+                         /^[A-Za-zÀ-ɏ0-9_\-\.]{1,30}:\s+\[/.test(_origTrim);
     let line = _rawStripped;
     if (_wasWAHeader && _rawStripped && !/\d/.test(_rawStripped)) {
       const _words = _rawStripped.trim().split(/\s+/);
@@ -3670,13 +3692,45 @@ function preprocesarJugada(rawInput) {
       }
 
     } else {
-      if (!esLineaRuido(line)) {
-        trace('PRE_LINE_NO_DIGIT', { lineIndex: i, line, razon: 'nombre o texto sin dígitos → preservado' });
-        processedLines.push(line);
-      } else if (line.trim() === '') {
+      if (line.trim() === '') {
         processedLines.push('');
-      } else {
+      } else if (esLineaRuido(line)) {
         trace('PRE_LINE_NOISE', { lineIndex: i, line, razon: 'ruido sin dígitos → descartado' });
+      } else {
+        // FIX NEW_YORK: línea sin dígitos que no es ruido puede ser nombre o contexto geográfico.
+        // Si la siguiente línea no-vacía TAMPOCO tiene dígitos, esta línea es contexto descriptivo
+        // (ej: "New York" entre "Zuzel" y los números) → descartarla.
+        // Solo se preserva si la siguiente línea con contenido tiene dígitos (jugada inmediata)
+        // o si no hay siguiente línea (último nombre del input).
+        let _nextHasDigit = false;
+        let _hasNext = false;
+        for (let _k = i + 1; _k < lines.length; _k++) {
+          const _nxt = stripWhatsAppMeta(lines[_k]).trim();
+          if (_nxt === '') continue;
+          _hasNext = true;
+          if (/\d/.test(_nxt)) { _nextHasDigit = true; }
+          break;
+        }
+        const _keepLine = !_hasNext || _nextHasDigit || scoreNombreBloque(line, i, processedLines).esNombre === false;
+        // Siempre preservar si es nombre válido (scoreNombreBloque acepta) aunque siguiente no tenga dígitos
+        // (cubre caso de nombre seguido de otro nombre, ej: bloques consecutivos sin jugadas)
+        const _esNombreValido = scoreNombreBloque(line, i, processedLines).esNombre;
+        // FIX NEW_YORK parte 2: si la siguiente línea con dígitos empieza con "con"
+        // (monto suelto sin pares), esta línea es contexto geográfico del jugador, no un nombre nuevo.
+        // Ejemplo: "New York" → "con 20" → descartar "New York".
+        let _nextStartsWithCon = false;
+        for (let _k = i + 1; _k < lines.length; _k++) {
+          const _nxt = stripWhatsAppMeta(lines[_k]).trim().toLowerCase();
+          if (_nxt === '') continue;
+          if (/\d/.test(_nxt) && /^con\b/.test(_nxt)) { _nextStartsWithCon = true; }
+          break;
+        }
+        if (_nextHasDigit && !_nextStartsWithCon || (_esNombreValido && !_nextStartsWithCon)) {
+          trace('PRE_LINE_NO_DIGIT', { lineIndex: i, line, razon: 'nombre o texto sin dígitos → preservado' });
+          processedLines.push(line);
+        } else {
+          trace('PRE_LINE_NOISE', { lineIndex: i, line, razon: 'texto sin dígitos descartado (contexto geográfico o monto suelto)' });
+        }
       }
     }
   }
@@ -4393,7 +4447,7 @@ function calcular(ctx, deps) {
 // ─────────────────────────────────────────────────────────────────
 global.Tracer        = { trace, enableTrace, disableTrace, setTraceFilter, resetTraceId, nextId, exposeTraceControls };
 global.Expansion     = createExpansion();
-global.Evaluator     = { buildLineaDB, validarLinea, buildOpsNormal, buildOpsCentena, buildOpsParleGlobal, buildOpsCandadoGlobal, buildOpsCentenaGlobal, evaluarOperacion, detalleLineaTexto, pad2, pad3, comb2, generarPares, repartirExacto, detectarOperadorMalEscrito };
+global.Evaluator     = { buildLineaDB, validarLinea, buildOpsNormal, buildOpsCentena, buildOpsParleGlobal, buildOpsCandadoGlobal, buildOpsCentenaGlobal, evaluarOperacion, detalleLineaTexto, pad2, pad3, comb2, generarPares, repartirExacto, detectarOperadorMalEscrito, levenshtein, clasificarTokens, validarEstructuraTokens };
 global.Classifier    = { clasificarLinea, clasificarBloque, LineType, OpKind };
 global.Parser        = { parsearInput, parsearBloques, joinNumberLines, TYPO_PATTERNS };
 global.Preprocesador = { preprocesarJugada, procesarLineaRaw, stripWhatsAppMeta, limpiarLineaAuto };
