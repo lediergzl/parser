@@ -3466,8 +3466,12 @@ function stripWhatsAppMeta(line) {
     const re = new RegExp(phoneDigits.split('').join('\\s*'), 'g');
     cleaned = cleaned.replace(re, ' ');
   }
-  // También eliminar cualquier bloque de 7+ dígitos suelto al inicio
-  cleaned = cleaned.replace(/^\s*\+?\d[\d\s]{6,}(?=\s|$)/, '');
+  // También eliminar teléfono suelto al inicio — SOLO si es un número continuo sin espacios
+  // internos múltiples (teléfono real), NO si son varios números de lotería separados.
+  // "53 5 6468550" → eliminar   |   "33 25 77 65 88 14 81" → NO eliminar (son pares de lotería)
+  // Heurística: max 2 grupos separados por espacio (ej: código país + número), no más.
+  cleaned = cleaned.replace(/^\s*\+?\d{1,4}\s\d{6,}(?=\s|$)/, '');  // ej: "53 56468550"
+  cleaned = cleaned.replace(/^\s*\+?\d{7,}(?=\s|$)/, '');            // ej: "5356468550" (todo junto)
 
   // 5. colapsar espacios
   cleaned = cleaned.replace(/\s+/g, ' ').trim();
@@ -4451,6 +4455,7 @@ global.Evaluator     = { buildLineaDB, validarLinea, buildOpsNormal, buildOpsCen
 global.Classifier    = { clasificarLinea, clasificarBloque, LineType, OpKind };
 global.Parser        = { parsearInput, parsearBloques, joinNumberLines, TYPO_PATTERNS };
 global.Preprocesador = { preprocesarJugada, procesarLineaRaw, stripWhatsAppMeta, limpiarLineaAuto };
+global.Utils         = { limpiarMonto };
 global.Engine        = { calcular, procesarBloque, serializeJugadaLines };
 global.BetAuditLedger = { createBetAuditLedger, esLineaCandidato, detectarLineaHuerfana, mapearRazonFlag };
 global.RightSideSanitizer = { sanitizarLadoDerecho, aplicarRightSideRule, limpiarLadoDerecho, validarPatronLadoDerecho };
