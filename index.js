@@ -1,57 +1,28 @@
 const express = require('express');
 const { Telegraf } = require('telegraf');
-const mongoose = require('mongoose');
+const { createClient } = require('@supabase/supabase-js');
 
 // ============================================================
-// 1. Conexión a MongoDB
+// 1. Configuración de Supabase
 // ============================================================
-const MONGODB_URI = process.env.MONGODB_URI;
-if (!MONGODB_URI) {
-  console.error('❌ MONGODB_URI no definida en variables de entorno');
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // ¡IMPORTANTE! Usa la service_role key para operaciones de escritura
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error('❌ SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY no definidas');
   process.exit(1);
 }
 
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log('✅ Conectado a MongoDB'))
-  .catch(err => {
-    console.error('❌ Error conectando a MongoDB:', err.message);
-    process.exit(1);
-  });
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ============================================================
-// 2. Definir modelos
-// ============================================================
-const userSchema = new mongoose.Schema({
-  telegramId: { type: Number, unique: true, required: true },
-  username: { type: String, default: '' },
-  firstName: { type: String, default: '' },
-  saldo: { type: Number, default: 0, min: 0 },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
-});
-
-const betSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  telegramId: { type: Number, required: true },
-  inputRaw: { type: String, required: true },
-  totalApuesta: { type: Number, required: true },
-  detalle: { type: String, default: '' },
-  saldoAntes: { type: Number, required: true },
-  saldoDespues: { type: Number, required: true },
-  createdAt: { type: Date, default: Date.now }
-});
-
-const User = mongoose.model('User', userSchema);
-const Bet = mongoose.model('Bet', betSchema);
-
-// ============================================================
-// 3. Cargar el motor DSL (bundle)
+// 2. Cargar el motor DSL (bundle)
 // ============================================================
 require('./lotopro-core.bundle.js');
 const { Engine, Preprocesador } = global;
 
 // ============================================================
-// 4. Funciones de limpieza y normalización (igual que antes)
+// 3. Funciones de limpieza y normalización
 // ============================================================
 
 function limpiarMonto(s) {
@@ -166,22 +137,77 @@ function reconstruirBloquesConNombres(texto) {
 }
 
 // ============================================================
-// 5. Helper: obtener o registrar usuario
+// 4. Helpers: obtener o registrar usuario
 // ============================================================
 async function getOrCreateUser(telegramId, username, firstName) {
-  let user = await User.findOne({ telegramId });
+  // 1. Buscar usuario por telegram_id
+  let { data: user, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('telegram_id', telegramId)
+    .single();
+
+  if (error && error.code !== 'PGRST116') { // PGRST116 es "no se encontró ninguna fila"
+    console.error('Error al buscar usuario:', error);
+    return null;
+  }
+
+  // 2. Si no existe, lo creamos
   if (!user) {
-    user = new User({
-      telegramId,
-      username: username || '',
-      firstName: firstName || '',
-      saldo: 0
-    });
-    await user.save();
+    const { data: newUser, error: insertError } = await supabase
+      .from('users')
+      .insert([{ telegram_id: telegramId, username, first_name: firstName, saldo: 0 }])
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error('Error al crear usuario:', insertError);
+      return null;
+    }
+    user = newUser;
     console.log(`🆕 Nuevo usuario registrado: ${telegramId} (${firstName || username})`);
   }
+
   return user;
 }
+
+async function updateUserSaldo(telegramId, nuevoSaldo) {
+  const { error } = await supabase
+    .from('users')
+    .update({ saldo: nuevoSaldo, updated_at: new Date() })
+    .eq('telegram_id', telegramId);
+
+  if (error) {
+    console.error('Error al actualizar saldo:', error);
+    throw error;
+  }
+}
+
+async function saveBet(userTelegramId, inputRaw, totalApuesta, detalle, saldoAntes, saldoDespues) {
+  const { error } = await supabase
+    .from('bets')
+    .insert([{
+      user_telegram_id: userTelegramId,
+      input_raw: inputRaw,
+      total_apuesta: totalApuesta,
+      detalle: detalle,
+      saldo_antes: saldoAntes,
+      saldo_despues: saldoDespues
+    }]);
+
+  if (error) {
+    console.error('Error al guardar apuesta:', error);
+  }
+}
+
+// ============================================================
+// 5. Verificar dependencias
+// ============================================================
+if (!Engine || !Preprocesador) {
+  console.error('❌ Motor no cargado correctamente');
+  process.exit(1);
+}
+console.log('✅ Motor listo');
 
 // ============================================================
 // 6. Configuración del bot y Express
@@ -238,32 +264,37 @@ bot.command('deposito', async (ctx) => {
     return ctx.reply('❌ Monto inválido. Debe ser un número positivo.');
   }
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
-  user.saldo += monto;
-  user.updatedAt = new Date();
-  await user.save();
-  ctx.reply(`✅ Se acreditaron $${monto.toFixed(2)} a tu cuenta.\n💰 Nuevo saldo: $${user.saldo.toFixed(2)}`);
+  const nuevoSaldo = user.saldo + monto;
+  await updateUserSaldo(ctx.from.id, nuevoSaldo);
+  ctx.reply(`✅ Se acreditaron $${monto.toFixed(2)} a tu cuenta.\n💰 Nuevo saldo: $${nuevoSaldo.toFixed(2)}`);
 });
 
 bot.command('historial', async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
-  const bets = await Bet.find({ telegramId: ctx.from.id }).sort({ createdAt: -1 }).limit(5);
-  if (!bets.length) {
+  const { data: bets, error } = await supabase
+    .from('bets')
+    .select('*')
+    .eq('user_telegram_id', ctx.from.id)
+    .order('created_at', { ascending: false })
+    .limit(5);
+
+  if (error || !bets || bets.length === 0) {
     return ctx.reply('📭 No tienes jugadas registradas aún.');
   }
+
   let msg = '📜 *Tus últimas 5 jugadas:*\n\n';
   bets.forEach(b => {
-    msg += `💰 *Monto:* $${b.totalApuesta.toFixed(2)}\n`;
-    msg += `📅 *Fecha:* ${b.createdAt.toLocaleString()}\n`;
-    msg += `📝 *Detalle:*\n${b.detalle.substring(0, 200)}${b.detalle.length > 200 ? '…' : ''}\n\n`;
+    msg += `💰 *Monto:* $${b.total_apuesta.toFixed(2)}\n`;
+    msg += `📅 *Fecha:* ${new Date(b.created_at).toLocaleString()}\n`;
+    msg += `📝 *Detalle:*\n${b.detalle?.substring(0, 200) || ''}${b.detalle?.length > 200 ? '…' : ''}\n\n`;
   });
   ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
 // ============================================================
-// 8. Procesamiento de mensajes de texto (jugadas)
+// 8. Procesamiento de mensajes (jugadas)
 // ============================================================
 bot.on('text', async (ctx) => {
-  // Ignorar comandos (empiezan con /)
   if (ctx.message.text.startsWith('/')) return;
 
   let rawInput = ctx.message.text;
@@ -271,7 +302,7 @@ bot.on('text', async (ctx) => {
 
   console.log(`📥 Entrada de ${ctx.from.id} (${ctx.from.username}):\n${rawInput}`);
 
-  // 1. Limpiar metadatos y normalizar
+  // Limpiar y normalizar el texto...
   const lines = rawInput.split('\n');
   const cleanedLines = lines.map(line => stripWhatsAppMeta(line)).filter(l => l.trim());
   let cleanText = cleanedLines.join('\n');
@@ -280,7 +311,6 @@ bot.on('text', async (ctx) => {
   cleanText = expandirDecenasTerminales(cleanText);
   cleanText = cleanText.toLowerCase();
 
-  // 2. Ejecutar el motor para obtener el total de la jugada
   let resultado;
   try {
     resultado = Engine.calcular(
@@ -306,7 +336,7 @@ bot.on('text', async (ctx) => {
     return ctx.reply('❌ La jugada no tiene monto válido. Revisa la sintaxis.');
   }
 
-  // 3. Obtener usuario y verificar saldo
+  // Obtener usuario y verificar saldo
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
   if (user.saldo < totalApuesta) {
     return ctx.reply(
@@ -317,27 +347,16 @@ bot.on('text', async (ctx) => {
     );
   }
 
-  // 4. Deducción del saldo
+  // Deducir saldo y guardar apuesta
   const saldoAntes = user.saldo;
-  user.saldo -= totalApuesta;
-  user.updatedAt = new Date();
-  await user.save();
+  const saldoDespues = saldoAntes - totalApuesta;
 
-  // 5. Guardar la jugada en el historial
-  const bet = new Bet({
-    userId: user._id,
-    telegramId: user.telegramId,
-    inputRaw: rawInput,
-    totalApuesta,
-    detalle: resultado.detalleTexto || '',
-    saldoAntes,
-    saldoDespues: user.saldo,
-  });
-  await bet.save();
+  await updateUserSaldo(ctx.from.id, saldoDespues);
+  await saveBet(ctx.from.id, rawInput, totalApuesta, resultado.detalleTexto || '', saldoAntes, saldoDespues);
 
-  // 6. Formatear respuesta compacta (igual que antes)
+  // Formatear respuesta (compacta)
   let respuesta = `💰 *Total apostado:* $${totalApuesta.toFixed(2)}\n`;
-  respuesta += `💰 *Saldo restante:* $${user.saldo.toFixed(2)}\n\n`;
+  respuesta += `💰 *Saldo restante:* $${saldoDespues.toFixed(2)}\n\n`;
 
   let bloqueActual = null;
   let lineasAgrupadas = [];
@@ -375,7 +394,6 @@ bot.on('text', async (ctx) => {
   }
 
   respuesta += `\n✅ *Jugada registrada correctamente.*`;
-
   await ctx.reply(respuesta, { parse_mode: 'Markdown' });
 });
 
