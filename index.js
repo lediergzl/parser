@@ -2,34 +2,39 @@ const express = require('express');
 const { Telegraf } = require('telegraf');
 
 // ============================================================
-// 1. Cargar el bundle del motor (expone globales)
+// 1. Cargar el bundle (debe exponer globales)
 // ============================================================
-require('./lotopro-core.bundle.js');
+try {
+  require('./lotopro-core.bundle.js');
+} catch (err) {
+  console.error('❌ No se pudo cargar lotopro-core.bundle.js:', err.message);
+  process.exit(1);
+}
 
-// Extraer las funciones que el motor necesita
+// Obtener referencias globales
 const { Engine, Expansion, Preprocesador, limpiarMonto } = global;
 
-// Verificar que todo esté presente
-if (!Engine || typeof Engine.calcular !== 'function') {
-  console.error('❌ Engine.calcular no está disponible');
+// Validación exhaustiva
+const missing = [];
+if (!Engine) missing.push('Engine');
+if (!Expansion) missing.push('Expansion');
+if (!Preprocesador) missing.push('Preprocesador');
+if (!limpiarMonto) missing.push('limpiarMonto');
+if (missing.length) {
+  console.error(`❌ Faltan componentes del motor: ${missing.join(', ')}`);
+  console.error('Objeto global disponible:', Object.keys(global).filter(k => k.includes('Engine') || k.includes('Prepro')));
   process.exit(1);
 }
-if (!Preprocesador || typeof Preprocesador.preprocesarJugada !== 'function') {
-  console.error('❌ Preprocesador.preprocesarJugada no está disponible');
-  process.exit(1);
-}
+console.log('✅ Motor cargado correctamente');
 
 // ============================================================
-// 2. Funciones de expansión opcionales (para más tolerancia)
-//    (puedes mantenerlas o no; el preprocesador ya hace mucho)
+// 2. Funciones de expansión adicionales (opcional)
 // ============================================================
 function expandirParesConX(texto) {
-  // Convierte "28x82x14x41" en "28 82 14 41"
   return texto.replace(/(\d+)\s*[xX]\s*(?=\d)/g, (match, p1) => p1 + ' ');
 }
 
 function expandirDecenasTerminales(texto) {
-  // Convierte D2 → 20 21 ... 29,  t3 → 03 13 ... 93
   let resultado = texto;
   resultado = resultado.replace(/\b[Dd](\d)\b/g, (match, digito) => {
     const decena = parseInt(digito, 10);
@@ -51,128 +56,83 @@ function expandirDecenasTerminales(texto) {
 }
 
 // ============================================================
-// 3. Configuración de Telegram y Express
+// 3. Configuración del bot
 // ============================================================
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
-  console.error('❌ TELEGRAM_BOT_TOKEN no definido en variables de entorno');
+  console.error('❌ TELEGRAM_BOT_TOKEN no definido');
   process.exit(1);
 }
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
-// Logging de todas las peticiones (útil para depurar)
 app.use((req, res, next) => {
   console.log(`📨 [${req.method}] ${req.path}`);
   next();
 });
 
-// Ruta de salud para mantener el bot despierto (ping)
 app.get('/ping', (req, res) => res.send('pong'));
-app.get('/', (req, res) => res.send('🤖 Bot de loterías activo'));
+app.get('/', (req, res) => res.send('🤖 LotoPro Bot activo'));
 
-// Webhook: sin express.json() para no interferir con el callback de Telegraf
 const webhookPath = '/webhook';
 app.post(webhookPath, (req, res) => {
   bot.webhookCallback(webhookPath)(req, res);
 });
 
-// ============================================================
-// 4. Comandos y mensajes del bot
-// ============================================================
-bot.start((ctx) => {
-  ctx.reply(
-    '✅ Bot de apuestas activo.\n\n' +
-    'Envía una jugada en formato DSL.\n' +
-    'Ejemplo:\n' +
-    '```\n' +
-    'Juana\n' +
-    '20 21 22 23 24 25 26 27 28 29 con 50\n' +
-    '20 21 22 23 24 25 26 27 28 29 corrido con 20\n' +
-    '20 21 22 23 24 25 26 27 28 29 candado con 2300\n' +
-    'Parejas d2 t3 4 5 parle con 5\n' +
-    '```',
-    { parse_mode: 'Markdown' }
-  );
-});
+// Comandos
+bot.start((ctx) => ctx.reply('✅ Bot activo. Envía una jugada en formato DSL.'));
+bot.help((ctx) => ctx.reply('Ejemplo:\nJuana\nD2 con 50 y 20 candado con 2300\nParejas d2 t3 4 5 parle con 5'));
 
-bot.help((ctx) => {
-  ctx.reply(
-    'ℹ️ *Instrucciones*\n' +
-    '• Los números se separan por espacios.\n' +
-    '• Usa "con" para indicar el monto.\n' +
-    '• Para parlés: `nums parle con monto`\n' +
-    '• Para candados: `nums candado con monto`\n' +
-    '• Para centenas: `centenas con monto`\n' +
-    '• Para decenas/terminales: `d2` (20-29), `t3` (03,13,...,93)\n' +
-    '• Para pares con "x": `28x82x14x41 parle con 2`\n\n' +
-    'Ejemplo completo:\n' +
-    '```\n' +
-    'Juana\n' +
-    '20 21 22 23 24 25 26 27 28 29 con 50\n' +
-    'D2 corrido con 20\n' +
-    'D2 candado con 2300\n' +
-    'd2 t3 4 5 parle con 5\n' +
-    '```',
-    { parse_mode: 'Markdown' }
-  );
-});
-
-// Procesamiento de mensajes de texto
+// Procesador principal
 bot.on('text', async (ctx) => {
   let rawInput = ctx.message.text;
   if (!rawInput.trim()) return;
 
-  console.log(`⚙️ Procesando jugada de ${ctx.from.username || ctx.from.id}: ${rawInput.slice(0, 100)}`);
+  console.log(`📥 Entrada de ${ctx.from.username || ctx.from.id}: ${rawInput.slice(0, 200)}`);
 
-  // (Opcional) Expansiones adicionales para mayor comodidad
-  // Si ya usas D2, t3, etc., el preprocesador las maneja; pero estas funciones ayudan
-  // con notaciones como "28x82x14x41" y mayúsculas "D2".
+  // Pre-expansiones
   rawInput = expandirParesConX(rawInput);
   rawInput = expandirDecenasTerminales(rawInput);
 
-  // Parámetros fijos (lotería y sorteo por defecto, se pueden hacer dinámicos)
-  const loteriaId = 1;
-  const sorteoId = 1;
-
   try {
+    // Llamada al motor con TODAS las dependencias
     const resultado = Engine.calcular(
       {
         rawInput,
-        loteriaId,
-        sorteoId,
+        loteriaId: 1,
+        sorteoId: 1,
       },
       {
-        limpiarMonto,                // función de limpieza de montos
-        Expansion,                   // expansor de centenas, rangos, etc.
-        preprocesarJugada: Preprocesador.preprocesarJugada,  // ← CLAVE: el preprocesador completo
+        limpiarMonto,
+        Expansion,
+        preprocesarJugada: Preprocesador.preprocesarJugada,
       }
     );
 
-    if (resultado.ok) {
-      let respuesta = `💰 *Total:* ${resultado.totalGeneral.toFixed(2)}\n\n`;
-      if (resultado.detalleTexto) respuesta += resultado.detalleTexto;
-      if (resultado.flaggedWarnings && resultado.flaggedWarnings.length) {
-        respuesta += '\n⚠️ *Revisiones pendientes:*\n';
-        respuesta += resultado.flaggedWarnings.map(w => `• ${w.message}`).join('\n');
-      }
-      await ctx.reply(respuesta, { parse_mode: 'Markdown' });
-    } else {
+    if (!resultado.ok) {
       const errorMsg = resultado.errors?.map(e => e.message).join('\n') || resultado.message;
-      await ctx.reply(`❌ *Error:*\n${errorMsg}`, { parse_mode: 'Markdown' });
+      await ctx.reply(`❌ Error en el cálculo:\n${errorMsg}`);
+      return;
     }
+
+    let respuesta = `💰 Total: ${resultado.totalGeneral.toFixed(2)}\n\n`;
+    if (resultado.detalleTexto) respuesta += resultado.detalleTexto;
+    if (resultado.flaggedWarnings?.length) {
+      respuesta += '\n⚠️ Revisiones pendientes:\n';
+      respuesta += resultado.flaggedWarnings.map(w => `• ${w.message}`).join('\n');
+    }
+    await ctx.reply(respuesta, { parse_mode: 'Markdown' });
+
   } catch (err) {
-    console.error('🔥 Error en el motor:', err);
-    await ctx.reply('❌ Error interno del servidor. El administrador ha sido notificado.');
+    console.error('🔥 Excepción en el motor:', err);
+    // Envía el error real para depuración (¡solo temporal!)
+    await ctx.reply(`❌ Error interno del servidor:\n${err.message}\n\nStack: ${err.stack?.slice(0, 200)}`);
   }
 });
 
-// ============================================================
-// 5. Iniciar servidor Express
-// ============================================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor Express escuchando en el puerto ${PORT}`);
-  console.log(`✅ Webhook configurado en POST ${webhookPath}`);
+  console.log(`🚀 Servidor escuchando en puerto ${PORT}`);
+  console.log(`✅ Webhook en POST ${webhookPath}`);
 });
