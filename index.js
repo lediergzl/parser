@@ -61,6 +61,7 @@ async function getOrCreateUser(telegramId, username, firstName) {
       .single();
     if (insertError) return null;
     user = newUser;
+    console.log(`🆕 Nuevo usuario: ${telegramId} (${firstName || username})`);
   }
   return user;
 }
@@ -128,7 +129,7 @@ async function rejectDeposit(requestId, adminId, reason = '') {
     .eq('id', requestId);
 }
 
-// ================================ LÍMITES ACUMULATIVOS (CON LOGS) ================================
+// ================================ LÍMITES ACUMULATIVOS ================================
 async function getAcumuladoPorNumero(loteriaId, sorteoId, fecha) {
   const { data: bets, error } = await supabase
     .from('bets')
@@ -152,7 +153,6 @@ async function getAcumuladoPorNumero(loteriaId, sorteoId, fecha) {
       }
     } catch(e) {}
   }
-  console.log(`[LÍMITES] Acumulado por número en sorteo ${sorteoId}:`, acumulado);
   return acumulado;
 }
 
@@ -168,15 +168,11 @@ async function getLimitesGlobales(loteriaId, sorteoId) {
   if (error || !data) return {};
   const map = {};
   for (const item of data) map[item.tipo] = item.monto_maximo;
-  console.log(`[LÍMITES] Límites globales obtenidos:`, map);
   return map;
 }
 
 async function validarLimitesAcumulativos(jugadasDetalle, loteriaId, sorteoId, fecha, limites) {
-  if (!limites || Object.keys(limites).length === 0) {
-    console.log(`[LÍMITES] No hay límites configurados, se omite validación.`);
-    return null;
-  }
+  if (!limites || Object.keys(limites).length === 0) return null;
   const acumulado = await getAcumuladoPorNumero(loteriaId, sorteoId, fecha);
   for (const detalle of jugadasDetalle) {
     const tipoBase = (detalle.tipo === 'candado' || detalle.tipo === 'candado_global') ? 'parle' : detalle.tipo;
@@ -188,7 +184,6 @@ async function validarLimitesAcumulativos(jugadasDetalle, loteriaId, sorteoId, f
     for (const num of numeros) {
       const acumPrev = acumulado[num] || 0;
       if (acumPrev + montoUnitario > limite) {
-        console.log(`[LÍMITES] Violación: número ${num} acumulado ${acumPrev} + nuevo ${montoUnitario} > límite ${limite}`);
         return { numero: num, tipo: tipoBase, montoActual: montoUnitario, acumPrev, limite };
       }
     }
@@ -196,7 +191,7 @@ async function validarLimitesAcumulativos(jugadasDetalle, loteriaId, sorteoId, f
   return null;
 }
 
-// ================================ CATÁLOGOS Y BOTONERA ================================
+// ================================ CATÁLOGOS Y PREFERENCIAS ================================
 async function getLoterias() {
   const { data, error } = await supabase.from('loterias').select('*').eq('activo', true).order('id');
   if (error) throw error;
@@ -236,17 +231,35 @@ async function saveUserPreference(telegramId, loteriaId, sorteoId, moneda) {
     }, { onConflict: 'telegram_id' });
 }
 
+// ==================== VALIDACIÓN DE HORARIO CORREGIDA ====================
 async function validarHorarioSorteo(sorteoId) {
   const { data: sorteo, error } = await supabase
     .from('sorteos')
-    .select('hora_apertura, hora_cierre')
+    .select('hora_apertura, hora_cierre, nombre')
     .eq('id', sorteoId)
     .single();
-  if (error || !sorteo) return null;
+  if (error || !sorteo) {
+    return { open: false, message: '❌ No se pudo obtener el horario del sorteo. Contacta al administrador.' };
+  }
   const ahora = new Date();
-  const horaActual = ahora.getHours().toString().padStart(2,'0') + ':' + ahora.getMinutes().toString().padStart(2,'0');
-  if (horaActual < sorteo.hora_apertura) return { open: false, message: `⏰ El sorteo abre a las ${sorteo.hora_apertura}.` };
-  if (horaActual >= sorteo.hora_cierre) return { open: false, message: `⏰ El sorteo cerró a las ${sorteo.hora_cierre}.` };
+  const horaActual = ahora.getHours() * 60 + ahora.getMinutes();
+  const [aperturaH, aperturaM] = sorteo.hora_apertura.split(':').map(Number);
+  const [cierreH, cierreM] = sorteo.hora_cierre.split(':').map(Number);
+  const aperturaMin = aperturaH * 60 + aperturaM;
+  const cierreMin = cierreH * 60 + cierreM;
+
+  if (horaActual < aperturaMin) {
+    return {
+      open: false,
+      message: `⏰ El sorteo "${sorteo.nombre}" aún no ha abierto.\n📅 Horario: ${sorteo.hora_apertura} - ${sorteo.hora_cierre}.\nVuelve más tarde.`
+    };
+  }
+  if (horaActual >= cierreMin) {
+    return {
+      open: false,
+      message: `⏰ El sorteo "${sorteo.nombre}" ya cerró.\n📅 Horario: ${sorteo.hora_apertura} - ${sorteo.hora_cierre}.\nNo se aceptan más apuestas.`
+    };
+  }
   return { open: true };
 }
 
@@ -271,20 +284,22 @@ async function isBetEditable(bet) {
   const hoy = new Date().toISOString().slice(0,10);
   if (bet.fecha_apuesta !== hoy) return false;
   const ahora = new Date();
-  const horaActual = ahora.getHours().toString().padStart(2,'0') + ':' + ahora.getMinutes().toString().padStart(2,'0');
+  const horaActual = ahora.getHours() * 60 + ahora.getMinutes();
   const { data: sorteo, error } = await supabase
     .from('sorteos')
     .select('hora_cierre')
     .eq('id', bet.sorteo_id)
     .single();
   if (error || !sorteo) return false;
-  return horaActual < sorteo.hora_cierre;
+  const [cierreH, cierreM] = sorteo.hora_cierre.split(':').map(Number);
+  const cierreMin = cierreH * 60 + cierreM;
+  return horaActual < cierreMin;
 }
 
 // ================================ CONFIGURACIÓN DEL BOT ================================
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
-  console.error('❌ Token no definido');
+  console.error('❌ TELEGRAM_BOT_TOKEN no definido');
   process.exit(1);
 }
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
@@ -298,11 +313,9 @@ app.get('/', (req, res) => res.send('🤖 LotoPro Bot profesional'));
 const webhookPath = '/webhook';
 app.post(webhookPath, (req, res) => { bot.webhookCallback(webhookPath)(req, res); });
 
-// Estado simple en memoria para rechazo de depósitos (sin sesión)
-const rejectState = new Map(); // userId -> depositId
-
-// Estados para depósitos
+// Estados
 const depositStates = new Map();
+const rejectState = new Map(); // adminId -> depositId
 
 // ================================ BOTONERA PRINCIPAL (USUARIO) ================================
 async function showMainMenu(ctx) {
@@ -333,6 +346,7 @@ async function showMainMenu(ctx) {
   await ctx.reply(texto, { parse_mode: 'Markdown', ...keyboard });
 }
 
+// Menú de loterías
 bot.action('menu_loterias', async (ctx) => {
   const loterias = await getLoterias();
   if (!loterias.length) {
@@ -420,7 +434,6 @@ bot.action('menu_mis_jugadas', async (ctx) => {
     const status = editable ? '🟢' : '🔴';
     msg += `${status} *ID:* ${bet.id}\n💰 $${bet.total_apuesta.toFixed(2)}\n📝 ${bet.input_raw.substring(0, 80)}...\n\n`;
   }
-  // Preparar botones sin await en plantillas
   const betsWithEditable = await Promise.all(bets.slice(0, 6).map(async (bet) => {
     const editable = await isBetEditable(bet);
     return { ...bet, editable };
@@ -519,10 +532,7 @@ bot.action('menu_depositar', async (ctx) => {
 
 bot.action(/dep_method_(.+)/, async (ctx) => {
   const method = ctx.match[1];
-  const state = depositStates.get(ctx.from.id) || {};
-  state.method = method;
-  state.step = 'amount';
-  depositStates.set(ctx.from.id, state);
+  depositStates.set(ctx.from.id, { method, step: 'amount' });
   await ctx.editMessageText(`Método: ${method}\n✍️ *Escribe el monto a depositar:*`, { parse_mode: 'Markdown' });
 });
 
@@ -575,7 +585,8 @@ bot.command('admin_panel', async (ctx) => {
         [{ text: '📋 Ver solicitudes depósito', callback_data: 'admin_pendientes' }],
         [{ text: '🎲 Ver jugadas del día', callback_data: 'admin_jugadas_hoy' }],
         [{ text: '📊 Estadísticas', callback_data: 'admin_estadisticas' }],
-        [{ text: '⚙️ Gestionar límites', callback_data: 'admin_limites' }]
+        [{ text: '⚙️ Gestionar límites', callback_data: 'admin_limites' }],
+        [{ text: '🕒 Ver horarios', callback_data: 'admin_horarios' }]
       ]
     }
   };
@@ -616,7 +627,6 @@ bot.action(/admin_aprob_(\d+)/, async (ctx) => {
     await ctx.answerCbQuery(`Depósito #${id} aprobado`);
     await ctx.editMessageText(`✅ Depósito #${id} aprobado. Usuario ${userId} recibe $${amount.toFixed(2)}. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`);
     try { await bot.telegram.sendMessage(userId, `✅ Tu depósito de $${amount.toFixed(2)} ha sido aprobado. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`); } catch(e) {}
-    // No eliminar el mensaje, solo actualizar
   } catch (err) {
     await ctx.answerCbQuery(`Error: ${err.message}`);
   }
@@ -680,10 +690,24 @@ bot.action('admin_limites', async (ctx) => {
   const { data: limites, error } = await supabase.from('limits').select('*').is('loteria_id', null).is('sorteo_id', null);
   if (error) return ctx.reply('Error');
   let msg = '⚙️ *Límites actuales (globales):*\n\n';
-  for (const l of limites) {
-    msg += `• *${l.tipo}* → $${l.monto_maximo.toFixed(2)}\n`;
-  }
+  for (const l of limites) msg += `• *${l.tipo}* → $${l.monto_maximo.toFixed(2)}\n`;
   msg += '\n*Comandos para modificar:*\n/set_limit <tipo> <monto>\nTipos: fijo, corrido, parle, centena';
+  const keyboard = { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] } };
+  await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
+});
+
+bot.action('admin_horarios', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return;
+  const { data: sorteos, error } = await supabase
+    .from('sorteos')
+    .select('id, nombre, loterias(nombre), hora_apertura, hora_cierre')
+    .order('id');
+  if (error || !sorteos.length) return ctx.editMessageText('No hay sorteos configurados.');
+  let msg = '*Horarios de sorteos:*\n\n';
+  for (const s of sorteos) {
+    msg += `🎲 *${s.loterias?.nombre || '?'} - ${s.nombre}*\n`;
+    msg += `   ⏰ ${s.hora_apertura} → ${s.hora_cierre}\n\n`;
+  }
   const keyboard = { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] } };
   await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
 });
@@ -694,14 +718,14 @@ bot.on('text', async (ctx) => {
   const state = depositStates.get(userId);
   // Rechazar depósito (administrador)
   if (rejectState.has(userId)) {
-    const depositId = rejectState.get(userId);
+    const id = rejectState.get(userId);
     const reason = ctx.message.text;
     rejectState.delete(userId);
     try {
-      await rejectDeposit(depositId, userId, reason);
-      const { data: req } = await supabase.from('deposit_requests').select('user_telegram_id').eq('id', depositId).single();
+      await rejectDeposit(id, userId, reason);
+      const { data: req } = await supabase.from('deposit_requests').select('user_telegram_id').eq('id', id).single();
       if (req) await bot.telegram.sendMessage(req.user_telegram_id, `❌ Tu depósito fue rechazado. Motivo: ${reason}`);
-      await ctx.reply(`✅ Depósito #${depositId} rechazado.`);
+      await ctx.reply(`✅ Depósito #${id} rechazado.`);
     } catch (err) {
       await ctx.reply(`❌ Error: ${err.message}`);
     }
@@ -724,7 +748,9 @@ bot.on('text', async (ctx) => {
 bot.on(['photo', 'document'], async (ctx) => {
   const userId = ctx.from.id;
   const state = depositStates.get(userId);
-  if (!state || state.step !== 'proof') return ctx.reply('No estás en proceso de depósito. Usa /depositar en el menú.');
+  if (!state || state.step !== 'proof') {
+    return ctx.reply('No estás en proceso de depósito. Usa /start y selecciona "Depositar" en el menú.');
+  }
   let fileId;
   if (ctx.message.photo) fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
   else if (ctx.message.document) fileId = ctx.message.document.file_id;
@@ -750,8 +776,11 @@ async function processBet(ctx, rawInput) {
     return ctx.reply('⚠️ Primero selecciona un sorteo desde el menú principal usando /start.');
   }
   const moneda = pref.moneda || 'cup';
+  // Validar horario
   const horario = await validarHorarioSorteo(pref.sorteo_id);
-  if (!horario || !horario.open) return ctx.reply(horario?.message || 'Error de horario.');
+  if (!horario || !horario.open) {
+    return ctx.reply(horario?.message || '⏰ El sorteo no está disponible en este momento.');
+  }
   console.log(`📥 Apuesta de ${ctx.from.id}: ${rawInput.substring(0,200)}`);
   let processed = rawInput.toLowerCase();
   processed = preprocesarLineasMixtas(processed);
@@ -781,8 +810,6 @@ async function processBet(ctx, rawInput) {
   const violacion = await validarLimitesAcumulativos(allDetails, pref.loteria_id, pref.sorteo_id, fechaHoy, limites);
   if (violacion) {
     return ctx.reply(`❌ Límite excedido para tipo "${violacion.tipo}". El número ${violacion.numero} ya acumula $${violacion.acumPrev.toFixed(2)} apostados. Máximo: $${violacion.limite.toFixed(2)}. Esta apuesta añade $${violacion.montoActual.toFixed(2)}.`);
-  } else {
-    console.log(`[LÍMITES] Validación superada. No hay violaciones.`);
   }
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
   if (user.saldo < totalApuesta) {
@@ -813,7 +840,7 @@ bot.command('saldo', async (ctx) => {
 });
 
 bot.command('ver_limites', async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return ctx.reply('⛔ Comando solo para administradores.');
+  if (!isAdmin(ctx.from.id)) return ctx.reply('⛔ Solo administradores.');
   const { data: limites, error } = await supabase.from('limits').select('*').is('loteria_id', null).is('sorteo_id', null);
   if (error || !limites.length) return ctx.reply('No hay límites configurados. Usa /set_limit <tipo> <monto>');
   let msg = '*Límites globales:*\n';
@@ -840,10 +867,25 @@ bot.command('set_limit', async (ctx) => {
   }
 });
 
+bot.command('horarios', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) return ctx.reply('⛔ Solo administradores.');
+  const { data: sorteos, error } = await supabase
+    .from('sorteos')
+    .select('id, nombre, loterias(nombre), hora_apertura, hora_cierre')
+    .order('id');
+  if (error || !sorteos.length) return ctx.reply('No hay sorteos configurados.');
+  let msg = '*Horarios de sorteos:*\n\n';
+  for (const s of sorteos) {
+    msg += `🎲 *${s.loterias?.nombre || '?'} - ${s.nombre}*\n`;
+    msg += `   ⏰ ${s.hora_apertura} → ${s.hora_cierre}\n\n`;
+  }
+  ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
 // ================================ INICIAR SERVIDOR ================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor en puerto ${PORT}`);
+  console.log(`🚀 Servidor escuchando en puerto ${PORT}`);
   console.log(`✅ Webhook: ${webhookPath}`);
   console.log(`👑 Admins: ${ADMIN_IDS.join(', ') || 'Ninguno'}`);
 });
