@@ -237,7 +237,6 @@ async function validarHorarioSorteo(sorteoId) {
     .eq('id', sorteoId)
     .single();
   if (error) {
-    // PGRST116 = no row found → sorteo fue eliminado de la BD
     if (error.code === 'PGRST116') {
       return { open: false, message: '❌ El sorteo guardado ya no existe. Selecciona uno nuevo con /start.' };
     }
@@ -250,7 +249,6 @@ async function validarHorarioSorteo(sorteoId) {
   if (sorteo.activo === false || sorteo.activo === 0) {
     return { open: false, message: `❌ El sorteo "${sorteo.nombre}" está inactivo. Selecciona otro con /start.` };
   }
-  // Sin horario configurado → siempre abierto
   if (!sorteo.hora_apertura || !sorteo.hora_cierre) {
     return { open: true };
   }
@@ -271,7 +269,6 @@ async function validarHorarioSorteo(sorteoId) {
 
 // ==================== GESTIÓN DE JUGADAS (USUARIO) ====================
 async function getUserBets(telegramId, sorteoId = null, fecha = null) {
-  // LEFT JOIN: no usar !inner para que no falle si el sorteo fue eliminado
   let query = supabase
     .from('bets')
     .select('*, sorteos (hora_cierre, nombre)')
@@ -294,7 +291,6 @@ async function isBetEditable(bet) {
     .select('hora_cierre')
     .eq('id', bet.sorteo_id)
     .single();
-  // Si no existe el sorteo o no tiene horario, permitir edición durante el día
   if (error || !sorteo || !sorteo.hora_cierre) return true;
   const parts = sorteo.hora_cierre.split(':').map(Number);
   const cierreMin = (parts[0] || 0) * 60 + (parts[1] || 0);
@@ -328,23 +324,34 @@ const depositStates = new Map();
 const rejectState = new Map();
 
 // ================================ BOTONERA PRINCIPAL ================================
-
-/**
- * Genera el texto y teclado del menú principal sin enviar nada.
- */
 async function buildMainMenu(userId, username, firstName) {
   const user = await getOrCreateUser(userId, username, firstName);
-  const pref = await getUserPreference(userId);
+  let pref = await getUserPreference(userId);
   let texto = '🏠 *Menú Principal*\n\n';
   texto += `💰 *Saldo:* $${user.saldo.toFixed(2)}\n`;
+
+  // Verificar si la preferencia es válida
+  let sorteoValido = false;
   if (pref && pref.loteria_id && pref.sorteo_id) {
-    const lot = await supabase.from('loterias').select('nombre').eq('id', pref.loteria_id).single();
-    const sor = await supabase.from('sorteos').select('nombre').eq('id', pref.sorteo_id).single();
-    texto += `🎰 *Sorteo activo:* ${lot.data?.nombre || '?'} - ${sor.data?.nombre || '?'}\n`;
-    texto += `💵 *Moneda:* ${pref.moneda?.toUpperCase()}\n\n`;
-  } else {
+    const { data: sorteo, error } = await supabase
+      .from('sorteos')
+      .select('id, nombre')
+      .eq('id', pref.sorteo_id)
+      .single();
+    if (!error && sorteo) {
+      sorteoValido = true;
+      const lot = await supabase.from('loterias').select('nombre').eq('id', pref.loteria_id).single();
+      texto += `🎰 *Sorteo activo:* ${lot.data?.nombre || '?'} - ${sorteo.nombre}\n`;
+      texto += `💵 *Moneda:* ${pref.moneda?.toUpperCase()}\n\n`;
+    } else {
+      await supabase.from('user_preferences').delete().eq('telegram_id', userId);
+      pref = null;
+    }
+  }
+  if (!sorteoValido) {
     texto += '⚠️ *No has seleccionado un sorteo activo.*\n\n';
   }
+
   const keyboard = {
     reply_markup: {
       inline_keyboard: [
@@ -360,17 +367,16 @@ async function buildMainMenu(userId, username, firstName) {
   return { texto, keyboard };
 }
 
-/**
- * Envía el menú principal como mensaje NUEVO (usado en /start).
- */
 async function showMainMenu(ctx) {
-  const { texto, keyboard } = await buildMainMenu(ctx.from.id, ctx.from.username, ctx.from.first_name);
-  await ctx.reply(texto, { parse_mode: 'Markdown', ...keyboard });
+  try {
+    const { texto, keyboard } = await buildMainMenu(ctx.from.id, ctx.from.username, ctx.from.first_name);
+    await ctx.reply(texto, { parse_mode: 'Markdown', ...keyboard });
+  } catch (err) {
+    console.error('Error en showMainMenu:', err);
+    await ctx.reply('⚠️ Ocurrió un error al cargar el menú. Por favor, intenta de nuevo.');
+  }
 }
 
-/**
- * Edita el mensaje actual mostrando el menú principal (usado en botones "Volver").
- */
 async function editToMainMenu(ctx) {
   try {
     await ctx.answerCbQuery();
@@ -379,14 +385,10 @@ async function editToMainMenu(ctx) {
   try {
     await ctx.editMessageText(texto, { parse_mode: 'Markdown', ...keyboard });
   } catch(e) {
-    // Si no se puede editar (mensaje muy viejo, etc.), enviar nuevo
     await ctx.reply(texto, { parse_mode: 'Markdown', ...keyboard });
   }
 }
 
-/**
- * Genera el texto y teclado del panel admin.
- */
 function buildAdminPanel() {
   const texto = '👑 *Panel de Administración*';
   const keyboard = {
@@ -404,10 +406,7 @@ function buildAdminPanel() {
 }
 
 // ================================ CALLBACKS DE MENÚ PRINCIPAL ================================
-
-bot.action('menu_main', async (ctx) => {
-  await editToMainMenu(ctx);
-});
+bot.action('menu_main', async (ctx) => { await editToMainMenu(ctx); });
 
 bot.action('menu_loterias', async (ctx) => {
   try {
@@ -675,14 +674,12 @@ bot.action('menu_ayuda', async (ctx) => {
 // ================================ PANEL DE ADMINISTRACIÓN ================================
 function isAdmin(userId) { return ADMIN_IDS.includes(userId); }
 
-// Comando /admin_panel → envía mensaje nuevo
 bot.command('admin_panel', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply('⛔ Solo administradores.');
   const { texto, keyboard } = buildAdminPanel();
   await ctx.reply(texto, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// Action admin_panel → edita mensaje existente (botón "Volver" desde submenús admin)
 bot.action('admin_panel', async (ctx) => {
   if (!isAdmin(ctx.from.id)) { await ctx.answerCbQuery('⛔ Solo administradores.'); return; }
   try {
@@ -861,7 +858,6 @@ bot.action('admin_horarios', async (ctx) => {
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
 
-  // Estado: rechazo de depósito (admin)
   if (rejectState.has(userId)) {
     const id = rejectState.get(userId);
     const reason = ctx.message.text;
@@ -881,7 +877,6 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // Estado: ingreso de monto para depósito
   const state = depositStates.get(userId);
   if (state && state.step === 'amount') {
     const amount = parseFloat(ctx.message.text.trim());
@@ -896,7 +891,6 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // Procesar apuesta
   await processBet(ctx, ctx.message.text);
 });
 
@@ -998,8 +992,13 @@ async function processBet(ctx, rawInput) {
 
 // ================================ COMANDOS ADICIONALES ================================
 bot.command('start', async (ctx) => {
-  await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
-  await showMainMenu(ctx);
+  try {
+    await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
+    await showMainMenu(ctx);
+  } catch (err) {
+    console.error('Error en /start:', err);
+    await ctx.reply('❌ Error al iniciar. Intenta de nuevo más tarde.');
+  }
 });
 
 bot.command('saldo', async (ctx) => {
@@ -1061,6 +1060,11 @@ bot.command('diagnostico', async (ctx) => {
     msg += `   Horario: ${horario} | Lotería ID: ${s.loteria_id}\n\n`;
   }
   ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+bot.command('reset', async (ctx) => {
+  await supabase.from('user_preferences').delete().eq('telegram_id', ctx.from.id);
+  ctx.reply('✅ Se ha borrado tu configuración de sorteo. Usa /start para seleccionar uno nuevo.');
 });
 
 // ================================ INICIAR SERVIDOR ================================
