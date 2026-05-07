@@ -2,32 +2,27 @@ const express = require('express');
 const { Telegraf } = require('telegraf');
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-if (!BOT_TOKEN) {
-  console.error('❌ TELEGRAM_BOT_TOKEN no definido');
-  process.exit(1);
-}
+if (!BOT_TOKEN) process.exit(1);
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
-// Webhook
-const webhookPath = '/webhook';
-app.post(webhookPath, (req, res) => {
-  bot.webhookCallback(webhookPath)(req, res);
+// Webhook con logging y manejo de errores
+app.post('/webhook', (req, res) => {
+  console.log('📨 Webhook recibido, body:', req.body);
+  bot.webhookCallback('/webhook')(req, res).catch(err => {
+    console.error('❌ Error en webhook:', err);
+    res.status(500).send('Error interno');
+  });
 });
 
-// Ruta de salud (opcional)
 app.get('/', (req, res) => res.send('OK'));
 
-// Comandos
 bot.start((ctx) => ctx.reply('✅ Bot activo. Envía cualquier mensaje.'));
-bot.on('text', (ctx) => {
-  console.log(`Mensaje de ${ctx.from.id}: ${ctx.message.text}`);
-  ctx.reply(`Recibí: ${ctx.message.text}`);
-});
+bot.on('text', (ctx) => ctx.reply(`Recibí: ${ctx.message.text}`));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor escuchando en puerto ${PORT}`);
-  console.log(`✅ Webhook configurado en POST ${webhookPath}`);
+  console.log(`🚀 Servidor en puerto ${PORT}`);
+  console.log(`✅ Webhook en POST /webhook`);
 });
