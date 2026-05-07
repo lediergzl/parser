@@ -233,21 +233,33 @@ async function saveUserPreference(telegramId, loteriaId, sorteoId, moneda) {
 async function validarHorarioSorteo(sorteoId) {
   const { data: sorteo, error } = await supabase
     .from('sorteos')
-    .select('hora_apertura, hora_cierre, nombre, loteria_id')
+    .select('hora_apertura, hora_cierre, nombre, loteria_id, activo')
     .eq('id', sorteoId)
     .single();
-  if (error || !sorteo) {
-    return { open: false, message: '❌ El sorteo seleccionado ya no está disponible. Por favor, selecciona otro sorteo con /start.' };
+  if (error) {
+    // PGRST116 = no row found → sorteo fue eliminado de la BD
+    if (error.code === 'PGRST116') {
+      return { open: false, message: '❌ El sorteo guardado ya no existe. Selecciona uno nuevo con /start.' };
+    }
+    console.error('validarHorarioSorteo error:', error.message);
+    return { open: false, message: '❌ Error al verificar el sorteo. Intenta de nuevo.' };
   }
+  if (!sorteo) {
+    return { open: false, message: '❌ Sorteo no encontrado. Selecciona uno nuevo con /start.' };
+  }
+  if (sorteo.activo === false || sorteo.activo === 0) {
+    return { open: false, message: `❌ El sorteo "${sorteo.nombre}" está inactivo. Selecciona otro con /start.` };
+  }
+  // Sin horario configurado → siempre abierto
   if (!sorteo.hora_apertura || !sorteo.hora_cierre) {
-    return { open: true, warning: true, message: '⚠️ Sorteo sin horario definido. Se permite la apuesta.' };
+    return { open: true };
   }
   const ahora = new Date();
   const horaActual = ahora.getHours() * 60 + ahora.getMinutes();
-  const [aperturaH, aperturaM] = sorteo.hora_apertura.split(':').map(Number);
-  const [cierreH, cierreM] = sorteo.hora_cierre.split(':').map(Number);
-  const aperturaMin = aperturaH * 60 + aperturaM;
-  const cierreMin = cierreH * 60 + cierreM;
+  const apertParts = sorteo.hora_apertura.split(':').map(Number);
+  const cierreParts = sorteo.hora_cierre.split(':').map(Number);
+  const aperturaMin = (apertParts[0] || 0) * 60 + (apertParts[1] || 0);
+  const cierreMin   = (cierreParts[0] || 0) * 60 + (cierreParts[1] || 0);
   if (horaActual < aperturaMin) {
     return { open: false, message: `⏰ El sorteo "${sorteo.nombre}" aún no ha abierto.\n📅 Horario: ${sorteo.hora_apertura.slice(0,5)} - ${sorteo.hora_cierre.slice(0,5)}.\nVuelve más tarde.` };
   }
@@ -259,16 +271,17 @@ async function validarHorarioSorteo(sorteoId) {
 
 // ==================== GESTIÓN DE JUGADAS (USUARIO) ====================
 async function getUserBets(telegramId, sorteoId = null, fecha = null) {
+  // LEFT JOIN: no usar !inner para que no falle si el sorteo fue eliminado
   let query = supabase
     .from('bets')
-    .select('*, sorteos!inner (hora_cierre, nombre)')
+    .select('*, sorteos (hora_cierre, nombre)')
     .eq('user_telegram_id', telegramId)
     .order('created_at', { ascending: false });
   if (sorteoId) query = query.eq('sorteo_id', sorteoId);
   if (fecha) query = query.eq('fecha_apuesta', fecha);
   const { data, error } = await query;
-  if (error) return [];
-  return data;
+  if (error) { console.error('getUserBets error:', error.message); return []; }
+  return data || [];
 }
 
 async function isBetEditable(bet) {
@@ -281,9 +294,10 @@ async function isBetEditable(bet) {
     .select('hora_cierre')
     .eq('id', bet.sorteo_id)
     .single();
-  if (error || !sorteo) return false;
-  const [cierreH, cierreM] = sorteo.hora_cierre.split(':').map(Number);
-  const cierreMin = cierreH * 60 + cierreM;
+  // Si no existe el sorteo o no tiene horario, permitir edición durante el día
+  if (error || !sorteo || !sorteo.hora_cierre) return true;
+  const parts = sorteo.hora_cierre.split(':').map(Number);
+  const cierreMin = (parts[0] || 0) * 60 + (parts[1] || 0);
   return horaActual < cierreMin;
 }
 
@@ -432,7 +446,7 @@ bot.action(/sel_lot_(\d+)/, async (ctx) => {
       reply_markup: {
         inline_keyboard: [
           ...sorteos.map(s => [{
-            text: `${s.nombre} (${s.hora_apertura.slice(0,5)}-${s.hora_cierre.slice(0,5)})`,
+            text: `${s.nombre} (${(s.hora_apertura||'--:--').slice(0,5)}-${(s.hora_cierre||'--:--').slice(0,5)})`,
             callback_data: `sel_sor_${s.id}`
           }]),
           [{ text: '🔙 Volver', callback_data: 'menu_loterias' }]
@@ -831,8 +845,10 @@ bot.action('admin_horarios', async (ctx) => {
     }
     let msg = '🕒 *Horarios de sorteos:*\n\n';
     for (const s of sorteos) {
+      const abre = s.hora_apertura ? s.hora_apertura.slice(0,5) : 'sin hora';
+      const cierra = s.hora_cierre ? s.hora_cierre.slice(0,5) : 'sin hora';
       msg += `🎲 *${s.loterias?.nombre || '?'} — ${s.nombre}*\n`;
-      msg += `   ⏰ ${s.hora_apertura?.slice(0,5) || '?'} → ${s.hora_cierre?.slice(0,5) || '?'}\n\n`;
+      msg += `   ⏰ ${abre} → ${cierra} | ${s.activo ? '🟢 Activo' : '🔴 Inactivo'}\n\n`;
     }
     await ctx.editMessageText(msg, {
       parse_mode: 'Markdown',
