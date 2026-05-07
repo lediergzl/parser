@@ -297,7 +297,7 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => parseInt(id
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 
-// Webhook (no usar express.json() aquí, Telegraf lo maneja)
+// Webhook
 const webhookPath = '/webhook';
 app.post(webhookPath, (req, res) => {
   bot.webhookCallback(webhookPath)(req, res).catch(err => {
@@ -314,9 +314,13 @@ const depositStates = new Map();
 const rejectState = new Map();
 
 // ================================ BOTONERA PRINCIPAL ================================
-async function showMainMenu(ctx) {
-  const pref = await getUserPreference(ctx.from.id);
-  const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
+
+/**
+ * Genera el texto y teclado del menú principal sin enviar nada.
+ */
+async function buildMainMenu(userId, username, firstName) {
+  const user = await getOrCreateUser(userId, username, firstName);
+  const pref = await getUserPreference(userId);
   let texto = '🏠 *Menú Principal*\n\n';
   texto += `💰 *Saldo:* $${user.saldo.toFixed(2)}\n`;
   if (pref && pref.loteria_id && pref.sorteo_id) {
@@ -339,16 +343,66 @@ async function showMainMenu(ctx) {
       ]
     }
   };
+  return { texto, keyboard };
+}
+
+/**
+ * Envía el menú principal como mensaje NUEVO (usado en /start).
+ */
+async function showMainMenu(ctx) {
+  const { texto, keyboard } = await buildMainMenu(ctx.from.id, ctx.from.username, ctx.from.first_name);
   await ctx.reply(texto, { parse_mode: 'Markdown', ...keyboard });
 }
 
-// ================================ CALLBACKS DE MENÚ ================================
+/**
+ * Edita el mensaje actual mostrando el menú principal (usado en botones "Volver").
+ */
+async function editToMainMenu(ctx) {
+  try {
+    await ctx.answerCbQuery();
+  } catch(e) {}
+  const { texto, keyboard } = await buildMainMenu(ctx.from.id, ctx.from.username, ctx.from.first_name);
+  try {
+    await ctx.editMessageText(texto, { parse_mode: 'Markdown', ...keyboard });
+  } catch(e) {
+    // Si no se puede editar (mensaje muy viejo, etc.), enviar nuevo
+    await ctx.reply(texto, { parse_mode: 'Markdown', ...keyboard });
+  }
+}
+
+/**
+ * Genera el texto y teclado del panel admin.
+ */
+function buildAdminPanel() {
+  const texto = '👑 *Panel de Administración*';
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '📋 Solicitudes depósito', callback_data: 'admin_pendientes' }],
+        [{ text: '🎲 Jugadas del día', callback_data: 'admin_jugadas_hoy' }],
+        [{ text: '📊 Estadísticas', callback_data: 'admin_estadisticas' }],
+        [{ text: '⚙️ Límites', callback_data: 'admin_limites' }],
+        [{ text: '🕒 Horarios', callback_data: 'admin_horarios' }]
+      ]
+    }
+  };
+  return { texto, keyboard };
+}
+
+// ================================ CALLBACKS DE MENÚ PRINCIPAL ================================
+
+bot.action('menu_main', async (ctx) => {
+  await editToMainMenu(ctx);
+});
+
 bot.action('menu_loterias', async (ctx) => {
   try {
+    await ctx.answerCbQuery();
     const loterias = await getLoterias();
     if (!loterias.length) {
-      await ctx.answerCbQuery('No hay loterías activas');
-      await ctx.editMessageText('❌ No hay loterías disponibles.');
+      await ctx.editMessageText('❌ No hay loterías disponibles.', {
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'menu_main' }]] }
+      });
       return;
     }
     const keyboard = {
@@ -365,17 +419,22 @@ bot.action('menu_loterias', async (ctx) => {
 
 bot.action(/sel_lot_(\d+)/, async (ctx) => {
   try {
+    await ctx.answerCbQuery();
     const lotId = parseInt(ctx.match[1]);
     const sorteos = await getSorteos(lotId);
     if (!sorteos.length) {
-      await ctx.answerCbQuery('Esta lotería no tiene sorteos activos');
-      await ctx.editMessageText('❌ No hay sorteos disponibles.');
+      await ctx.editMessageText('❌ No hay sorteos disponibles.', {
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'menu_loterias' }]] }
+      });
       return;
     }
     const keyboard = {
       reply_markup: {
         inline_keyboard: [
-          ...sorteos.map(s => [{ text: `${s.nombre} (${s.hora_apertura.slice(0,5)}-${s.hora_cierre.slice(0,5)})`, callback_data: `sel_sor_${s.id}` }]),
+          ...sorteos.map(s => [{
+            text: `${s.nombre} (${s.hora_apertura.slice(0,5)}-${s.hora_cierre.slice(0,5)})`,
+            callback_data: `sel_sor_${s.id}`
+          }]),
           [{ text: '🔙 Volver', callback_data: 'menu_loterias' }]
         ]
       }
@@ -387,249 +446,282 @@ bot.action(/sel_lot_(\d+)/, async (ctx) => {
 bot.action(/sel_sor_(\d+)/, async (ctx) => {
   try {
     const sorId = parseInt(ctx.match[1]);
-    const { data: sorteo, error } = await supabase.from('sorteos').select('*, loterias!inner(nombre)').eq('id', sorId).single();
+    const { data: sorteo, error } = await supabase
+      .from('sorteos')
+      .select('*, loterias!inner(nombre)')
+      .eq('id', sorId)
+      .single();
     if (error) throw error;
     const pref = await getUserPreference(ctx.from.id) || {};
     await saveUserPreference(ctx.from.id, sorteo.loteria_id, sorId, pref.moneda || 'cup');
-    await ctx.answerCbQuery(`Sorteo ${sorteo.nombre} seleccionado`);
-    await ctx.editMessageText(`✅ *Sorteo seleccionado:* ${sorteo.loterias.nombre} - ${sorteo.nombre}\n\nAhora puedes enviar tu jugada directamente.`, { parse_mode: 'Markdown' });
+    await ctx.answerCbQuery(`Sorteo ${sorteo.nombre} seleccionado ✅`);
+    await ctx.editMessageText(
+      `✅ *Sorteo seleccionado:* ${sorteo.loterias.nombre} - ${sorteo.nombre}\n\nAhora puedes enviar tu jugada directamente.`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Menú principal', callback_data: 'menu_main' }]] }
+      }
+    );
   } catch (err) { console.error(err); await ctx.answerCbQuery('Error al seleccionar'); }
 });
 
 bot.action('menu_moneda', async (ctx) => {
-  const keyboard = {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '🇨🇺 CUP', callback_data: 'moneda_cup' }],
-        [{ text: '💳 MLC', callback_data: 'moneda_mlc' }],
-        [{ text: '🇺🇸 USD', callback_data: 'moneda_usd' }],
-        [{ text: '🔙 Volver', callback_data: 'menu_main' }]
-      ]
-    }
-  };
-  await ctx.editMessageText('💵 *Selecciona tu moneda preferida:*', { parse_mode: 'Markdown', ...keyboard });
+  try {
+    await ctx.answerCbQuery();
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🇨🇺 CUP', callback_data: 'moneda_cup' }],
+          [{ text: '💳 MLC', callback_data: 'moneda_mlc' }],
+          [{ text: '🇺🇸 USD', callback_data: 'moneda_usd' }],
+          [{ text: '🔙 Volver', callback_data: 'menu_main' }]
+        ]
+      }
+    };
+    await ctx.editMessageText('💵 *Selecciona tu moneda preferida:*', { parse_mode: 'Markdown', ...keyboard });
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action(/moneda_(cup|mlc|usd)/, async (ctx) => {
-  const moneda = ctx.match[1];
-  const pref = await getUserPreference(ctx.from.id);
-  await saveUserPreference(ctx.from.id, pref?.loteria_id || null, pref?.sorteo_id || null, moneda);
-  await ctx.answerCbQuery(`Moneda ${moneda.toUpperCase()} seleccionada`);
-  await ctx.editMessageText(`✅ *Moneda seleccionada:* ${moneda.toUpperCase()}`);
+  try {
+    const moneda = ctx.match[1];
+    const pref = await getUserPreference(ctx.from.id);
+    await saveUserPreference(ctx.from.id, pref?.loteria_id || null, pref?.sorteo_id || null, moneda);
+    await ctx.answerCbQuery(`Moneda ${moneda.toUpperCase()} seleccionada ✅`);
+    await ctx.editMessageText(
+      `✅ *Moneda seleccionada:* ${moneda.toUpperCase()}`,
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔙 Menú principal', callback_data: 'menu_main' }]] } }
+    );
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action('menu_mis_jugadas', async (ctx) => {
-  const pref = await getUserPreference(ctx.from.id);
-  if (!pref?.sorteo_id) {
-    await ctx.answerCbQuery('Primero selecciona un sorteo');
-    await ctx.editMessageText('⚠️ Debes seleccionar un sorteo desde el menú principal.');
-    return;
-  }
-  const bets = await getUserBets(ctx.from.id, pref.sorteo_id, new Date().toISOString().slice(0,10));
-  if (!bets.length) {
-    await ctx.answerCbQuery('No tienes jugadas hoy');
-    await ctx.editMessageText('📭 No tienes jugadas registradas en el sorteo actual.');
-    return;
-  }
-  let msg = '📋 *Tus jugadas de hoy:*\n\n';
-  for (const bet of bets) {
-    const editable = await isBetEditable(bet);
-    const status = editable ? '🟢' : '🔴';
-    msg += `${status} *ID:* ${bet.id}\n💰 $${bet.total_apuesta.toFixed(2)}\n📝 ${bet.input_raw.substring(0, 80)}...\n\n`;
-  }
-  const betsWithEditable = await Promise.all(bets.slice(0, 6).map(async (bet) => {
-    const editable = await isBetEditable(bet);
-    return { ...bet, editable };
-  }));
-  const inlineButtons = betsWithEditable.map(bet => [
-    { text: `${bet.editable ? '✏️' : '🔒'} Editar #${bet.id}`, callback_data: `edit_bet_${bet.id}` },
-    { text: `${bet.editable ? '❌' : '🔒'} Eliminar #${bet.id}`, callback_data: `del_bet_${bet.id}` }
-  ]).flat();
-  const keyboard = {
-    reply_markup: {
-      inline_keyboard: [
-        ...(inlineButtons.length ? [inlineButtons.slice(0, 2)] : []),
-        [{ text: '🔙 Menú principal', callback_data: 'menu_main' }]
-      ]
+  try {
+    await ctx.answerCbQuery();
+    const pref = await getUserPreference(ctx.from.id);
+    if (!pref?.sorteo_id) {
+      await ctx.editMessageText('⚠️ Debes seleccionar un sorteo desde el menú principal.', {
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'menu_main' }]] }
+      });
+      return;
     }
-  };
-  await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
+    const bets = await getUserBets(ctx.from.id, pref.sorteo_id, new Date().toISOString().slice(0,10));
+    if (!bets.length) {
+      await ctx.editMessageText('📭 No tienes jugadas registradas en el sorteo actual.', {
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'menu_main' }]] }
+      });
+      return;
+    }
+    let msg = '📋 *Tus jugadas de hoy:*\n\n';
+    const betsWithEditable = await Promise.all(bets.slice(0, 5).map(async (bet) => {
+      const editable = await isBetEditable(bet);
+      return { ...bet, editable };
+    }));
+    for (const bet of betsWithEditable) {
+      const status = bet.editable ? '🟢' : '🔴';
+      msg += `${status} *ID:* ${bet.id} | 💰 $${bet.total_apuesta.toFixed(2)}\n📝 ${bet.input_raw.substring(0, 60)}…\n\n`;
+    }
+    const rows = betsWithEditable.map(bet => [
+      { text: `${bet.editable ? '✏️' : '🔒'} #${bet.id}`, callback_data: `edit_bet_${bet.id}` },
+      { text: `${bet.editable ? '❌' : '🔒'} #${bet.id}`, callback_data: `del_bet_${bet.id}` }
+    ]);
+    rows.push([{ text: '🔙 Menú principal', callback_data: 'menu_main' }]);
+    await ctx.editMessageText(msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: rows } });
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action(/edit_bet_(\d+)/, async (ctx) => {
-  const betId = parseInt(ctx.match[1]);
-  const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
-  if (error || !bet) {
-    await ctx.answerCbQuery('Jugada no encontrada');
-    return;
-  }
-  if (!(await isBetEditable(bet))) {
-    await ctx.answerCbQuery('⏰ El sorteo ya cerró, no se puede editar');
-    return;
-  }
-  await ctx.answerCbQuery('Jugada cargada para edición');
-  await ctx.reply(`✏️ *Editar jugada #${betId}*\n\nCopia y modifica este texto:\n\`\`\`\n${bet.input_raw}\n\`\`\`\nLuego envíala como una nueva jugada.`);
+  try {
+    const betId = parseInt(ctx.match[1]);
+    const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
+    if (error || !bet) { await ctx.answerCbQuery('Jugada no encontrada'); return; }
+    if (!(await isBetEditable(bet))) { await ctx.answerCbQuery('⏰ El sorteo ya cerró, no se puede editar'); return; }
+    await ctx.answerCbQuery('Jugada cargada');
+    await ctx.reply(
+      `✏️ *Editar jugada #${betId}*\n\nCopia y modifica este texto:\n\`\`\`\n${bet.input_raw}\n\`\`\`\nLuego envíala como una nueva jugada.`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action(/del_bet_(\d+)/, async (ctx) => {
-  const betId = parseInt(ctx.match[1]);
-  const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
-  if (error || !bet) {
-    await ctx.answerCbQuery('Jugada no encontrada');
-    return;
-  }
-  if (!(await isBetEditable(bet))) {
-    await ctx.answerCbQuery('⏰ El sorteo ya cerró, no se puede eliminar');
-    return;
-  }
-  const confirmKeyboard = {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '✅ Sí, eliminar', callback_data: `confirm_del_${betId}` }],
-        [{ text: '❌ Cancelar', callback_data: 'cancel_del' }]
-      ]
-    }
-  };
-  await ctx.editMessageText(`⚠️ ¿Eliminar jugada #${betId}?\nMonto: $${bet.total_apuesta.toFixed(2)}`, confirmKeyboard);
+  try {
+    const betId = parseInt(ctx.match[1]);
+    const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
+    if (error || !bet) { await ctx.answerCbQuery('Jugada no encontrada'); return; }
+    if (!(await isBetEditable(bet))) { await ctx.answerCbQuery('⏰ El sorteo ya cerró, no se puede eliminar'); return; }
+    await ctx.answerCbQuery();
+    await ctx.editMessageText(
+      `⚠️ ¿Eliminar jugada #${betId}?\nMonto: $${bet.total_apuesta.toFixed(2)}`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✅ Sí, eliminar', callback_data: `confirm_del_${betId}` }],
+            [{ text: '❌ Cancelar', callback_data: 'menu_mis_jugadas' }]
+          ]
+        }
+      }
+    );
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action(/confirm_del_(\d+)/, async (ctx) => {
-  const betId = parseInt(ctx.match[1]);
-  const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
-  if (error || !bet) return;
-  if (!(await isBetEditable(bet))) {
-    await ctx.answerCbQuery('⏰ El sorteo ya cerró');
-    return;
-  }
-  await supabase.from('bets').delete().eq('id', betId);
-  const { data: user } = await supabase.from('users').select('saldo').eq('telegram_id', bet.user_telegram_id).single();
-  if (user) {
-    const nuevo = user.saldo + bet.total_apuesta;
-    await updateUserSaldo(bet.user_telegram_id, nuevo);
-  }
-  await ctx.answerCbQuery('Jugada eliminada');
-  await ctx.editMessageText(`✅ Jugada #${betId} eliminada. Se reintegraron $${bet.total_apuesta.toFixed(2)} a tu saldo.`);
-});
-
-bot.action('cancel_del', async (ctx) => {
-  await ctx.answerCbQuery('Cancelado');
-  await ctx.deleteMessage();
+  try {
+    const betId = parseInt(ctx.match[1]);
+    const { data: bet, error } = await supabase.from('bets').select('*').eq('id', betId).single();
+    if (error || !bet) { await ctx.answerCbQuery('No encontrada'); return; }
+    if (!(await isBetEditable(bet))) { await ctx.answerCbQuery('⏰ El sorteo ya cerró'); return; }
+    await supabase.from('bets').delete().eq('id', betId);
+    const { data: user } = await supabase.from('users').select('saldo').eq('telegram_id', bet.user_telegram_id).single();
+    if (user) {
+      const nuevo = user.saldo + bet.total_apuesta;
+      await updateUserSaldo(bet.user_telegram_id, nuevo);
+    }
+    await ctx.answerCbQuery('Jugada eliminada ✅');
+    await ctx.editMessageText(
+      `✅ Jugada #${betId} eliminada. Se reintegraron $${bet.total_apuesta.toFixed(2)} a tu saldo.`,
+      { reply_markup: { inline_keyboard: [[{ text: '🔙 Menú principal', callback_data: 'menu_main' }]] } }
+    );
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action('menu_depositar', async (ctx) => {
-  const keyboard = {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '💳 Tarjeta', callback_data: 'dep_method_tarjeta' }],
-        [{ text: '🏦 Transferencia', callback_data: 'dep_method_transferencia' }],
-        [{ text: '📱 Monedero', callback_data: 'dep_method_monedero' }],
-        [{ text: '🔙 Volver', callback_data: 'menu_main' }]
-      ]
-    }
-  };
-  await ctx.editMessageText('💸 *Selecciona método de pago:*', { parse_mode: 'Markdown', ...keyboard });
+  try {
+    await ctx.answerCbQuery();
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '💳 Tarjeta', callback_data: 'dep_method_tarjeta' }],
+          [{ text: '🏦 Transferencia', callback_data: 'dep_method_transferencia' }],
+          [{ text: '📱 Monedero', callback_data: 'dep_method_monedero' }],
+          [{ text: '🔙 Volver', callback_data: 'menu_main' }]
+        ]
+      }
+    };
+    await ctx.editMessageText('💸 *Selecciona método de pago:*', { parse_mode: 'Markdown', ...keyboard });
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action(/dep_method_(.+)/, async (ctx) => {
-  const method = ctx.match[1];
-  depositStates.set(ctx.from.id, { method, step: 'amount' });
-  await ctx.editMessageText(`Método: ${method}\n✍️ *Escribe el monto a depositar:*`, { parse_mode: 'Markdown' });
+  try {
+    await ctx.answerCbQuery();
+    const method = ctx.match[1];
+    depositStates.set(ctx.from.id, { method, step: 'amount' });
+    await ctx.editMessageText(
+      `Método: *${method}*\n✍️ Escribe el monto a depositar:`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) { console.error(err); }
 });
 
 bot.action('menu_historial', async (ctx) => {
-  const { data: bets, error } = await supabase.from('bets').select('*').eq('user_telegram_id', ctx.from.id).order('created_at', { ascending: false }).limit(5);
-  if (error || !bets || !bets.length) {
-    await ctx.answerCbQuery('No hay historial');
-    await ctx.editMessageText('📭 No tienes jugadas registradas.');
-    return;
-  }
-  let msg = '📜 *Tus últimas 5 jugadas:*\n\n';
-  bets.forEach(b => {
-    msg += `💰 $${b.total_apuesta.toFixed(2)} - ${new Date(b.created_at).toLocaleString()}\n📝 ${b.detalle?.substring(0, 100)}…\n\n`;
-  });
-  const keyboard = { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'menu_main' }]] } };
-  await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
+  try {
+    await ctx.answerCbQuery();
+    const { data: bets, error } = await supabase
+      .from('bets')
+      .select('*')
+      .eq('user_telegram_id', ctx.from.id)
+      .order('created_at', { ascending: false })
+      .limit(5);
+    if (error || !bets || !bets.length) {
+      await ctx.editMessageText('📭 No tienes jugadas registradas.', {
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'menu_main' }]] }
+      });
+      return;
+    }
+    let msg = '📜 *Tus últimas 5 jugadas:*\n\n';
+    bets.forEach(b => {
+      msg += `💰 $${b.total_apuesta.toFixed(2)} — ${new Date(b.created_at).toLocaleString()}\n`;
+      msg += `📝 ${b.input_raw.substring(0, 80)}…\n\n`;
+    });
+    await ctx.editMessageText(msg, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'menu_main' }]] }
+    });
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action('menu_ayuda', async (ctx) => {
-  const ayuda = `📖 *Ayuda rápida*
+  try {
+    await ctx.answerCbQuery();
+    const ayuda = `📖 *Ayuda rápida*
 
 1️⃣ *Selecciona un sorteo* desde el menú.
 2️⃣ *Envía tu jugada* en formato DSL. Ej: \`pepe\nt5 con 500\`
 3️⃣ *Consulta tu saldo* con /saldo.
 4️⃣ *Deposita* desde el menú (envía comprobante).
 5️⃣ *Administradores*: usen /admin_panel.`;
-  const keyboard = { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'menu_main' }]] } };
-  await ctx.editMessageText(ayuda, { parse_mode: 'Markdown', ...keyboard });
-});
-
-bot.action('menu_main', async (ctx) => {
-  try {
-    await showMainMenu(ctx);
-  } catch (err) {
-    console.error(err);
-    await ctx.reply('⚠️ Ocurrió un error. Usa /start nuevamente.');
-  }
+    await ctx.editMessageText(ayuda, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'menu_main' }]] }
+    });
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 // ================================ PANEL DE ADMINISTRACIÓN ================================
 function isAdmin(userId) { return ADMIN_IDS.includes(userId); }
 
+// Comando /admin_panel → envía mensaje nuevo
 bot.command('admin_panel', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply('⛔ Solo administradores.');
-  const keyboard = {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '📋 Solicitudes depósito', callback_data: 'admin_pendientes' }],
-        [{ text: '🎲 Jugadas del día', callback_data: 'admin_jugadas_hoy' }],
-        [{ text: '📊 Estadísticas', callback_data: 'admin_estadisticas' }],
-        [{ text: '⚙️ Límites', callback_data: 'admin_limites' }],
-        [{ text: '🕒 Horarios', callback_data: 'admin_horarios' }]
-      ]
-    }
-  };
-  await ctx.reply('👑 *Panel de Administración*', { parse_mode: 'Markdown', ...keyboard });
+  const { texto, keyboard } = buildAdminPanel();
+  await ctx.reply(texto, { parse_mode: 'Markdown', ...keyboard });
+});
+
+// Action admin_panel → edita mensaje existente (botón "Volver" desde submenús admin)
+bot.action('admin_panel', async (ctx) => {
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCbQuery('⛔ Solo administradores.'); return; }
+  try {
+    await ctx.answerCbQuery();
+    const { texto, keyboard } = buildAdminPanel();
+    await ctx.editMessageText(texto, { parse_mode: 'Markdown', ...keyboard });
+  } catch (err) { console.error(err); }
 });
 
 bot.action('admin_pendientes', async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return;
-  const { data: pendings, error } = await supabase
-    .from('deposit_requests')
-    .select('*, users!inner(telegram_id, username, first_name)')
-    .eq('status', 'pending')
-    .order('created_at');
-  if (error || !pendings.length) {
-    await ctx.answerCbQuery('No hay solicitudes');
-    await ctx.editMessageText('✅ No hay solicitudes pendientes.', { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] } });
-    return;
-  }
-  let msg = '📋 *Solicitudes pendientes:*\n\n';
-  for (const p of pendings) {
-    msg += `ID: ${p.id}\n👤 ${p.users.first_name || p.users.username || p.users.telegram_id}\n💰 $${p.amount.toFixed(2)}\n💳 ${p.payment_method}\n📎 <a href="https://t.me/file/${p.proof_file_id}">Ver</a>\n\n`;
-  }
-  const keyboard = pendings.map(p => [
-    { text: `✅ Aprobar #${p.id}`, callback_data: `admin_aprob_${p.id}` },
-    { text: `❌ Rechazar #${p.id}`, callback_data: `admin_rech_${p.id}` }
-  ]).flat();
-  const rows = [];
-  for (let i = 0; i < keyboard.length; i += 2) rows.push(keyboard.slice(i, i+2));
-  rows.push([{ text: '🔙 Volver', callback_data: 'admin_panel' }]);
-  await ctx.editMessageText(msg, { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: { inline_keyboard: rows } });
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCbQuery('⛔'); return; }
+  try {
+    await ctx.answerCbQuery();
+    const { data: pendings, error } = await supabase
+      .from('deposit_requests')
+      .select('*, users!inner(telegram_id, username, first_name)')
+      .eq('status', 'pending')
+      .order('created_at');
+    if (error || !pendings || !pendings.length) {
+      await ctx.editMessageText('✅ No hay solicitudes pendientes.', {
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] }
+      });
+      return;
+    }
+    let msg = '📋 *Solicitudes pendientes:*\n\n';
+    for (const p of pendings) {
+      msg += `ID: ${p.id}\n👤 ${p.users.first_name || p.users.username || p.users.telegram_id}\n💰 $${p.amount.toFixed(2)}\n💳 ${p.payment_method}\n\n`;
+    }
+    const rows = pendings.map(p => [
+      { text: `✅ Aprobar #${p.id}`, callback_data: `admin_aprob_${p.id}` },
+      { text: `❌ Rechazar #${p.id}`, callback_data: `admin_rech_${p.id}` }
+    ]);
+    rows.push([{ text: '🔙 Volver', callback_data: 'admin_panel' }]);
+    await ctx.editMessageText(msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: rows } });
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action(/admin_aprob_(\d+)/, async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return;
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCbQuery('⛔'); return; }
   const id = parseInt(ctx.match[1]);
   try {
     const { userId, amount, nuevoSaldo } = await approveDeposit(id, ctx.from.id);
-    await ctx.answerCbQuery('Aprobado');
-    await ctx.editMessageText(`✅ Depósito #${id} aprobado. Usuario ${userId} recibe $${amount.toFixed(2)}. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`);
+    await ctx.answerCbQuery('Aprobado ✅');
+    await ctx.editMessageText(
+      `✅ Depósito #${id} aprobado.\nUsuario: ${userId}\nMonto: $${amount.toFixed(2)}\nNuevo saldo: $${nuevoSaldo.toFixed(2)}`,
+      { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] } }
+    );
     try { await bot.telegram.sendMessage(userId, `✅ Tu depósito de $${amount.toFixed(2)} fue aprobado. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`); } catch(e) {}
   } catch (err) { await ctx.answerCbQuery(`Error: ${err.message}`); }
 });
 
 bot.action(/admin_rech_(\d+)/, async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return;
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCbQuery('⛔'); return; }
   const id = parseInt(ctx.match[1]);
   await ctx.answerCbQuery('Escribe el motivo en el chat');
   rejectState.set(ctx.from.id, id);
@@ -637,109 +729,167 @@ bot.action(/admin_rech_(\d+)/, async (ctx) => {
 });
 
 bot.action('admin_jugadas_hoy', async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return;
-  const hoy = new Date().toISOString().slice(0,10);
-  const { data: bets, error } = await supabase
-    .from('bets')
-    .select('*, users(first_name, username), sorteos(nombre)')
-    .eq('fecha_apuesta', hoy)
-    .order('created_at', { ascending: false });
-  if (error || !bets.length) {
-    await ctx.answerCbQuery('No hay jugadas');
-    await ctx.editMessageText('📭 No hay jugadas hoy.', { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] } });
-    return;
-  }
-  let msg = `📊 *Jugadas del día ${hoy}:*\n\n`;
-  let total = 0;
-  for (const b of bets.slice(0, 10)) {
-    total += b.total_apuesta;
-    msg += `👤 ${b.users.first_name || b.users.username || b.user_telegram_id}\n🎲 ${b.sorteos.nombre}\n💰 $${b.total_apuesta.toFixed(2)}\n📝 \`${b.input_raw.substring(0, 60)}...\`\n\n`;
-  }
-  msg += `*Total recogido: $${total.toFixed(2)}*\n`;
-  const keyboard = { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] } };
-  await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCbQuery('⛔'); return; }
+  try {
+    await ctx.answerCbQuery();
+    const hoy = new Date().toISOString().slice(0,10);
+    const { data: bets, error } = await supabase
+      .from('bets')
+      .select('*, users(first_name, username), sorteos(nombre)')
+      .eq('fecha_apuesta', hoy)
+      .order('created_at', { ascending: false });
+    if (error || !bets || !bets.length) {
+      await ctx.editMessageText('📭 No hay jugadas hoy.', {
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] }
+      });
+      return;
+    }
+    let msg = `📊 *Jugadas del día ${hoy}:*\n\n`;
+    let total = 0;
+    for (const b of bets.slice(0, 10)) {
+      total += b.total_apuesta;
+      msg += `👤 ${b.users?.first_name || b.users?.username || b.user_telegram_id}\n`;
+      msg += `🎲 ${b.sorteos?.nombre || '?'}\n`;
+      msg += `💰 $${b.total_apuesta.toFixed(2)}\n`;
+      msg += `📝 \`${b.input_raw.substring(0, 50)}…\`\n\n`;
+    }
+    msg += `*Total: $${total.toFixed(2)}*`;
+    await ctx.editMessageText(msg, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] }
+    });
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action('admin_estadisticas', async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return;
-  const hoy = new Date().toISOString().slice(0,10);
-  const { data: bets, error } = await supabase.from('bets').select('total_apuesta, user_telegram_id').eq('fecha_apuesta', hoy);
-  if (error) return;
-  const total = bets.reduce((s, b) => s + b.total_apuesta, 0);
-  const usuarios = new Set(bets.map(b => b.user_telegram_id)).size;
-  const topUsers = Object.entries(bets.reduce((acc, b) => {
-    acc[b.user_telegram_id] = (acc[b.user_telegram_id] || 0) + b.total_apuesta;
-    return acc;
-  }, {})).sort((a,b) => b[1] - a[1]).slice(0,5);
-  let topMsg = '';
-  for (const [uid, monto] of topUsers) {
-    const u = await supabase.from('users').select('first_name, username').eq('telegram_id', uid).single();
-    topMsg += `👤 ${u.data?.first_name || u.data?.username || uid} → $${monto.toFixed(2)}\n`;
-  }
-  const msg = `📊 *Estadísticas del día ${hoy}*\n\n*Total recogido:* $${total.toFixed(2)}\n*Usuarios:* ${usuarios}\n\n*Top 5:*\n${topMsg}`;
-  const keyboard = { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] } };
-  await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCbQuery('⛔'); return; }
+  try {
+    await ctx.answerCbQuery();
+    const hoy = new Date().toISOString().slice(0,10);
+    const { data: bets, error } = await supabase
+      .from('bets')
+      .select('total_apuesta, user_telegram_id')
+      .eq('fecha_apuesta', hoy);
+    if (error) { await ctx.editMessageText('Error al cargar estadísticas.'); return; }
+    const total = bets.reduce((s, b) => s + b.total_apuesta, 0);
+    const usuarios = new Set(bets.map(b => b.user_telegram_id)).size;
+    const topUsersMap = bets.reduce((acc, b) => {
+      acc[b.user_telegram_id] = (acc[b.user_telegram_id] || 0) + b.total_apuesta;
+      return acc;
+    }, {});
+    const topUsers = Object.entries(topUsersMap).sort((a,b) => b[1] - a[1]).slice(0,5);
+    let topMsg = '';
+    for (const [uid, monto] of topUsers) {
+      const u = await supabase.from('users').select('first_name, username').eq('telegram_id', uid).single();
+      topMsg += `👤 ${u.data?.first_name || u.data?.username || uid} → $${monto.toFixed(2)}\n`;
+    }
+    const msg = `📊 *Estadísticas del día ${hoy}*\n\n*Total recogido:* $${total.toFixed(2)}\n*Usuarios activos:* ${usuarios}\n\n*Top 5:*\n${topMsg || 'Sin datos'}`;
+    await ctx.editMessageText(msg, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] }
+    });
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action('admin_limites', async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return;
-  const { data: limites, error } = await supabase.from('limits').select('*').is('loteria_id', null).is('sorteo_id', null);
-  if (error) return;
-  let msg = '⚙️ *Límites globales:*\n\n';
-  for (const l of limites) msg += `• *${l.tipo}* → $${l.monto_maximo.toFixed(2)}\n`;
-  msg += '\n*Comandos:*\n/set_limit <tipo> <monto>';
-  const keyboard = { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] } };
-  await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCbQuery('⛔'); return; }
+  try {
+    await ctx.answerCbQuery();
+    const { data: limites, error } = await supabase
+      .from('limits')
+      .select('*')
+      .is('loteria_id', null)
+      .is('sorteo_id', null);
+    if (error) { await ctx.editMessageText('Error al cargar límites.'); return; }
+    let msg = '⚙️ *Límites globales:*\n\n';
+    if (limites && limites.length) {
+      for (const l of limites) msg += `• *${l.tipo}* → $${l.monto_maximo.toFixed(2)}\n`;
+    } else {
+      msg += '_No hay límites configurados._\n';
+    }
+    msg += '\n*Comando:* `/set_limit <tipo> <monto>`';
+    await ctx.editMessageText(msg, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] }
+    });
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 bot.action('admin_horarios', async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return;
-  const { data: sorteos, error } = await supabase
-    .from('sorteos')
-    .select('id, nombre, loterias(nombre), hora_apertura, hora_cierre')
-    .order('id');
-  if (error || !sorteos.length) return ctx.editMessageText('No hay sorteos configurados.');
-  let msg = '*Horarios de sorteos:*\n\n';
-  for (const s of sorteos) {
-    msg += `🎲 *${s.loterias?.nombre || '?'} - ${s.nombre}*\n`;
-    msg += `   ⏰ ${s.hora_apertura.slice(0,5)} → ${s.hora_cierre.slice(0,5)}\n\n`;
-  }
-  const keyboard = { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] } };
-  await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
+  if (!isAdmin(ctx.from.id)) { await ctx.answerCbQuery('⛔'); return; }
+  try {
+    await ctx.answerCbQuery();
+    const { data: sorteos, error } = await supabase
+      .from('sorteos')
+      .select('id, nombre, loterias(nombre), hora_apertura, hora_cierre')
+      .order('id');
+    if (error || !sorteos || !sorteos.length) {
+      await ctx.editMessageText('No hay sorteos configurados.', {
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] }
+      });
+      return;
+    }
+    let msg = '🕒 *Horarios de sorteos:*\n\n';
+    for (const s of sorteos) {
+      msg += `🎲 *${s.loterias?.nombre || '?'} — ${s.nombre}*\n`;
+      msg += `   ⏰ ${s.hora_apertura?.slice(0,5) || '?'} → ${s.hora_cierre?.slice(0,5) || '?'}\n\n`;
+    }
+    await ctx.editMessageText(msg, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] }
+    });
+  } catch (err) { console.error(err); await ctx.answerCbQuery('Error'); }
 });
 
 // ================================ MANEJO DE TEXTO ================================
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
-  const state = depositStates.get(userId);
+
+  // Estado: rechazo de depósito (admin)
   if (rejectState.has(userId)) {
     const id = rejectState.get(userId);
     const reason = ctx.message.text;
     rejectState.delete(userId);
     try {
       await rejectDeposit(id, userId, reason);
-      const { data: req } = await supabase.from('deposit_requests').select('user_telegram_id').eq('id', id).single();
-      if (req) await bot.telegram.sendMessage(req.user_telegram_id, `❌ Tu depósito fue rechazado. Motivo: ${reason}`);
+      const { data: req } = await supabase
+        .from('deposit_requests')
+        .select('user_telegram_id')
+        .eq('id', id)
+        .single();
+      if (req) {
+        try { await bot.telegram.sendMessage(req.user_telegram_id, `❌ Tu depósito fue rechazado.\nMotivo: ${reason}`); } catch(e) {}
+      }
       await ctx.reply(`✅ Depósito #${id} rechazado.`);
     } catch (err) { await ctx.reply(`❌ Error: ${err.message}`); }
     return;
   }
+
+  // Estado: ingreso de monto para depósito
+  const state = depositStates.get(userId);
   if (state && state.step === 'amount') {
     const amount = parseFloat(ctx.message.text.trim());
-    if (isNaN(amount) || amount <= 0) return ctx.reply('❌ Monto inválido.');
+    if (isNaN(amount) || amount <= 0) {
+      await ctx.reply('❌ Monto inválido. Escribe un número mayor a 0.');
+      return;
+    }
     state.amount = amount;
     state.step = 'proof';
     depositStates.set(userId, state);
-    await ctx.reply(`Monto: $${amount.toFixed(2)}\nAhora envía una imagen o documento como comprobante.`);
+    await ctx.reply(`Monto: *$${amount.toFixed(2)}*\nAhora envía una imagen o documento como comprobante.`, { parse_mode: 'Markdown' });
     return;
   }
+
+  // Procesar apuesta
   await processBet(ctx, ctx.message.text);
 });
 
 bot.on(['photo', 'document'], async (ctx) => {
   const userId = ctx.from.id;
   const state = depositStates.get(userId);
-  if (!state || state.step !== 'proof') return ctx.reply('No estás en proceso de depósito. Usa /start y selecciona "Depositar".');
+  if (!state || state.step !== 'proof') {
+    return ctx.reply('No estás en proceso de depósito. Usa /start y selecciona "Depositar".');
+  }
   let fileId;
   if (ctx.message.photo) fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
   else if (ctx.message.document) fileId = ctx.message.document.file_id;
@@ -747,11 +897,22 @@ bot.on(['photo', 'document'], async (ctx) => {
   try {
     const deposit = await createDepositRequest(userId, state.amount, state.method, fileId);
     depositStates.delete(userId);
-    await ctx.reply(`✅ Solicitud creada.\nID: ${deposit.id}\nMonto: $${deposit.amount}\nMétodo: ${deposit.payment_method}\nEl administrador revisará.`);
+    await ctx.reply(
+      `✅ Solicitud creada.\nID: *${deposit.id}*\nMonto: *$${deposit.amount}*\nMétodo: *${deposit.payment_method}*\nEl administrador revisará pronto.`,
+      { parse_mode: 'Markdown' }
+    );
     for (const adminId of ADMIN_IDS) {
-      try { await bot.telegram.sendMessage(adminId, `📥 Nueva solicitud #${deposit.id}\nUsuario: ${userId}\nMonto: $${deposit.amount}`); } catch(e) {}
+      try {
+        await bot.telegram.sendMessage(
+          adminId,
+          `📥 Nueva solicitud #${deposit.id}\nUsuario: ${userId}\nMonto: $${deposit.amount}\nMétodo: ${deposit.payment_method}`
+        );
+      } catch(e) {}
     }
-  } catch (err) { ctx.reply('❌ Error al guardar la solicitud.'); }
+  } catch (err) {
+    console.error(err);
+    ctx.reply('❌ Error al guardar la solicitud. Intenta de nuevo.');
+  }
 });
 
 // ================================ FUNCIÓN PRINCIPAL DE APUESTA ================================
@@ -792,11 +953,19 @@ async function processBet(ctx, rawInput) {
   const fechaHoy = new Date().toISOString().slice(0,10);
   const violacion = await validarLimitesAcumulativos(allDetails, pref.loteria_id, pref.sorteo_id, fechaHoy, limites);
   if (violacion) {
-    return ctx.reply(`❌ Límite excedido para tipo "${violacion.tipo}". El número ${violacion.numero} ya acumula $${violacion.acumPrev.toFixed(2)} apostados. Máximo: $${violacion.limite.toFixed(2)}. Esta apuesta añade $${violacion.montoActual.toFixed(2)}.`);
+    return ctx.reply(
+      `❌ Límite excedido para tipo "*${violacion.tipo}*".\n` +
+      `Número ${violacion.numero} ya acumula $${violacion.acumPrev.toFixed(2)}.\n` +
+      `Máximo: $${violacion.limite.toFixed(2)}. Esta apuesta añade $${violacion.montoActual.toFixed(2)}.`,
+      { parse_mode: 'Markdown' }
+    );
   }
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
   if (user.saldo < totalApuesta) {
-    return ctx.reply(`❌ Saldo insuficiente. Necesitas $${totalApuesta.toFixed(2)} (${moneda.toUpperCase()}). Usa el menú para depositar.`);
+    return ctx.reply(
+      `❌ Saldo insuficiente.\nNecesitas *$${totalApuesta.toFixed(2)}* (${moneda.toUpperCase()}).\nUsa el menú para depositar.`,
+      { parse_mode: 'Markdown' }
+    );
   }
   const saldoAntes = user.saldo;
   const saldoDespues = saldoAntes - totalApuesta;
@@ -819,25 +988,31 @@ bot.command('start', async (ctx) => {
 
 bot.command('saldo', async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.username, ctx.from.first_name);
-  ctx.reply(`💰 Saldo actual: $${user.saldo.toFixed(2)}`);
+  ctx.reply(`💰 Saldo actual: *$${user.saldo.toFixed(2)}*`, { parse_mode: 'Markdown' });
 });
 
 bot.command('set_limit', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const args = ctx.message.text.split(' ');
-  if (args.length < 3) return ctx.reply('Uso: /set_limit <tipo> <monto> (tipos: fijo, corrido, parle, centena)');
+  if (args.length < 3) return ctx.reply('Uso: /set_limit <tipo> <monto>\nTipos: fijo, corrido, parle, centena');
   const tipo = args[1].toLowerCase();
   const monto = parseFloat(args[2]);
-  if (isNaN(monto) || monto <= 0) return ctx.reply('Monto inválido');
+  if (isNaN(monto) || monto <= 0) return ctx.reply('Monto inválido.');
   const tipos = ['fijo', 'corrido', 'parle', 'centena'];
   if (!tipos.includes(tipo)) return ctx.reply(`Tipo inválido. Permitidos: ${tipos.join(', ')}`);
-  const { data: existing } = await supabase.from('limits').select('id').eq('tipo', tipo).is('loteria_id', null).is('sorteo_id', null).maybeSingle();
+  const { data: existing } = await supabase
+    .from('limits')
+    .select('id')
+    .eq('tipo', tipo)
+    .is('loteria_id', null)
+    .is('sorteo_id', null)
+    .maybeSingle();
   if (existing) {
     await supabase.from('limits').update({ monto_maximo: monto, updated_at: new Date() }).eq('id', existing.id);
-    ctx.reply(`✅ Límite para ${tipo} actualizado a $${monto.toFixed(2)}`);
+    ctx.reply(`✅ Límite para *${tipo}* actualizado a *$${monto.toFixed(2)}*`, { parse_mode: 'Markdown' });
   } else {
     await supabase.from('limits').insert([{ tipo, monto_maximo: monto, loteria_id: null, sorteo_id: null, updated_at: new Date() }]);
-    ctx.reply(`✅ Límite para ${tipo} establecido en $${monto.toFixed(2)}`);
+    ctx.reply(`✅ Límite para *${tipo}* establecido en *$${monto.toFixed(2)}*`, { parse_mode: 'Markdown' });
   }
 });
 
@@ -847,11 +1022,11 @@ bot.command('horarios', async (ctx) => {
     .from('sorteos')
     .select('id, nombre, loterias(nombre), hora_apertura, hora_cierre')
     .order('id');
-  if (error || !sorteos.length) return ctx.reply('No hay sorteos configurados.');
-  let msg = '*Horarios de sorteos:*\n\n';
+  if (error || !sorteos || !sorteos.length) return ctx.reply('No hay sorteos configurados.');
+  let msg = '🕒 *Horarios de sorteos:*\n\n';
   for (const s of sorteos) {
-    msg += `🎲 *${s.loterias?.nombre || '?'} - ${s.nombre}*\n`;
-    msg += `   ⏰ ${s.hora_apertura.slice(0,5)} → ${s.hora_cierre.slice(0,5)}\n\n`;
+    msg += `🎲 *${s.loterias?.nombre || '?'} — ${s.nombre}*\n`;
+    msg += `   ⏰ ${s.hora_apertura?.slice(0,5) || '?'} → ${s.hora_cierre?.slice(0,5) || '?'}\n\n`;
   }
   ctx.reply(msg, { parse_mode: 'Markdown' });
 });
@@ -860,11 +1035,14 @@ bot.command('diagnostico', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.reply('⛔ Solo administradores.');
   const { data: sorteos, error } = await supabase.from('sorteos').select('*');
   if (error) return ctx.reply(`Error: ${error.message}`);
-  if (!sorteos.length) return ctx.reply('No hay sorteos en BD.');
-  let msg = '*Diagnóstico de sorteos:*\n\n';
+  if (!sorteos || !sorteos.length) return ctx.reply('No hay sorteos en BD.');
+  let msg = '🔍 *Diagnóstico de sorteos:*\n\n';
   for (const s of sorteos) {
-    const horario = s.hora_apertura && s.hora_cierre ? `${s.hora_apertura.slice(0,5)} - ${s.hora_cierre.slice(0,5)}` : '❌ Sin horario';
-    msg += `ID: ${s.id} - ${s.nombre}\n   Horario: ${horario}\n   Loteria ID: ${s.loteria_id}\n\n`;
+    const horario = s.hora_apertura && s.hora_cierre
+      ? `${s.hora_apertura.slice(0,5)} - ${s.hora_cierre.slice(0,5)}`
+      : '❌ Sin horario';
+    msg += `*ID ${s.id}* — ${s.nombre}\n`;
+    msg += `   Horario: ${horario} | Lotería ID: ${s.loteria_id}\n\n`;
   }
   ctx.reply(msg, { parse_mode: 'Markdown' });
 });
