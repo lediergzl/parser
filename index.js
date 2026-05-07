@@ -230,7 +230,7 @@ async function saveUserPreference(telegramId, loteriaId, sorteoId, moneda) {
     }, { onConflict: 'telegram_id' });
 }
 
-// ==================== VALIDACIÓN DE HORARIO CORREGIDA ====================
+// ==================== VALIDACIÓN DE HORARIO ====================
 async function validarHorarioSorteo(sorteoId) {
   const { data: sorteo, error } = await supabase
     .from('sorteos')
@@ -246,7 +246,6 @@ async function validarHorarioSorteo(sorteoId) {
     };
   }
 
-  // Si no tiene horarios configurados, se asume que está abierto (pero advertimos)
   if (!sorteo.hora_apertura || !sorteo.hora_cierre) {
     console.warn(`Sorteo ${sorteo.nombre} (ID ${sorteoId}) sin horarios. Se permite la apuesta.`);
     return { open: true, warning: true, message: '⚠️ Sorteo sin horario definido. Se permite la apuesta.' };
@@ -262,13 +261,13 @@ async function validarHorarioSorteo(sorteoId) {
   if (horaActual < aperturaMin) {
     return {
       open: false,
-      message: `⏰ El sorteo "${sorteo.nombre}" aún no ha abierto.\n📅 Horario: ${sorteo.hora_apertura} - ${sorteo.hora_cierre}.\nVuelve más tarde.`
+      message: `⏰ El sorteo "${sorteo.nombre}" aún no ha abierto.\n📅 Horario: ${sorteo.hora_apertura.slice(0,5)} - ${sorteo.hora_cierre.slice(0,5)}.\nVuelve más tarde.`
     };
   }
   if (horaActual >= cierreMin) {
     return {
       open: false,
-      message: `⏰ El sorteo "${sorteo.nombre}" ya cerró.\n📅 Horario: ${sorteo.hora_apertura} - ${sorteo.hora_cierre}.\nNo se aceptan más apuestas.`
+      message: `⏰ El sorteo "${sorteo.nombre}" ya cerró.\n📅 Horario: ${sorteo.hora_apertura.slice(0,5)} - ${sorteo.hora_cierre.slice(0,5)}.\nNo se aceptan más apuestas.`
     };
   }
   return { open: true };
@@ -326,7 +325,7 @@ app.post(webhookPath, (req, res) => { bot.webhookCallback(webhookPath)(req, res)
 
 // Estados
 const depositStates = new Map();
-const rejectState = new Map(); // adminId -> depositId
+const rejectState = new Map();
 
 // ================================ BOTONERA PRINCIPAL ================================
 async function showMainMenu(ctx) {
@@ -393,7 +392,7 @@ bot.action(/sel_lot_(\d+)/, async (ctx) => {
     const keyboard = {
       reply_markup: {
         inline_keyboard: [
-          ...sorteos.map(s => [{ text: `${s.nombre} (${s.hora_apertura}-${s.hora_cierre})`, callback_data: `sel_sor_${s.id}` }]),
+          ...sorteos.map(s => [{ text: `${s.nombre} (${s.hora_apertura.slice(0,5)}-${s.hora_cierre.slice(0,5)})`, callback_data: `sel_sor_${s.id}` }]),
           [{ text: '🔙 Volver', callback_data: 'menu_loterias' }]
         ]
       }
@@ -762,7 +761,7 @@ bot.action('admin_horarios', async (ctx) => {
   await ctx.editMessageText(msg, { parse_mode: 'Markdown', ...keyboard });
 });
 
-// ================================ MANEJO DE TEXTO (DEPÓSITOS Y APUESTAS) ================================
+// ================================ MANEJO DE TEXTO ================================
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const state = depositStates.get(userId);
@@ -826,13 +825,11 @@ async function processBet(ctx, rawInput) {
     return ctx.reply('⚠️ Primero selecciona un sorteo desde el menú principal usando /start.');
   }
   const moneda = pref.moneda || 'cup';
-  // Validar horario
   const horario = await validarHorarioSorteo(pref.sorteo_id);
   if (!horario.open) {
     return ctx.reply(horario.message);
   }
   if (horario.warning) {
-    // Opcional: enviar advertencia pero permitir apuesta
     await ctx.reply(horario.message);
   }
   console.log(`📥 Apuesta de ${ctx.from.id}: ${rawInput.substring(0,200)}`);
@@ -904,7 +901,7 @@ bot.command('ver_limites', async (ctx) => {
 bot.command('set_limit', async (ctx) => {
   if (!isAdmin(ctx.from.id)) return;
   const args = ctx.message.text.split(' ');
-  if (args.length < 3) return ctx.reply('Uso: /set_limit <tipo> <monto> (tipos: fijo, corrido, parle, centena)');
+  if (args.length < 3) return ctx.reply('Uso: /set_limit <tipo> <monto>');
   const tipo = args[1].toLowerCase();
   const monto = parseFloat(args[2]);
   if (isNaN(monto) || monto <= 0) return ctx.reply('Monto inválido');
@@ -913,10 +910,10 @@ bot.command('set_limit', async (ctx) => {
   const { data: existing } = await supabase.from('limits').select('id').eq('tipo', tipo).is('loteria_id', null).is('sorteo_id', null).maybeSingle();
   if (existing) {
     await supabase.from('limits').update({ monto_maximo: monto, updated_at: new Date() }).eq('id', existing.id);
-    ctx.reply(`✅ Límite para ${tipo} actualizado a $${monto.toFixed(2)} (acumulativo por número)`);
+    ctx.reply(`✅ Límite para ${tipo} actualizado a $${monto.toFixed(2)}`);
   } else {
     await supabase.from('limits').insert([{ tipo, monto_maximo: monto, loteria_id: null, sorteo_id: null, updated_at: new Date() }]);
-    ctx.reply(`✅ Límite para ${tipo} establecido en $${monto.toFixed(2)} (acumulativo por número)`);
+    ctx.reply(`✅ Límite para ${tipo} establecido en $${monto.toFixed(2)}`);
   }
 });
 
