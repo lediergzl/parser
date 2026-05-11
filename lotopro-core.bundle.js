@@ -362,8 +362,17 @@ function createExpansion(deps = {}) {
       const fi = Math.round(fn);
       if (si === fi) return String(si).padStart(2, '0');
       const use3 = si >= 100 || fi >= 100;
+      // ── FIX RANGE STEP: detectar rango de decenas (múltiplos de 10) ──────────
+      // Si ambos extremos terminan en el mismo dígito Y la diferencia es múltiplo
+      // de 10 Y el rango es mayor a 9 → expandir con step 10.
+      // Ejemplo: 00 al 90 → 00,10,20,30,40,50,60,70,80,90 (10 números, no 91).
+      // Ejemplo: 05 al 95 → 05,15,25,35,45,55,65,75,85,95 (10 números).
+      // Ejemplo: 00 al 09 → step 1 (distintos dígitos de decena, paso normal).
+      const diff = fi - si;
+      const sameUnit = (si % 10) === (fi % 10);
+      const step = (sameUnit && diff > 9 && diff % 10 === 0) ? 10 : 1;
       const nums = [];
-      for (let i = si; i <= fi; i++) {
+      for (let i = si; i <= fi; i += step) {
         nums.push(String(i).padStart(use3 ? 3 : 2, '0'));
       }
       return nums.join(' ');
@@ -409,9 +418,39 @@ function createExpansion(deps = {}) {
     const esLinea = tieneParleExplicito || tieneCandadoExplicito || tiene4 || (!tieneCon && tieneOp);
     if (tieneCon && !esLinea) { if (!tieneOp) return pares; }
     if (!esLinea && !tieneOp) return pares;
+
+    // ── REGLA PALÉ MULTI-COMBINACIÓN ────────────────────────────────────────────
+    // Cortar el texto en el PRIMER stop-token (con / total) para obtener el segmento
+    // que contiene TODOS los pares.  Usamos matchAll-equivalente (exec en bucle) para
+    // extraer TODAS las combinaciones a*b que aparezcan antes del stop-token.
+    // Separadores intermedios (y / , / espacio) son ignorados — NO son stop-tokens.
     let tp = text;
-    const mCP = text.match(/con\s+([0-9.,]+)/i);
-    if (mCP) tp = tp.substring(0, tp.toLowerCase().indexOf(' con '));
+    // Encontrar el primer stop-token: 'con' o 'total' (fin de sección de pares)
+    const stopMatch = /\b(con|total)\b/i.exec(text);
+    if (stopMatch) tp = text.slice(0, stopMatch.index);
+
+    // El operador * o x entre números ES la señal de parle.
+    // Cadenas A*B*C o AxBxC (3+ elementos) → todos los pares combinatorios comb(n,2).
+    // El regex simple \b(\d{1,2})\*(\d{1,2})\b solo captura el primer par de una cadena
+    // porque después de '78*26' el siguiente token es '*30' sin word boundary izquierdo.
+    let tpSimple = tp;
+    const chainRe = /\b(\d{1,2})(?:\s*[*xX×]\s*\d{1,2})+/g;
+    let chainMatch;
+    const chainedRanges = [];
+    while ((chainMatch = chainRe.exec(tp)) !== null) {
+      if (!/[*xX×].*[*xX×]/.test(chainMatch[0])) continue; // solo cadenas 3+ elementos
+      const ns = chainMatch[0].split(/\s*[*xX×]\s*/).map(n => n.padStart(2, '0'));
+      for (let i = 0; i < ns.length; i++)
+        for (let j = i + 1; j < ns.length; j++)
+          pares.push([ns[i], ns[j]]);
+      chainedRanges.push([chainMatch.index, chainMatch.index + chainMatch[0].length]);
+    }
+    // Enmascarar cadenas ya procesadas para que los patrones simples no dupliquen pares
+    for (let k = chainedRanges.length - 1; k >= 0; k--) {
+      const [s, e] = chainedRanges[k];
+      tpSimple = tpSimple.slice(0, s) + ' '.repeat(e - s) + tpSimple.slice(e);
+    }
+
     const pats = [
       /\b(\d{1,2})\s*\*\s*(\d{1,2})\b/g,
       /\b(\d{1,2})\s*[xX]\s*(\d{1,2})\b/g,
@@ -420,7 +459,7 @@ function createExpansion(deps = {}) {
     ];
     let m;
     for (const pat of pats) {
-      while ((m = pat.exec(tp)) !== null) pares.push([m[1].padStart(2, '0'), m[2].padStart(2, '0')]);
+      while ((m = pat.exec(tpSimple)) !== null) pares.push([m[1].padStart(2, '0'), m[2].padStart(2, '0')]);
     }
     if (tieneParleExplicito || tieneOp) {
       const p4 = /\b(\d{4})\b/g;
@@ -432,9 +471,23 @@ function createExpansion(deps = {}) {
   function extractParlePairs(line) {
     const pares = extractParlePairsFromText(line);
     const esParleImplicito = /\d{1,2}\s*[xX*]\s*\d{1,2}/.test(line);
-    const mParle = line.match(/\bparle\b(?:\s*[:=]|\s*)?(?:con\s*)?(\d+(?:[.,]\d+)?)/i) ||
-                   line.match(/\bp\s*(\d+(?:[.,]\d+)?)/i) ||
-                   (esParleImplicito ? line.match(/\bcon\s+(\d+(?:[.,]\d+)?)/i) : null);
+    // ── REGLA PALÉ MULTI-COMBINACIÓN: extracción de monto ─────────────────────
+    // Cuando hay pares NxN en la línea, el monto está SIEMPRE en "con N" (stop-token).
+    // NO usar el regex de Caso 1 que captura el primer dígito de un par como monto.
+    // Separadores intermedios (y / , / espacio) son ignorados — NO son stop-tokens.
+    // STOP TOKENS: solo "con" y "total" delimitan el fin de los pares.
+    let mParle;
+    if (esParleImplicito || /\bparle\b/i.test(line)) {
+      // Prioridad: "con N" (puede estar precedido de pares, separadores, etc.)
+      mParle = line.match(/\bcon\s+(\d+(?:[.,]\d+)?)/i) ||
+               line.match(/\bparle\b\s*con\s+(\d+(?:[.,]\d+)?)/i) ||
+               line.match(/\bp\s*(\d+(?:[.,]\d+)?)/i);
+    }
+    if (!mParle && !esParleImplicito) {
+      // Sin pares implícitos: Caso 1 con lookahead negativo para evitar capturar dígitos de par.
+      mParle = line.match(/\bparle\b(?:\s*[:=]|\s*)?(?:con\s*)?(\d+(?:[.,]\d+)?)(?!\s*[xX*]\d)/i) ||
+               line.match(/\bp\s*(\d+(?:[.,]\d+)?)/i);
+    }
     const monto = mParle ? lm(mParle[1]) : null;
     if (!pares.length && monto === null) return null;
     if (pares.length && monto === null && !/\bparle\b/i.test(line) && !esParleImplicito) return null;
@@ -573,7 +626,7 @@ function clasificarTokens(linea) {
     } else if (tokL === 'con') {
       postCon = true;
       resultado.push({ tok, type: 'CON' });
-    } else if (/^(parle|candado|y|al|centena|total|de|a)$/i.test(tok)) {
+    } else if (/^(parle|candado|y|al|centena|total|de|a|pr|p|c|t\d*|d\d*)$/i.test(tok)) {
       resultado.push({ tok, type: 'OP' });
       if (/^(y|de|a)$/i.test(tok)) postCon = false;
     } else {
@@ -614,8 +667,25 @@ function buildLineaDB(lineaOriginal, lineaExpandida, ex) {
   const parleInfo = ex.extractParlePairs(lineaExpandida);
   const esPR = /\b\d{1,2}\s+pr\s+/i.test(lineaOriginal);
   const esPares = /\d{1,2}\s*[xX]\s*\d{1,2}/.test(lineaOriginal);
-  const pares = (parleInfo && Array.isArray(parleInfo.pares)) ? parleInfo.pares : [];
-  const parleMonto = (parleInfo && parleInfo.monto !== null) ? parleInfo.monto : null;
+  let pares = (parleInfo && Array.isArray(parleInfo.pares)) ? parleInfo.pares : [];
+  let parleMonto = (parleInfo && parleInfo.monto !== null) ? parleInfo.monto : null;
+
+  // FIX: cuando es PR, expandirPatronPR genera números de 4 dígitos (ej: 1000 1010 1020...)
+  // que representan pares parle. Si extractParlePairs no los capturó (porque no hay keyword
+  // "parle" ni operador "x" explícito), los extraemos manualmente y los convertimos en pares.
+  if (esPR && pares.length === 0) {
+    const beforeConPR = (lineaExpandida.split(/\bcon\b/i)[0] || lineaExpandida).trim();
+    const nums4 = (beforeConPR.match(/\b\d{4}\b/g) || []);
+    if (nums4.length > 0) {
+      pares = nums4.map(n => [n.substring(0, 2), n.substring(2)]);
+      // Extraer monto del "con N" si no hay parleMonto
+      if (parleMonto === null) {
+        const mCon = lineaExpandida.match(/\bcon\s+(\d+(?:[.,]\d+)?)/i);
+        if (mCon) parleMonto = parseFloat(mCon[1].replace(',', '.'));
+      }
+    }
+  }
+
   let numerosBase = [];
   if (!centenas.length) {
     numerosBase = pares.length ? pares.flatMap(p => [pad2(p[0]), pad2(p[1])]) : ex.extractNumsBeforeKeywords(lineaExpandida).map(pad2);
@@ -633,16 +703,28 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
 
   const errors = [];
 
+  // Una línea de apuesta SIEMPRE requiere un operador de monto: con / de / a.
+  // Sin él no hay monto y la línea es inválida. Verificar antes de cualquier otra cosa.
+  if (!/\b(con|de|a)\b/i.test(linea)) {
+    const err = { code: 'E_SIN_OPERADOR_MONTO', line: lineaNum, message: 'Línea inválida: falta operador de monto (con / de / a).' };
+    trace('ERROR', { source: 'validarLinea:sinOperador', ...err });
+    errors.push(err);
+    return errors;
+  }
+
   // Eliminar modificadores 'parle con N' y 'candado con N' antes de contar los 'con'
   // de apuesta, para que no sean contados como un segundo 'con' independiente.
+  // FIX BUG3: E_MULTIPLE_CON contextual — no contar 'con N y N' como múltiple.
   let tmp = linea.replace(/\bparle\s+con\s+[\d.,]+/gi, '');
   tmp = tmp.replace(/\bcandado\s+con\s+[\d.,]+/gi, '');
+  // Quitar el primer segmento 'con N (y N)*' antes de contar los restantes
+  tmp = tmp.replace(/\bcon\s+[\d.,]+(?:\s+y\s+[\d.,]+)*/gi, '');
   const numCon = (tmp.match(/\bcon\b/gi) || []).length;
-  if (numCon > 1) {
+  if (numCon > 0) {
     const err = {
       code: 'E_MULTIPLE_CON',
       line: lineaNum,
-      message: `Cada línea debe contener exactamente un "con" de apuesta. Esta línea tiene ${numCon}. Use líneas separadas.`,
+      message: `Múltiples bloques de apuesta en una línea. Use líneas separadas.`,
     };
     trace('ERROR', { source: 'validarLinea', ...err });
     errors.push(err);
@@ -746,8 +828,23 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
 
 // ──────────────── EXTRACCIÓN DE MONTOS ──────────────────────────────────────
 function _montoParle(linea, lm) {
-  const m = linea.match(/\bparle\b(?:\s*[:=]|\s*)(?:con\s*)?(\d+(?:[.,]\d+)?)/i);
-  return m ? lm(m[1]) : null;
+  // Caso 2 (priority): "parle NxN NxN ... con N" — cuando hay pares NxN en la línea,
+  // el monto SIEMPRE está en el "con N" final. Caso 1 queda excluido para evitar
+  // capturar el primer dígito de un par (ej: "parle 44x12 y 44x21 con 50" → 44 ≠ monto).
+  if (/\bparle\b/i.test(linea) && /\d[xX*]\d/.test(linea)) {
+    // STOP TOKENS: "con" y "total" delimitan el fin de los pares; el monto está después.
+    const mc = linea.match(/\bcon\s+(\d+(?:[.,]\d+)?)/i);
+    if (mc) return lm(mc[1]);
+    // Monto inmediato tras "parle con N" también válido aquí.
+    const mc2 = linea.match(/\bparle\b\s*con\s+(\d+(?:[.,]\d+)?)/i);
+    if (mc2) return lm(mc2[1]);
+    return null;
+  }
+  // Caso 1: "parle N" o "parle: N" o "parle con N" (sin pares NxN — monto directo).
+  // El número capturado NO debe estar seguido de [xX*]\d (sería parte de un par).
+  const m = linea.match(/\bparle\b(?:\s*[:=]|\s*)(?:con\s*)?(\d+(?:[.,]\d+)?)(?!\s*[xX*]\d)/i);
+  if (m) return lm(m[1]);
+  return null;
 }
 function _montoCandado(linea, lm) {
   let m = linea.match(/\bcandado\b(?:\s*con\s*)?(\d+(?:[.,]\d+)?)/i);
@@ -798,7 +895,8 @@ function buildOpsNormal(linea, db, ex, lm) {
     return ops;
   }
 
-  if (v1 !== null && nums.length) ops.push({ tipo: 'fijo', numeros: nums.slice(), montoUnitario: v1 });
+  // v1 > 0: filtra ops fantasma emitidos cuando pendingModifier reescribe 'con 0 y X'
+  if (v1 !== null && v1 > 0 && nums.length) ops.push({ tipo: 'fijo', numeros: nums.slice(), montoUnitario: v1 });
   if (v2 !== null && nums.length) ops.push({ tipo: 'corrido', numeros: nums.slice(), montoUnitario: v2 });
 
   // Candado local con ajuste exacto
@@ -1023,11 +1121,28 @@ function detalleLineaTexto(resultado) {
       return `Centena: ${resultado.numeros.join(', ')} (${n} nums) × (${resultado.monto_unitario.toFixed(2)}) = ${resultado.monto.toFixed(2)}
 `;
     case 'parle':
-    case 'parle_global':
-      return `Parle: ${resultado.numeros.join(', ')} (${n} nums)\n  ${cPares} comb. × (${resultado.monto_unitario.toFixed(2)}) = ${resultado.monto.toFixed(2)}\n`;
+    case 'parle_global': {
+      // Mostrar cada par como A×B separados por coma: "44×12, 44×21"
+      const paresTexto = resultado.pares && resultado.pares.length
+        ? resultado.pares.map(p => `${String(p[0]).padStart(2,'0')}×${String(p[1]).padStart(2,'0')}`).join(', ')
+        : (resultado.numeros && resultado.numeros.length
+            ? [...new Set(resultado.numeros)].map(n => String(n).padStart(2,'0')).join(' ')
+            : '');
+      trace('PARLE_RENDER_INPUT',  { pares: resultado.pares, numeros: resultado.numeros });
+      trace('PARLE_RENDER_OUTPUT', { textoFinal: paresTexto });
+      return `Parle: ${paresTexto}\n  ${cPares} comb. × (${resultado.monto_unitario.toFixed(2)}) = ${resultado.monto.toFixed(2)}\n`;
+    }
     case 'candado':
     case 'candado_global': {
-      let texto = `Parle: ${resultado.numeros.join(', ')} (${n} nums)\n  ${cPares} × (${resultado.monto_unitario.toFixed(2)}) = ${resultado.monto.toFixed(2)}`;
+      // Mostrar cada par como A×B separados por coma: "44×12, 44×21"
+      const paresTextoC = resultado.pares && resultado.pares.length
+        ? resultado.pares.map(p => `${String(p[0]).padStart(2,'0')}×${String(p[1]).padStart(2,'0')}`).join(', ')
+        : (resultado.numeros && resultado.numeros.length
+            ? [...new Set(resultado.numeros)].map(n => String(n).padStart(2,'0')).join(' ')
+            : '');
+      trace('PARLE_RENDER_INPUT',  { pares: resultado.pares, numeros: resultado.numeros });
+      trace('PARLE_RENDER_OUTPUT', { textoFinal: paresTextoC });
+      let texto = `Candado: ${paresTextoC}\n  ${cPares} × (${resultado.monto_unitario.toFixed(2)}) = ${resultado.monto.toFixed(2)}`;
       if (resultado.diff && resultado.diff > 0) {
         texto += ` (apuesta ajustada de ${resultado.totalOriginal.toFixed(2)} a ${resultado.totalReal.toFixed(2)}, ahorro ${resultado.diff.toFixed(2)})`;
       }
@@ -1479,9 +1594,72 @@ function limpiarLadoDerecho(ladoDerecho) {
 // STEP 2 — RECONSTRUIR ESPACIOS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Colapsa múltiples espacios a uno y recorta. */
+// ─────────────────────────────────────────────────────────────────────────────
+// LEXICAL WHITESPACE NORMALIZER
+//
+// Etapa formal de normalización léxica aplicada en el punto de entrada del
+// pipeline DSL.  Garantiza que CUALQUIER variante de espacio en blanco sea
+// tratada de forma idéntica antes de que el lexer, el parser y el FSM los vean.
+//
+// Caracteres normalizados (además del espacio ASCII U+0020):
+//   U+00A0  NO-BREAK SPACE          (copy-paste de iOS/macOS/web)
+//   U+200B  ZERO WIDTH SPACE        (WhatsApp, teclados móviles)
+//   U+200C  ZERO WIDTH NON-JOINER
+//   U+200D  ZERO WIDTH JOINER
+//   U+2007  FIGURE SPACE
+//   U+2008  PUNCTUATION SPACE
+//   U+2009  THIN SPACE
+//   U+200A  HAIR SPACE
+//   U+202F  NARROW NO-BREAK SPACE
+//   U+205F  MEDIUM MATHEMATICAL SPACE
+//   U+3000  IDEOGRAPHIC SPACE
+//   U+FEFF  BOM / ZERO WIDTH NO-BREAK SPACE
+//   \t      TAB
+//   \r      CARRIAGE RETURN (normalizado a vacío — ya split por \n antes)
+//
+// Contrato:
+//   - Retorna exactamente la misma semántica independientemente de cuántos
+//     o cuáles caracteres de espacio en blanco aparezcan entre tokens.
+//   - La secuencia de tokens resultante es siempre idéntica para cualquier
+//     combinación de whitespace.
+//   - NUNCA parte una línea en dos (eso es responsabilidad del splitter de \n).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Colapsa TODOS los whitespace (ASCII + Unicode) a un espacio y recorta. */
 function normalizeSpaces(s) {
-  return s.replace(/\s+/g, ' ').trim();
+  if (typeof s !== 'string') return '';
+  // \s en JS cubre: space, tab, \n, \r, \f, \v, NBSP (U+00A0), y varios Unicode.
+  // Para cubrir los zero-width y los espacios tipográficos que \s no captura,
+  // los reemplazamos explícitamente primero.
+  return s
+    // Zero-width characters → eliminar (no son separadores, son artefactos)
+    .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+    // Espacios Unicode no capturados por \s → convertir a espacio ASCII
+    .replace(/[\u00A0\u2007\u2008\u2009\u200A\u202F\u205F\u3000]/g, ' ')
+    // Cualquier secuencia restante de whitespace (incluye \t, \r, \n, múltiples
+    // espacios ASCII, y los ya convertidos arriba) → colapsar a un solo espacio
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Normaliza léxicamente una línea cruda en la etapa de entrada del pipeline.
+ *
+ * Responsabilidades:
+ *   1. Eliminar caracteres invisibles que no son separadores semánticos.
+ *   2. Colapsar todos los whitespace a un solo espacio ASCII.
+ *   3. Asegurar que "20 25 p20" y "20  25  p20" y "20\t25 p20"
+ *      produzcan exactamente el mismo flujo de tokens.
+ *
+ * Esta función NO parte la línea en varias — eso lo hace el splitter de \n.
+ * NO transforma el contenido semántico — eso lo hace procesarLineaRaw.
+ *
+ * @param {string} rawLine - Línea tal como llega del usuario (sin split por \n)
+ * @returns {string}       - Línea con whitespace normalizado
+ */
+function normalizarLineaLexica(rawLine) {
+  if (typeof rawLine !== 'string') return '';
+  return normalizeSpaces(rawLine);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1534,6 +1712,14 @@ const PATTERNS = [
     `^(?:${_NS}\\s+)?${_CONN}\\s+${_N}(?:\\s+y\\s+${_ITEM})*(?:\\s+${_CONN}\\s+${_N})?$`,
     'i'
   ),
+  // 2b. PALÉ MULTI-COMBINACIÓN: (parle|p|candado|c) PAIR (y? PAIR)* con MONTO
+  //     REGLA PALÉ: separadores intermedios (y / espacio) son ignorados.
+  //     STOP TOKENS: solo "con"/"total" delimitan fin de pares.
+  //     Ej: "parle 44x12 y 44x21 con 10", "parle 10x20 15x30 05x12 con 75"
+  new RegExp(
+    `^(?:${_NS}\\s+)?(?:p|parle|c|candado)\\s+${_PAIR}(?:\\s+(?:y\\s+)?${_PAIR})*\\s+${_CONN}\\s+${_N}$`,
+    'i'
+  ),
   // 2. PARLE: <nums?> (p|parle) [con] <monto>
   new RegExp(
     `^(?:${_NS}\\s+)?(?:p|parle)(?:\\s+con)?\\s+${_N}$`,
@@ -1547,6 +1733,12 @@ const PATTERNS = [
   // 5. STANDALONE PAIR: NxN con M
   new RegExp(
     `^(?:${_NS}\\s+)?${_PAIR}\\s+${_CONN}\\s+${_N}$`,
+    'i'
+  ),
+  // 6. MULTI-PAIR IMPLICIT (sin keyword): NxN (y? NxN)* con MONTO
+  //    Ej: "44x12 y 44x21 con 10" — pares implícitos sin keyword parle
+  new RegExp(
+    `^${_PAIR}(?:\\s+(?:y\\s+)?${_PAIR})*\\s+${_CONN}\\s+${_N}$`,
     'i'
   ),
   // Sólo números base (grupo base sin monto — válido para acumulación de contexto)
@@ -2069,8 +2261,15 @@ function scoreNombreBloque(line, index, rawLines) {
   // Verbos de acción comunes
   if (/\b(pago|dame|ponme|manda|juega|cobra|env[íi]o|pongo|quiero)\b/i.test(lower)) score -= 6;
 
-  // Conectores / preposiciones
-  if (/\b(por|para|con|de|y|tambi[eé]n)\b/i.test(lower)) score -= 4;
+  // Conectores / preposiciones — penalizar solo si la línea NO contiene ninguna
+  // palabra con inicial mayúscula además de la primera (evita rechazar nombres
+  // compuestos como "Dry para florida", "Ana de Cuba", "Pedro y Juan").
+  if (/\b(por|para|con|de|y|tambi[eé]n)\b/i.test(lower)) {
+    // Contar palabras con mayúscula inicial (ignorar la primera palabra, que siempre puede tenerla)
+    const wordsArr = _stripped.split(/\s+/).filter(Boolean);
+    const tieneNombrePropio = wordsArr.slice(1).some(w => /^\p{Lu}/u.test(w));
+    score -= tieneNombrePropio ? 1 : 3;
+  }
 
   // Más de 3 palabras
   if (wordCount > 3) score -= 5;
@@ -2095,6 +2294,11 @@ function esNombreBloque(line) {
 function isLineTotal(line) {
   const t = (line || '').trim();
   return /^\s*total\s*[:\-=.\s]?\s*[\d.]/i.test(t) || /^\s*total\s*$/i.test(t);
+}
+
+function isLineSeparadorWA(line) {
+  const t = (line || '').trim();
+  return /^[─\-]{5,}$/.test(t);
 }
 
 /**
@@ -2229,6 +2433,17 @@ function parsearBloques(rawLinesPreprocesadas, rawLinesOriginales, limpiarMonto)
       continue;
     }
 
+    // 2b. Separador ─── del export WA → cierra bloque sin total declarado
+    if (isLineSeparadorWA(trimmedOrig)) {
+      if (currentBlock) {
+        cerrarBloque();
+      }
+      pendingName = null;
+      pendingMeta = [];
+      trace('PARSER_LINE', { index: i, tipo: 'SEP_WA', razon: 'separador ─── → cierra bloque' });
+      continue;
+    }
+
     // 3. Línea con dígitos (jugada)
     if (hasDigit) {
       if (!currentBlock) {
@@ -2236,7 +2451,7 @@ function parsearBloques(rawLinesPreprocesadas, rawLinesOriginales, limpiarMonto)
         // pendingMeta contiene líneas de contexto subsiguientes (lotería, alias, etc.)
         // que llegaron después del nombre pero antes de la primera jugada.
         const nombre = pendingName;
-        const offset = (nombre !== null) ? pendingOffset : i;
+        const offset = (nombre !== null) ? pendingOffset + 1 : i;
         currentBlock = {
           nombre: nombre,
           lines: [],
@@ -2569,16 +2784,28 @@ function dividirMultiplesCon(linea) {
         montoEnd = kw;
         nextSubjectStart = kw;
       } else {
-        let subjectStart = next.idx - 1;
-        if (subjectStart > conIdx && tokens[subjectStart - 1]?.toLowerCase() === 'y') {
-          subjectStart--;
+        // Si hay parle/candado entre conIdx+1 y next.idx, el monto termina antes de esa keyword.
+        let parleInMonto = -1;
+        for (let k = conIdx + 1; k < next.idx; k++) {
+          if (/^(parle|candado)$/i.test(tokens[k])) { parleInMonto = k; break; }
         }
-        if (subjectStart > conIdx + 1) {
-          montoEnd = subjectStart;
-          nextSubjectStart = tokens[subjectStart]?.toLowerCase() === 'y' ? subjectStart + 1 : subjectStart;
+        if (parleInMonto !== -1) {
+          let cut = parleInMonto;
+          if (cut > conIdx + 1 && tokens[cut - 1]?.toLowerCase() === 'y') cut--;
+          montoEnd = cut;
+          nextSubjectStart = parleInMonto; // sujeto siguiente empieza en parle, no en 'y'
         } else {
-          montoEnd = next.idx - 1 > conIdx ? next.idx - 1 : conIdx + 1;
-          nextSubjectStart = next.idx - 1 > conIdx ? next.idx - 1 : conIdx + 1;
+          let subjectStart = next.idx - 1;
+          if (subjectStart > conIdx && tokens[subjectStart - 1]?.toLowerCase() === 'y') {
+            subjectStart--;
+          }
+          if (subjectStart > conIdx + 1) {
+            montoEnd = subjectStart;
+            nextSubjectStart = tokens[subjectStart]?.toLowerCase() === 'y' ? subjectStart + 1 : subjectStart;
+          } else {
+            montoEnd = next.idx - 1 > conIdx ? next.idx - 1 : conIdx + 1;
+            nextSubjectStart = next.idx - 1 > conIdx ? next.idx - 1 : conIdx + 1;
+          }
         }
       }
     } else {
@@ -2660,7 +2887,8 @@ function dividirMultiplesCon(linea) {
 // ========================= HELPERS (se mantienen) =========================
 function limpiarLineaAuto(linea) {
   if (!linea || typeof linea !== 'string') return '';
-  const tieneParleCandadoExplicito = /\b(parle[t]?|candado)\b/i.test(linea);
+  // REGLA PALÉ: pale/palé/parlé/parlet son alias de parle — detectarlos como parle explícito.
+  const tieneParleCandadoExplicito = /\b(pale|parlet|parle|candado)\b/i.test(linea);
   const tieneParImplicito = /\d{1,2}\s*[xX*]\s*\d{1,2}/.test(linea);
   const esParle = tieneParleCandadoExplicito || tieneParImplicito;
 
@@ -2731,8 +2959,13 @@ function _expandirRangosLinea(l) {
       const sn = Math.round(aNum);
       const fn = Math.round(bNum);
       if (sn > fn) return match;
+      const use3 = sn >= 100 || fn >= 100;
+      // FIX BUG1: step=10 para rangos de decenas (mismo dígito de unidad, diff múltiplo de 10)
+      const diff = fn - sn;
+      const sameUnit = (sn % 10) === (fn % 10);
+      const step = (sameUnit && diff > 9 && diff % 10 === 0) ? 10 : 1;
       const nums = [];
-      for (let i = sn; i <= fn; i++) nums.push(String(i).padStart(sn >= 100 ? 3 : 2, '0'));
+      for (let i = sn; i <= fn; i += step) nums.push(String(i).padStart(use3 ? 3 : 2, '0'));
       return nums.join(' ');
     }
   });
@@ -2783,7 +3016,7 @@ function _normalizarCandadoParle(l) {
     antes = antes.replace(/\bc(\d+)/gi, '$1').replace(/\bc\b/gi, '');
     l = antes + desde;
   } else {
-    l = l.replace(/\bc(?!andado)[ \t]+([0-9.,]+)/ig, 'candado con $1');
+    l = l.replace(/\bc(?!andado)[ \t]*([0-9.,]+)/ig, 'candado con $1');
     l = l.replace(/(\d+)c\b/gi, '$1');
     l = l.replace(/\bc\b/gi, '');
   }
@@ -2813,6 +3046,7 @@ const _TYPO_RE_PREP = /\b(c[aá]b[dn]a?d[ao]o?|cand[ao]{2}|candago|cabdado|cnada
 // ─────────────────────────────────────────────────────────────────────────────
 
 const _LEFT_WORD_ALLOW  = new Set(['pr', 'total']);
+// FIX BUG2: 'total' nunca es válido en el lado derecho de una apuesta.
 const _RIGHT_WORD_ALLOW = new Set(['con', 'y', 'candado', 'parle', 'a', 'de']);
 // Placeholder for pair operator (NxN / N*N) during word-stripping pass.
 const _PAIR_OP_PH = '__PAROP__';
@@ -2873,14 +3107,32 @@ function _eliminarPalabrasNoReservadas(l) {
     // Sanitizar lado izquierdo con la regla DSL.
     ladoIzq = _sanitizarLadoIzquierdo(ladoIzq);
 
+    // FIX BUG2: eliminar 'total N' del lado derecho antes de la limpieza general.
+    // "con 100 y 150 total 450 pedro" → "con 100 y 150 pedro" → nombres se borran → válido.
+    ladoDer = ladoDer.replace(/\btotal\s+[\d.,]+/gi, '');
     // Sanitizar lado derecho: solo keywords permitidas y números.
     ladoDer = ladoDer.replace(/\b([a-záéíóúüñ]{2,})\b/gi, (tok) =>
       _RIGHT_WORD_ALLOW.has(tok.toLowerCase()) ? tok : ''
     );
 
-    l = ladoIzq + ladoDer;
+    // FIX BUG2: eliminar 'a' e 'y' sueltos que no preceden un número (incluye al final).
+    ladoDer = ladoDer.replace(/\b(a|y)\b(?!\s*\d)/gi, ' ').trim();
+    ladoDer = ladoDer.replace(/\b(a|y)\s*$/, '').trim();
+
+    l = ladoIzq + (ladoDer ? ' ' + ladoDer : '');
   } else {
-    // Sin keyword de monto: toda la línea es lado izquierdo.
+    // Sin keyword de monto (con / de / a): si la línea contiene palabras que no
+    // son ruido DSL puro (ej. "y" suelto entre números como en "42 150 y 50"),
+    // devolverla SIN modificar para que llegue al validador intacta y sea rechazada
+    // con error explícito. Solo sanitizar si todos los tokens de texto son ruido DSL
+    // conocido (fijo, corrido, volteo, etc.) que el engine ya maneja.
+    const wordTokens = l.match(/\b[a-záéíóúüñ]{1,}\b/gi) || [];
+    const DSL_LEFT_NOISE = new Set(['fijo','corrido','volteo','v','pr','total','rango','bote','pareja','parejas','terminal','decena','cent']);
+    const allNoise = wordTokens.every(t => DSL_LEFT_NOISE.has(t.toLowerCase()));
+    if (wordTokens.length > 0 && !allNoise) {
+      // Hay palabras no-DSL sin operador de monto → no tocar, dejar que validarLinea rechace.
+      return l.replace(/ +/g, ' ').trim();
+    }
     l = _sanitizarLadoIzquierdo(l);
   }
 
@@ -2900,7 +3152,8 @@ function esLineaRuido(linea) {
   if (!trimmed) return true;
   if (/\d/.test(trimmed)) return false;
   const tokens = trimmed.split(/\s+/);
-  for (const tok of tokens) if (!ruidoSet.has(tok)) return false;
+  // FIX BUG4: comparar en minúsculas para cubrir 'Fijo', 'Corrido', etc.
+  for (const tok of tokens) if (!ruidoSet.has(tok.toLowerCase())) return false;
   return true;
 }
 
@@ -3021,12 +3274,22 @@ function _normalizarBancaGuion(linea) {
  */
 function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
   const id = nextId();
+
+  // ── ETAPA 0: NORMALIZACIÓN LÉXICA (segunda línea de defensa) ───────────────
+  // normalizarLineaLexica() ya fue aplicada en preprocesarJugada antes de
+  // llamar a esta función.  La repetimos aquí como defensa en profundidad para
+  // cubrir llamadas directas a procesarLineaRaw (tests, xc inline, etc.).
+  // Coste: O(n) sobre el string, negligible.  Garantía: ningún whitespace raro
+  // puede llegar al lexer/parser/FSM por esta ruta.
+  rawLine = normalizarLineaLexica(String(rawLine ?? ''));
+
   // Strip de acentos: NFD descompone, luego eliminar combining marks (U+0300-U+036F).
-  // parlét->parlet, candadó->candado, etc., sin importar origen (WhatsApp, iOS, Android).
-  // Luego normalizar variantes de parle/candado antes de cualquier otro procesamiento.
-  let l = String(rawLine ?? '')
+  // parlét->parlet, candadó->candado, pale->parle, palé->parle, etc.
+  // Incluye todas las variantes de PALÉ/PARLE antes de cualquier otro procesamiento.
+  // REGLA PALÉ: pale/palé/parlé/parlet son alias completos de parle.
+  let l = rawLine
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/\bparle[t]?\b/gi, 'parle')
+    .replace(/\b(pale|parlet|parle)\b/gi, 'parle')
     .replace(/\bcandao\b/gi, 'candado');
   // RULE: BANCA_GUION_NOTATION — convertir "33-300" → "33 con 300" antes de todo
   l = _normalizarBancaGuion(l);
@@ -3109,7 +3372,7 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
       // Detectar si los tokens de texto son todos palabras de ruido DSL conocidas
       // (corrido, fijo, volteo, y, etc.) — si es así, el número es recuperable.
       const tokensTexto = trimmed.replace(/\d+(?:[.,]\d+)?/g, '').trim().toLowerCase().split(/\s+/).filter(Boolean);
-      const todosSonRuido = tokensTexto.length > 0 && tokensTexto.every(tok => ruidoSet.has(tok));
+      const todosSonRuido = tokensTexto.length > 0 && tokensTexto.every(tok => ruidoSet.has(tok.toLowerCase()));
 
       if (numStr && todosSonRuido) {
         // Caso recuperable: "Y 20 corrido", "20 corrido", "20 fijo" etc.
@@ -3439,7 +3702,8 @@ function stripWhatsAppMeta(line) {
   // Regex conservador: max 30 chars, solo alfanum+guion+punto, seguido de ": ".
   // Tras eliminar el prefijo "Nombre: ", el resto puede ser otro header WA reenviado —
   // re-aplicamos los pasos 1 y 2 sobre lo que queda.
-  if (/^[A-Za-zÀ-ɏ0-9_\-\.]{1,30}:\s+/.test(cleaned)) {
+  if (/^[A-Za-zÀ-ɏ0-9_\-\.]{1,30}:\s+/.test(cleaned) &&
+      !/^(total|tot|subtotal|suma|pago|abono|saldo)\b/i.test(cleaned)) {
     cleaned = cleaned.replace(/^[A-Za-zÀ-ɏ0-9_\-\.]{1,30}:\s+/, '');
     // Re-strip paso 1 (puede ser un header WA reenviado)
     cleaned = cleaned.replace(
@@ -3483,6 +3747,59 @@ function stripWhatsAppMeta(line) {
   return cleaned;
 }
 
+
+
+// ── HELPER: fusionar jugada con pendingModifier ──────────────────────────────
+// Cuando corrido/fijo aparece solo en una línea se almacena como pendingModifier.
+// Caso A — mismos números: fusiona montos:  "82 con 10"  → "82 con 10 y 5"
+// Caso B — números distintos: reescribe DSL para que el monto quede en la posición
+//           correcta (fijo=v1, corrido=v2):
+//           corrido + "25 30 con 5" → "25 30 con 0 y 5"  (fijo=0, corrido=5)
+//           fijo    + "25 30 con 5" → "25 30 con 5"       (sin cambio — ya es fijo)
+// El evaluador filtra ops con montoUnitario === 0 (guard v1 > 0 en buildOpsNormal).
+// Función pura — sin estado externo ni efectos secundarios.
+function _tryFuseWithModifier(newLine, processedLines, pendingModifier) {
+  if (!pendingModifier || !newLine) return { fused: false };
+  // ── Caso A: mismos números en la línea anterior → fusionar monto ────────
+  if (processedLines.length) {
+    const prev = processedLines[processedLines.length - 1];
+    if (prev && typeof prev === 'string' && /\d/.test(prev) &&
+        prev !== '\x00BLANK_SEP\x00' && prev !== '\x00JOINED\x00') {
+      function _numsLeft(l) {
+        const ix = l.search(/\bcon\b/i);
+        const left = ix === -1 ? l : l.slice(0, ix);
+        return (left.match(/\b\d{2,3}\b/g) || []).sort().join(',');
+      }
+      function _montoStr(l) {
+        const m = l.match(/\bcon\s+([\d.,][\d.,\s]*)/i);
+        return m ? m[1].trim() : null;
+      }
+      const prevNums = _numsLeft(prev);
+      const newNums  = _numsLeft(newLine);
+      if (prevNums && prevNums === newNums && /\bcon\b/i.test(prev)) {
+        const newMonto = _montoStr(newLine);
+        if (newMonto) {
+          const fused = (prev + ' y ' + newMonto).replace(/\s+/g, ' ').trim();
+          return { fused: true, line: fused };
+        }
+      }
+    }
+  }
+  // ── Caso B: números distintos → reescribir posición del monto ───────────
+  // Solo actúa cuando el modificador es "corrido" (fijo ya está en v1, sin cambio).
+  if (pendingModifier === 'corrido' && /\bcon\b/i.test(newLine)) {
+    // Reescribir "nums con X" → "nums con 0 y X" para que X quede como corrido (v2).
+    // Solo si no tiene ya un "y" (para no tocar líneas que ya traen fijo+corrido).
+    if (!/\by\b/i.test(newLine)) {
+      const rewritten = newLine.replace(/\bcon\s+([\d.,]+)/i, 'con 0 y $1');
+      if (rewritten !== newLine) {
+        return { fused: true, line: rewritten };
+      }
+    }
+  }
+  return { fused: false };
+}
+
 function preprocesarJugada(rawInput) {
   if (rawInput === undefined) {
     try {
@@ -3494,10 +3811,33 @@ function preprocesarJugada(rawInput) {
   trace('INPUT_START', j);
 
   const ledger = createBetAuditLedger();
-  const lines = j.split(/\r?\n/).flatMap(l =>
-    /\d/.test(l) && /  +/.test(l) ? l.split(/  +/) : [l]
-  );
+
+  // ── ETAPA 1: NORMALIZACIÓN LÉXICA DE WHITESPACE ──────────────────────────
+  //
+  // Principio: la semántica del DSL NUNCA depende de la cantidad o tipo de
+  // espacios entre tokens.  "20 25 p20", "20  25  p20", "20\t25 p20" y
+  // "20\u00A025\u200Bp20" deben producir EXACTAMENTE el mismo flujo de tokens.
+  //
+  // Estrategia:
+  //   • Separar SOLO por saltos de línea reales (\n).  Un doble espacio dentro
+  //     de una línea NO es un separador de líneas — es whitespace intra-línea.
+  //   • Aplicar normalizarLineaLexica() a cada línea antes de cualquier
+  //     otra transformación.  Esto colapsa todo whitespace a un espacio ASCII.
+  //
+  // Por qué se eliminó la heurística anterior (hasDSLAdjacent + split(/ +/)):
+  //   • El regex hasDSLAdjacent tenía huecos: no cubría todos los operadores
+  //     DSL (p, t, d, pr, v, al, total, xc, …).
+  //   • Cuando el usuario escribe "20  25  p20" (doble espacio sin keyword
+  //     adyacente detectada), la lógica anterior partía la línea en tres
+  //     fragmentos ["20", "25", "p20"] en lugar de normalizarla a "20 25 p20".
+  //   • Esto causaba: candidatos sin estado registrado, tokens huérfanos,
+  //     estados FSM inválidos, y el error "candidate without registered state".
+  //   • La corrección estructural: NUNCA partir una línea por whitespace
+  //     interno.  Los saltos de línea reales son el único separador de jugadas.
+  const lines = j.split(/\r?\n/).map(l => normalizarLineaLexica(l));
   const processedLines = [];
+  // ── PENDING MODIFIER: fijo/corrido solos en una línea ─────────────────────
+  let pendingModifier = null; // null | 'fijo' | 'corrido'
 
   for (let i = 0; i < lines.length; i++) {
     const _rawStripped = stripWhatsAppMeta(lines[i]);
@@ -3557,6 +3897,8 @@ function preprocesarJugada(rawInput) {
       // Estricto a propósito: "25 con 100 total 140" no hace match (tiene "con").
       // FIX: ampliar para cubrir sufijos emoji/símbolo: "Total 900 💳", "Total 900 ✅"
       const _META_RE = /^\s*(total|tot|subtotal|suma|pago|abono|saldo)\b\s*:?\s*[\d.,]+\s*\S*\s*$/i;
+      // Líneas de encabezado/pie generadas por el export WA — ignorar siempre
+      const _HEADER_RE = /^(fecha\s*:|^\d+\s+jugadas?\s*\||\u06c6|\u0fda|\u06b5|={3}|─{5,}|-{5,})/i;
       if (_META_RE.test(line)) {
         const _metaKw = (line.trim().match(/^(\w+)/) || [])[1] || 'meta';
         trace('AUDIT_LEDGER', { stage: 'skipMeta', type: 'META_LINE', keyword: _metaKw, raw: line });
@@ -3568,6 +3910,11 @@ function preprocesarJugada(rawInput) {
         // suma / subtotal / pago / abono / saldo → solo log, no emitir nada
         continue;
       }
+      // Encabezado/pie del export WA: 'TOTAL nombre: X', separadores, Fecha, etc.
+      if (_HEADER_RE.test(line) || /^\s*total\s+\S.*[:\s][\d.,]+\s*$/i.test(line)) {
+        trace('PRE_FILTERED', { lineIndex: i, line, razon: 'encabezado WA \u2192 descartado' });
+        continue;
+      }
 
       // Registrar candidato ANTES de procesar (solo jugadas reales, nunca meta)
       if (esLineaCandidato(line)) {
@@ -3577,7 +3924,7 @@ function preprocesarJugada(rawInput) {
       // Extraer "Total N" del final ANTES de normalizar
       let lineaSinTotal = line;
       let totalSufijo = '';
-      const totalSufijoMatchRaw = line.match(/\btotal\s+([\d.,]+)\s*$/i);
+      const totalSufijoMatchRaw = line.match(/\btotal\s+([\d.,]+)(?:\s+[a-záéíóúüñ]{1,6})?\s*$/i);
       if (totalSufijoMatchRaw) {
         totalSufijo = '\ntotal ' + totalSufijoMatchRaw[1];
         lineaSinTotal = line.slice(0, totalSufijoMatchRaw.index).trim();
@@ -3658,6 +4005,12 @@ function preprocesarJugada(rawInput) {
             });
             if (xcTokenInline) processedLines.push(xcTokenInline);
             if (totalSufijo)   processedLines.push(totalSufijo.trim());
+            // FIX ATTACHED_TO_PREVIOUS_LEDGER: registrar la línea consumida para que
+            // el audit no la cuente como candidato huérfano (AUDIT_MISSING_CANDIDATES).
+            if (ledger && esLineaCandidato(line)) {
+              ledger.recover(i, line, fusionada,
+                'ATTACHED_TO_PREVIOUS: número suelto fusionado con línea anterior con monto incompleto.');
+            }
             continue;
           }
         }
@@ -3675,16 +4028,87 @@ function preprocesarJugada(rawInput) {
         continue;
       }
 
+      // ── FIX FOTO2: "Con X" en línea separada — fusionar con línea anterior si
+      // la anterior tiene números pero no tiene "con". Cubre el patrón:
+      //   "33 y 22"   (sin monto)
+      //   "Con 50"    (monto sin números → debe pegarse a la línea anterior)
+      // Condición: normalized empieza con 'con ' + monto, sin números propios antes del 'con'.
+      {
+        const _startsWithCon = /^con\s+[\d]/i.test(normalized);
+        const _noNumsBeforeCon = !/\d/.test(normalized.split(/con/i)[0]);
+        if (_startsWithCon && _noNumsBeforeCon && processedLines.length > 0) {
+          const _prevIdx = processedLines.length - 1;
+          const _prevLine = processedLines[_prevIdx];
+          const _prevHasNums = /\d/.test(_prevLine);
+          const _prevNoCon = !/con/i.test(_prevLine);
+          if (_prevHasNums && _prevNoCon &&
+              _prevLine !== 'BLANK_SEP' && _prevLine !== 'JOINED') {
+            const _fused = _prevLine + ' ' + normalized;
+            processedLines[_prevIdx] = _fused;
+            trace('PRE_NORMALIZED', {
+              lineIndex: i, lineRaw: line, normalizado: _fused,
+              paso: 'CON_ATTACH_TO_PREVIOUS: operador con suelto fusionado con línea previa',
+              prevLine: _prevLine, conLine: normalized,
+            });
+            if (xcTokenInline) processedLines.push(xcTokenInline);
+            if (totalSufijo)   processedLines.push(totalSufijo.trim());
+            // FIX CON_ATTACH_LEDGER: registrar la línea consumida para que el
+            // audit no la cuente como candidato huérfano (AUDIT_MISSING_CANDIDATES).
+            if (ledger && esLineaCandidato(line)) {
+              ledger.recover(i, line, _fused,
+                'CON_ATTACH_TO_PREVIOUS: monto suelto fusionado con línea de números anterior.');
+            }
+            continue;
+          }
+        }
+      }
+
       // Dividir por múltiples "con"
       const divided = dividirMultiplesCon(normalized);
       const subLines = (divided + totalSufijo).split('\n');
       let subCount = 0;
       for (const sub of subLines) {
         const trimmedSub = sub.trim();
-        if (trimmedSub !== '') {
-          processedLines.push(trimmedSub);
-          subCount++;
+        if (trimmedSub === '') continue;
+        // ── PIPELINE GATE: re-validar cada sub-línea con RIGHT_SIDE_RULE ──────
+        // dividirMultiplesCon puede producir sub-líneas con lado derecho inválido
+        // (ej: "... con 10 peso fijo"). Cada sub-línea debe pasar el gate del PRE
+        // antes de entrar al parser/engine. Si falla → FLAGGED, no procesar.
+        if (/\bcon\b/i.test(trimmedSub)) {
+          const subRs = aplicarRightSideRule(trimmedSub);
+          if (subRs.linea === null) {
+            // Sub-línea inválida: registrar en ledger y descartar
+            // Solo si no existe ya una entry para este lineIndex (evita doble conteo).
+            if (ledger && esLineaCandidato(trimmedSub) &&
+                !ledger.getEntries().some(e => e.lineIndex === i)) {
+              const { reason, severity, code } = mapearRazonFlag(
+                `RIGHT_SIDE_RULE (sub-línea): ${subRs.error?.code} — ${subRs.error?.message}`,
+                trimmedSub, ''
+              );
+              ledger.flag(i, line, trimmedSub, reason, severity, code);
+            }
+            trace('PRE_FILTERED', {
+              lineIndex: i, rawLine: line, resultado: '',
+              razon: `sub-línea descartada por RIGHT_SIDE_RULE: ${subRs.error?.code}`,
+              subLinea: trimmedSub,
+            });
+            continue; // ← GATE: no llega al parser/engine
+          }
+          const _f3 = _tryFuseWithModifier(subRs.linea, processedLines, pendingModifier);
+          if (_f3.fused) {
+            processedLines[processedLines.length - 1] = _f3.line;
+            trace('PRE_NORMALIZED', { lineIndex: i, razon: 'pendingModifier fusionado', resultado: _f3.line });
+          } else { processedLines.push(subRs.linea); }
+          pendingModifier = null;
+        } else {
+          const _f4 = _tryFuseWithModifier(trimmedSub, processedLines, pendingModifier);
+          if (_f4.fused) {
+            processedLines[processedLines.length - 1] = _f4.line;
+            trace('PRE_NORMALIZED', { lineIndex: i, razon: 'pendingModifier fusionado', resultado: _f4.line });
+          } else { processedLines.push(trimmedSub); }
+          pendingModifier = null;
         }
+        subCount++;
       }
 
       // Emitir el token xc inline DESPUÉS de las sub-líneas de la jugada base.
@@ -3704,9 +4128,26 @@ function preprocesarJugada(rawInput) {
     } else {
       if (line.trim() === '') {
         processedLines.push('');
-      } else if (esLineaRuido(line)) {
-        trace('PRE_LINE_NOISE', { lineIndex: i, line, razon: 'ruido sin dígitos → descartado' });
+      pendingModifier = null;
       } else {
+        // ── MODIFICADOR TEMPORAL: fijo/corrido solos en una línea ─────────────────
+        // DEBE ir ANTES de esLineaRuido: "corrido" y "fijo" están en la lista de
+        // ruido DSL y serían descartados antes de poder activar el pendingModifier.
+        const _lineNorm = line.trim().toLowerCase();
+        if (_lineNorm === 'corrido' || _lineNorm === 'fijo') {
+          pendingModifier = _lineNorm;
+          trace('PRE_NORMALIZED', { lineIndex: i, line, razon: `modificador temporal: "${_lineNorm}"`, pendingModifier });
+          continue;
+        }
+        // FIX FOTO3: línea de ruido DSL puro (fijo, corrido, volteo, etc.) sin dígitos
+        // debe descartarse SIEMPRE. Estas palabras son modificadores de línea y solo tienen
+        // significado cuando están en la misma línea que los números. Solas generan un token
+        // IGNORE que dispara ctx.reset() en el engine, corrompiendo el estado del bloque.
+        if (esLineaRuido(line)) {
+          trace('PRE_LINE_NOISE', { lineIndex: i, line, razon: 'ruido sin dígitos → descartado' });
+          pendingModifier = null;
+          continue;
+        }
         // FIX NEW_YORK: línea sin dígitos que no es ruido puede ser nombre o contexto geográfico.
         // Si la siguiente línea no-vacía TAMPOCO tiene dígitos, esta línea es contexto descriptivo
         // (ej: "New York" entre "Zuzel" y los números) → descartarla.
@@ -3782,7 +4223,22 @@ const NOISE_WORDS_IS = new Set(['hola','oye','mira','ese','esa','eso','ok','dale
 const PRE_PARLE_WORDS_IS = new Set(['el','la']);
 const PARLE_ALIAS_IS = /\b(pale|palé|parlet|parlé|parle)\b/gi;
 const PAIR_NORM_IS = [[/(\d+)\s*\*\s*(\d+)/g,'$1x$2'],[/(\d+)\s+[xX]\s+(\d+)/g,'$1x$2'],[/(\d+)[xX]\s+(\d+)/g,'$1x$2'],[/(\d+)\s+[xX](\d+)/g,'$1x$2']];
-function normalizarPares(line){let l=line;for(const[re,rep]of PAIR_NORM_IS)l=l.replace(re,rep);return l;}
+function normalizarPares(line){
+  // El operador * o x entre números ES la señal de parle.
+  // Cadenas A*B*C (3+) → pares individuales NxN separados por espacio: 78*26*30 → 78x26 78x30 26x30
+  // Pares simples AxB → NxN normalizado.
+  let l = line.replace(/\b(\d{1,2})(?:\s*[*xX×]\s*\d{1,2}){2,}/g, (match) => {
+    const nums = match.split(/\s*[*xX×]\s*/);
+    const pairs = [];
+    for (let i = 0; i < nums.length; i++)
+      for (let j = i + 1; j < nums.length; j++)
+        pairs.push(nums[i] + 'x' + nums[j]);
+    return pairs.join(' ');
+  });
+  const PAIR_NORM_IS2 = [[/(\d+)\s*\*\s*(\d+)/g,'$1x$2'],[/(\d+)\s+[xX]\s+(\d+)/g,'$1x$2'],[/(\d+)[xX]\s+(\d+)/g,'$1x$2'],[/(\d+)\s+[xX](\d+)/g,'$1x$2']];
+  for(const[re,rep]of PAIR_NORM_IS2)l=l.replace(re,rep);
+  return l;
+}
 function preNormalizarParleOpeners(line){return line.replace(/\b(?:y|mas|más|aparte|tambien|también|ademas|además)\b\s+(?:\b(?:el|la|un|una)\b\s+)?\bparle\b/gi,'__PARLE_OPEN__');}
 function filtrarRuidoHumano(line){return line.trim().split(/\s+/).filter(tok=>{if(tok==='__PARLE_OPEN__')return true;const t=tok.replace(/[^a-záéíóúüñ]/gi,'').toLowerCase();if(PRE_PARLE_WORDS_IS.has(t)&&!/\d/.test(tok))return false;return!NOISE_WORDS_IS.has(t)||/\d/.test(tok);}).join(' ');}
 function segmentarLinea(rawLine,lineIndex){
@@ -3798,7 +4254,11 @@ function segmentarLinea(rawLine,lineIndex){
   const bqs=[];function nb(){return{kind:'NORMAL',nums:[],pares:[],montos:[],mm:false};}let b=nb();
   function close(r){if(b.nums.length||b.pares.length||b.montos.length)bqs.push({...b,nums:[...b.nums],pares:[...b.pares],montos:[...b.montos]});b=nb();}
   function hasParleAhead(i,w){w=w||3;for(let k=i;k<Math.min(i+w,tk.length);k++){const t=tk[k].type;if(t==='PARLE_OPEN'||t==='PARLE'||t==='PAIR')return true;}return false;}
-  for(let i=0;i<tk.length;i++){const{tok,type}=tk[i];switch(type){case'PARLE_OPEN':close('PO');b.kind='PARLE';b.mm=false;break;case'PARLE':if(b.kind==='NORMAL'&&b.montos.length>0)close('Pk');b.kind='PARLE';b.mm=false;break;case'CANDADO':if(b.montos.length>0)close('Ck');b.kind='CANDADO';b.mm=false;break;case'PAIR':if(b.kind==='NORMAL'){if(b.montos.length>0){close('Pm');b.kind='PARLE';}else if(b.nums.length>0){close('Pn');b.kind='PARLE';}else b.kind='PARLE';}b.pares.push(tok);b.mm=false;break;case'CON':b.mm=true;break;case'Y':{const nx=tk[i+1];if(b.mm)break;if(b.kind==='NORMAL'&&b.montos.length>0&&nx&&nx.type==='NUM'&&!hasParleAhead(i+1,2))b.mm=true;break;}case'NUM':if(b.mm){b.montos.push(tok);const nx=tk[i+1];if(!nx||nx.type!=='Y')b.mm=false;if(nx&&(nx.type==='PAIR'||nx.type==='PARLE'||nx.type==='PARLE_OPEN'||nx.type==='CANDADO'))close('Mn');}else if(b.kind==='PARLE'&&b.montos.length>0){close('NP');b.nums.push(tok);}else if(b.kind==='NORMAL'&&b.montos.length>0){close('NN');b.nums.push(tok);}else b.nums.push(tok);break;}}
+  for(let i=0;i<tk.length;i++){const{tok,type}=tk[i];switch(type){case'PARLE_OPEN':close('PO');b.kind='PARLE';b.mm=false;break;case'PARLE':if(b.kind==='NORMAL'&&b.montos.length>0)close('Pk');b.kind='PARLE';b.mm=false;break;case'CANDADO':if(b.montos.length>0)close('Ck');b.kind='CANDADO';b.mm=false;break;case'PAIR':if(b.kind==='NORMAL'){if(b.montos.length>0){close('Pm');b.kind='PARLE';}else if(b.nums.length>0){close('Pn');b.kind='PARLE';}else b.kind='PARLE';}b.pares.push(tok);b.mm=false;break;case'CON':b.mm=true;break;case'Y':{/* REGLA PALE MULTI-COMB: 'y' entre pares PALE es separador ignorado — NUNCA cierra bucket PARLE */const nx=tk[i+1];if(b.mm)break;if(b.kind==='PARLE')break;if(b.kind==='NORMAL'&&b.montos.length>0&&nx&&nx.type==='NUM'&&!hasParleAhead(i+1,2))b.mm=true;break;}case'NUM':if(b.mm){b.montos.push(tok);const nx=tk[i+1];if(!nx||nx.type!=='Y')b.mm=false;if(nx&&(nx.type==='PAIR'||nx.type==='PARLE'||nx.type==='PARLE_OPEN'||nx.type==='CANDADO'))close('Mn');}
+    // REGLA PALÉ: en bucket PARLE con pares pero sin monto aún, un NUM suelto ES el monto implícito.
+    // filtrarRuidoHumano elimina 'con' y 'y', así que el token CON puede no llegar al FSM.
+    else if(b.kind==='PARLE'&&b.pares.length>0&&b.montos.length===0){b.montos.push(tok);}
+    else if(b.kind==='PARLE'&&b.montos.length>0){close('NP');b.nums.push(tok);}else if(b.kind==='NORMAL'&&b.montos.length>0){close('NN');b.nums.push(tok);}else b.nums.push(tok);break;}}
   close('end');
   const segs=[];
   for(const q of bqs){if(q.kind==='PARLE'||q.kind==='CANDADO'){const kw=q.kind==='CANDADO'?'candado':null;if(!q.pares.length&&q.nums.length===2){q.pares.push(q.nums[0]+'x'+q.nums[1]);q.nums=[];}if(!q.pares.length){segs.push({dsl:q.nums.join(' ')||'[parle]',kind:q.kind.toLowerCase(),ok:false,warning:'Parle sin pares NxN.',code:'W_PARLE_SIN_PARES'});continue;}const m=q.montos[0]||null;const ps=kw?kw+' '+q.pares.join(' '):q.pares.join(' ');if(!m)segs.push({dsl:ps,kind:q.kind.toLowerCase(),ok:false,warning:`Parle "${ps}" sin monto.`,code:'W_PARLE_SIN_MONTO'});else segs.push({dsl:`${ps} con ${m}`,kind:q.kind.toLowerCase(),ok:true});}else{const nums=q.nums;if(!nums.length&&!q.montos.length)continue;if(!q.montos.length){segs.push({dsl:nums.join(' '),kind:'fijo_corrido',ok:false,warning:`Números sin monto.`,code:'W_NUMS_SIN_MONTO'});continue;}const md=q.montos.join(' y ');segs.push({dsl:nums.length>0?`${nums.join(' ')} con ${md}`:`con ${md}`,kind:'fijo_corrido',ok:nums.length>0,...(nums.length===0?{warning:'Monto sin números.',code:'W_MONTO_SIN_NUMS'}:{})});}}
@@ -3836,9 +4296,11 @@ function crearContexto() {
       trace('ENGINE_CONTEXT_RESET', { reason, collectedNumsAntes: [...this.collectedNums], collectedParesAntes: [...this.collectedPares] });
       this.collectedNums = [];
       this.collectedPares = [];
-      this.jugadasBase = [];
-      // lastParleNums se limpia solo en SEPARATOR, no en resets por PARLE_GLOBAL
+      // jugadasBase (fijo del bloque) NO se limpia en resets por parle/candado:
+      // un xc posterior debe poder referenciar los números fijo originales.
+      // Solo se limpia en SEPARATOR (línea en blanco = bloque nuevo) o error de validación.
       if (reason === 'SEPARATOR token' || reason === 'error de validación') {
+        this.jugadasBase = [];
         this.lastParleNums = [];
       }
     },
@@ -4155,9 +4617,11 @@ function procesarBloque(bloque, deps) {
         const tieneParleLocal   = ops.some(op => op.tipo === 'parle');
         const tieneCandadoLocal = ops.some(op => op.tipo === 'candado');
 
-        // Siempre acumular los números de esta línea, tengan o no parle/candado local.
-        // Un parle global posterior necesita todos los números del sub-bloque.
-        if (ops.length) {
+        // REGLA: parle, candado y centena solo aplican sobre números FIJO.
+        // Solo acumular en collectedNums si la línea tiene al menos un op fijo.
+        // Líneas corrido-puro (solo monto de volteo, sin monto fijo) no participan.
+        const tieneFijoLocal = ops.some(op => op.tipo === 'fijo');
+        if (ops.length && tieneFijoLocal) {
           trace('ENGINE_COLLECT_BEFORE', { id: tokenId, lineNum, collectedNums: [...ctx.collectedNums] });
           ctx.collectedNums.push(...db.numerosBase);
           trace('ENGINE_COLLECT_AFTER', { id: tokenId, lineNum, collectedNums: [...ctx.collectedNums], added: db.numerosBase });
@@ -4167,9 +4631,10 @@ function procesarBloque(bloque, deps) {
           ctx.lastParleNums = [...ctx.collectedNums];
         }
 
-        // Acumular jugadas fijo/corrido para posible centena global posterior
+        // Acumular jugadas FIJO para posible centena global posterior.
+        // Corrido no aplica en centena global.
         for (const op of ops) {
-          if (op.tipo === 'fijo' || op.tipo === 'corrido') {
+          if (op.tipo === 'fijo') {
             ctx.jugadasBase.push({ numeros: op.numeros.slice(), montoUnitario: op.montoUnitario, tipo: op.tipo });
           }
         }
@@ -4425,17 +4890,16 @@ function calcular(ctx, deps) {
   // ── AUDIT: engine vs PRE — comparar lo que el engine procesó contra lo que
   // el preprocesador declaró como aceptado. Son capas distintas y pueden divergir
   // si hay bugs de wiring o tokens que el classifier descarta silenciosamente.
+  // FIX ENGINE_PRE_MISMATCH: PRE puede expandir 1 candidato en N sub-líneas
+  // via dividirMultiplesCon. Esto es correcto — emitir como info, nunca ERROR.
   if (audit) {
     const preAccepted = (audit.acceptedCount ?? 0) + (audit.recoveredCount ?? 0);
-    if (engineStats.processedLines !== preAccepted) {
-      trace('ERROR', {
-        code:    'ENGINE_PRE_MISMATCH',
-        message: `Engine procesó ${engineStats.processedLines} línea(s) como OPERATION pero PRE declaró ${preAccepted} aceptadas.`,
-        engineProcessedLines: engineStats.processedLines,
-        preAccepted,
-        diff: engineStats.processedLines - preAccepted,
-      });
-    }
+    trace('AUDIT_ENGINE_VS_PRE', {
+      engineProcessedLines: engineStats.processedLines,
+      preAccepted,
+      diff: engineStats.processedLines - preAccepted,
+      note: 'diff >= 0 es normal: dividirMultiplesCon expande 1 candidato en N sub-líneas',
+    });
   }
 
   return {
@@ -4460,7 +4924,7 @@ global.Expansion     = createExpansion();
 global.Evaluator     = { buildLineaDB, validarLinea, buildOpsNormal, buildOpsCentena, buildOpsParleGlobal, buildOpsCandadoGlobal, buildOpsCentenaGlobal, evaluarOperacion, detalleLineaTexto, pad2, pad3, comb2, generarPares, repartirExacto, detectarOperadorMalEscrito, levenshtein, clasificarTokens, validarEstructuraTokens };
 global.Classifier    = { clasificarLinea, clasificarBloque, LineType, OpKind };
 global.Parser        = { parsearInput, parsearBloques, joinNumberLines, TYPO_PATTERNS };
-global.Preprocesador = { preprocesarJugada, procesarLineaRaw, stripWhatsAppMeta, limpiarLineaAuto };
+global.Preprocesador = { preprocesarJugada, procesarLineaRaw, stripWhatsAppMeta, limpiarLineaAuto, normalizarLineaLexica, normalizeSpaces };
 global.Utils         = { limpiarMonto };
 global.Engine        = { calcular, procesarBloque, serializeJugadaLines };
 global.BetAuditLedger = { createBetAuditLedger, esLineaCandidato, detectarLineaHuerfana, mapearRazonFlag };
