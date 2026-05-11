@@ -41,21 +41,10 @@ function expandirParleMixto(linea) {
   return `${nums} con ${monto1}\nparle con ${monto2}`;
 }
 
-function expandirXcGlobal(linea) {
-  const match = linea.match(/^\s*xc\s+con\s+(\d+(?:\.\d+)?)\s*$/i);
-  if (match) {
-    const monto = match[1];
-    return `\x00CENTENA_GLOBAL\x00ALL:${monto}\x00`;
-  }
-  return linea;
-}
-
 function expandirLineaMixta(linea) {
-  // 1. parle mixto
   let resultado = expandirParleMixto(linea);
   if (resultado.includes('\n')) return resultado;
 
-  // 2. candado con X y Y
   const regex = /^(.+?)\s+con\s+(\d+(?:\.\d+)?)\s+y\s+(\d+(?:\.\d+)?)\s+candado\s+con\s+(\d+(?:\.\d+)?)$/i;
   const match = resultado.match(regex);
   if (!match) return resultado;
@@ -72,9 +61,6 @@ function preprocesarLineasMixtas(texto) {
   for (let line of lines) {
     line = line.trim();
     if (!line) continue;
-    // Primero xc global
-    line = expandirXcGlobal(line);
-    // Luego expandir líneas mixtas (parle, candado)
     line = expandirLineaMixta(line);
     const subLines = line.split('\n');
     for (const sub of subLines) {
@@ -225,6 +211,7 @@ async function saveUserPreference(telegramId, loteriaId, sorteoId, moneda) {
   }, { onConflict: 'telegram_id' });
 }
 
+// ==================== VALIDACIÓN DE HORARIO CON ZONA HORARIA CUBA ====================
 async function validarHorarioSorteo(sorteoId) {
   const { data: sorteo, error } = await supabase.from('sorteos')
     .select('hora_apertura, hora_cierre, nombre, loteria_id, activo')
@@ -237,16 +224,21 @@ async function validarHorarioSorteo(sorteoId) {
   if (sorteo.activo === false || sorteo.activo === 0)
     return { open: false, message: `❌ El sorteo "${sorteo.nombre}" está inactivo.` };
   if (!sorteo.hora_apertura || !sorteo.hora_cierre) return { open: true };
-  const ahora = new Date();
-  const horaActual = ahora.getHours() * 60 + ahora.getMinutes();
+
+  // Obtener hora actual en la zona horaria de Cuba (America/Havana)
+  const now = new Date();
+  const havanaTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Havana' }));
+  const horaActual = havanaTime.getHours() * 60 + havanaTime.getMinutes();
+
   const [ah, am] = sorteo.hora_apertura.split(':').map(Number);
   const [ch, cm] = sorteo.hora_cierre.split(':').map(Number);
   const aperturaMin = ah * 60 + am;
   const cierreMin = ch * 60 + cm;
+
   if (horaActual < aperturaMin)
-    return { open: false, message: `⏰ El sorteo "${sorteo.nombre}" aún no ha abierto.\nHorario: ${sorteo.hora_apertura.slice(0,5)} - ${sorteo.hora_cierre.slice(0,5)}` };
+    return { open: false, message: `⏰ El sorteo "${sorteo.nombre}" aún no ha abierto.\nHorario: ${sorteo.hora_apertura.slice(0,5)} - ${sorteo.hora_cierre.slice(0,5)} (hora local Cuba).` };
   if (horaActual >= cierreMin)
-    return { open: false, message: `⏰ El sorteo "${sorteo.nombre}" ya cerró.\nHorario: ${sorteo.hora_apertura.slice(0,5)} - ${sorteo.hora_cierre.slice(0,5)}` };
+    return { open: false, message: `⏰ El sorteo "${sorteo.nombre}" ya cerró.\nHorario: ${sorteo.hora_apertura.slice(0,5)} - ${sorteo.hora_cierre.slice(0,5)} (hora local Cuba).` };
   return { open: true };
 }
 
@@ -264,12 +256,14 @@ async function isBetEditable(bet) {
   const hoy = new Date().toISOString().slice(0,10);
   if (bet.fecha_apuesta !== hoy) return false;
   const ahora = new Date();
-  const horaActual = ahora.getHours() * 60 + ahora.getMinutes();
+  const havanaTime = new Date(ahora.toLocaleString('en-US', { timeZone: 'America/Havana' }));
+  const horaActual = havanaTime.getHours() * 60 + havanaTime.getMinutes();
   const { data: sorteo, error } = await supabase.from('sorteos')
     .select('hora_cierre').eq('id', bet.sorteo_id).single();
   if (error || !sorteo || !sorteo.hora_cierre) return true;
   const parts = sorteo.hora_cierre.split(':').map(Number);
-  return horaActual < (parts[0] || 0) * 60 + (parts[1] || 0);
+  const cierreMin = (parts[0] || 0) * 60 + (parts[1] || 0);
+  return horaActual < cierreMin;
 }
 
 // ================================ BOT SETUP ================================
@@ -293,7 +287,6 @@ app.post(webhookPath, (req, res) => {
 app.get('/ping', (req, res) => res.send('pong'));
 app.get('/', (req, res) => res.send('🤖 LotoPro Bot'));
 
-// Estados temporales
 const depositStates = new Map();
 const rejectState = new Map();
 
@@ -422,7 +415,7 @@ bot.command('horarios', async (ctx) => {
   const { data: sorteos, error } = await supabase.from('sorteos')
     .select('id, nombre, loterias(nombre), hora_apertura, hora_cierre').order('id');
   if (error || !sorteos?.length) return ctx.reply('No hay sorteos configurados.');
-  let msg = 'Horarios de sorteos:\n\n';
+  let msg = 'Horarios de sorteos (hora local Cuba):\n\n';
   for (const s of sorteos) {
     msg += `${s.loterias?.nombre || '?'} - ${s.nombre}\n`;
     msg += `  ${s.hora_apertura?.slice(0,5) || '?'} - ${s.hora_cierre?.slice(0,5) || '?'}\n\n`;
@@ -664,11 +657,11 @@ bot.action('menu_ayuda', async (ctx) => {
   try {
     await ctx.answerCbQuery();
     const ayuda =
-      'Ayuda rapida:\n\n' +
-      '1. Selecciona un sorteo desde el menu.\n' +
-      '2. Envia tu jugada en formato DSL.\n' +
+      'Ayuda rápida:\n\n' +
+      '1. Selecciona un sorteo desde el menú.\n' +
+      '2. Envía tu jugada en formato DSL.\n' +
       '3. Consulta tu saldo con /saldo.\n' +
-      '4. Deposita desde el menu.\n' +
+      '4. Deposita desde el menú.\n' +
       '5. Admins: /admin_panel';
     await ctx.editMessageText(ayuda, {
       reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'menu_main' }]] }
@@ -718,10 +711,10 @@ bot.action(/^admin_aprob_(\d+)$/, async (ctx) => {
     const { userId, amount, nuevoSaldo } = await approveDeposit(id, ctx.from.id);
     await ctx.answerCbQuery('Aprobado ✅');
     await ctx.editMessageText(
-      `✅ Deposito #${id} aprobado.\nUsuario: ${userId}\nMonto: $${amount.toFixed(2)}\nNuevo saldo: $${nuevoSaldo.toFixed(2)}`,
+      `✅ Depósito #${id} aprobado.\nUsuario: ${userId}\nMonto: $${amount.toFixed(2)}\nNuevo saldo: $${nuevoSaldo.toFixed(2)}`,
       { reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] } }
     );
-    try { await bot.telegram.sendMessage(userId, `✅ Tu deposito de $${amount.toFixed(2)} fue aprobado. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`); } catch(e) {}
+    try { await bot.telegram.sendMessage(userId, `✅ Tu depósito de $${amount.toFixed(2)} fue aprobado. Nuevo saldo: $${nuevoSaldo.toFixed(2)}`); } catch(e) {}
   } catch (err) { try { await ctx.answerCbQuery(`Error: ${err.message}`); } catch(e) {} }
 });
 
@@ -818,7 +811,7 @@ bot.action('admin_horarios', async (ctx) => {
         reply_markup: { inline_keyboard: [[{ text: '🔙 Volver', callback_data: 'admin_panel' }]] }
       });
     }
-    let msg = 'Horarios de sorteos:\n\n';
+    let msg = 'Horarios de sorteos (hora local Cuba):\n\n';
     for (const s of sorteos) {
       const abre = s.hora_apertura?.slice(0,5) || 'sin hora';
       const cierra = s.hora_cierre?.slice(0,5) || 'sin hora';
@@ -910,6 +903,7 @@ async function processBet(ctx, rawInput) {
   console.log(`📥 Apuesta de ${ctx.from.id}: ${rawInput.substring(0,200)}`);
   let processed = rawInput.toLowerCase();
   processed = preprocesarLineasMixtas(processed);
+  console.log('📥 Texto ENVIADO al motor:\n', processed);
   let resultado;
   try {
     resultado = Engine.calcular(
