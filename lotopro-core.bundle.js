@@ -704,8 +704,12 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
   const errors = [];
 
   // Una línea de apuesta SIEMPRE requiere un operador de monto: con / de / a.
-  // Sin él no hay monto y la línea es inválida. Verificar antes de cualquier otra cosa.
-  if (!/\b(con|de|a)\b/i.test(linea)) {
+  // EXCEPCIÓN: "parejas candado N" / "candado parejas N" — monto terminal sin operador.
+  const _isCandadoParejas = /\b(parejas?|candado)\b/i.test(linea) &&
+                             /\b(parejas?|candado)\b/i.test(linea) &&
+                             /(?:^|\s)(\d+(?:[.,]\d+)?)\s*$/.test(linea.trim()) &&
+                             /\b(parejas?|candado)\b.*\b(parejas?|candado)\b/i.test(linea);
+  if (!/\b(con|de|a)\b/i.test(linea) && !_isCandadoParejas) {
     const err = { code: 'E_SIN_OPERADOR_MONTO', line: lineaNum, message: 'Línea inválida: falta operador de monto (con / de / a).' };
     trace('ERROR', { source: 'validarLinea:sinOperador', ...err });
     errors.push(err);
@@ -3309,6 +3313,17 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
     return res;
   }
 
+  // ── HEADER_ONLY: "FIJO (20)", "PARLE (46)", "CORRIDO (8)", etc. ──────────
+  // Patrón: palabra-DSL sola seguida de contador entre paréntesis.
+  // Debe descartarse ANTES de cualquier normalización — de lo contrario
+  // "FIJO (20)" → strip "fijo" → queda "20" → se procesa como número suelto
+  // y activa combinatorias parle con los números previos del bloque.
+  if (/^\s*(fijo|parle|corrido|centena|candado)\s*\(\s*\d+\s*\)\s*$/i.test(trimmed)) {
+    trace('PRE_LINE_NOISE', { id, rawLine, razon: 'HEADER_ONLY: encabezado de sección → descartado' });
+    trace('PRE_FILTERED',   { id, rawLine, resultado: '', razon: 'HEADER_ONLY descartado' });
+    return '';
+  }
+
   // ── DETECCIÓN TEMPRANA: xc / xc3 / xc35 / xc 3 5 ──────────────────────────
   // DEBE ocurrir ANTES de _eliminarPalabrasNoReservadas, que destruye "xc"
   // porque la 'x' sin dígitos adyacentes es eliminada como token inválido.
@@ -3363,8 +3378,10 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
     const esTotal = /^\s*total\b/i.test(trimmed);
     const esParejasSinCon = /^\s*parejas?\s+\d+[.,]?\d*\s*$/i.test(trimmed);
     const esCandadoParle = /^\s*(candado|parle)\b/i.test(trimmed);
+    // "parejas candado N" / "candado parejas N" — tienen su propia normalización más adelante
+    const esParejasCandado = /\b(parejas?|pares)\b/i.test(trimmed) && /\bcandado\b/i.test(trimmed);
 
-    if (sinCon && tieneTexto && soloUnNumero && !esTotal && !esParejasSinCon && !esCandadoParle) {
+    if (sinCon && tieneTexto && soloUnNumero && !esTotal && !esParejasSinCon && !esCandadoParle && !esParejasCandado) {
       // Extraer el número presente en la línea
       const mNum = trimmed.match(/(\d+(?:[.,]\d+)?)/);
       const numStr = mNum ? mNum[1] : null;
@@ -3563,6 +3580,16 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
     l = l.replace(/[ \t]+\b(a|de)[ \t]+/gi, ' con ');
   }
   l = l.replace(/[ \t]+\by\b[ \t]+(?=parle\b|candado\b)/gi, ' ');
+  // "parejas candado N" / "candado parejas N" — normalizar ANTES de la expansión genérica
+  // Aquí "pareja" ya fue stripeada en DSL pero "parejas" no — capturamos antes de que desaparezca.
+  l = l.replace(/\b(?:parejas?|pares)\s+(?:de\s+)?candado\s+(\d+(?:[.,]\d+)?)\s*$/gi, (_, monto) => {
+    const nums = Array.from({length:10}, (_, i) => String(i).repeat(2).padStart(2, '0'));
+    return nums.join(' ') + ' candado con ' + monto.replace(',', '.');
+  });
+  l = l.replace(/\bcandado\s+(?:parejas?|pares)\s+(\d+(?:[.,]\d+)?)\s*$/gi, (_, monto) => {
+    const nums = Array.from({length:10}, (_, i) => String(i).repeat(2).padStart(2, '0'));
+    return nums.join(' ') + ' candado con ' + monto.replace(',', '.');
+  });
   l = l.replace(/(?:\b(?:parejas?|pares)\b|00[ \t]*al[ \t]*99)/ig, '00 11 22 33 44 55 66 77 88 99');
   // FIX: "t9 y 1 y 5" → "t9 1 5" — join terminal digits separated by 'y'
   // so the expansion loop below handles all of them uniformly.
@@ -3896,6 +3923,14 @@ function preprocesarJugada(rawInput) {
       // Patrón: palabra_meta seguida de número suelto, nada más.
       // Estricto a propósito: "25 con 100 total 140" no hace match (tiene "con").
       // FIX: ampliar para cubrir sufijos emoji/símbolo: "Total 900 💳", "Total 900 ✅"
+      // ── HEADER_ONLY: "FIJO (20)", "PARLE (46)", "CORRIDO (8)", etc. ─────────
+      // Debe ir ANTES de registerCandidate para no generar candidatos huérfanos
+      // que disparen AUDIT_MISSING_CANDIDATES como falso positivo.
+      if (/^\s*(fijo|parle|corrido|centena|candado)\s*\(\s*\d+\s*\)\s*$/i.test(line.trim())) {
+        trace('PRE_LINE_NOISE', { lineIndex: i, line, razon: 'HEADER_ONLY: encabezado de sección → descartado' });
+        continue;
+      }
+
       const _META_RE = /^\s*(total|tot|subtotal|suma|pago|abono|saldo)\b\s*:?\s*[\d.,]+\s*\S*\s*$/i;
       // Líneas de encabezado/pie generadas por el export WA — ignorar siempre
       const _HEADER_RE = /^(fecha\s*:|^\d+\s+jugadas?\s*\||\u06c6|\u0fda|\u06b5|={3}|─{5,}|-{5,})/i;
@@ -4129,10 +4164,10 @@ function preprocesarJugada(rawInput) {
       if (line.trim() === '') {
         processedLines.push('');
       pendingModifier = null;
+      } else if (esLineaRuido(line)) {
+        trace('PRE_LINE_NOISE', { lineIndex: i, line, razon: 'ruido sin dígitos → descartado' });
       } else {
         // ── MODIFICADOR TEMPORAL: fijo/corrido solos en una línea ─────────────────
-        // DEBE ir ANTES de esLineaRuido: "corrido" y "fijo" están en la lista de
-        // ruido DSL y serían descartados antes de poder activar el pendingModifier.
         const _lineNorm = line.trim().toLowerCase();
         if (_lineNorm === 'corrido' || _lineNorm === 'fijo') {
           pendingModifier = _lineNorm;
@@ -4144,7 +4179,7 @@ function preprocesarJugada(rawInput) {
         // significado cuando están en la misma línea que los números. Solas generan un token
         // IGNORE que dispara ctx.reset() en el engine, corrompiendo el estado del bloque.
         if (esLineaRuido(line)) {
-          trace('PRE_LINE_NOISE', { lineIndex: i, line, razon: 'ruido sin dígitos → descartado' });
+          trace('PRE_LINE_NOISE', { lineIndex: i, line, razon: 'ruido DSL puro sin dígitos → descartado (no genera reset)' });
           pendingModifier = null;
           continue;
         }
