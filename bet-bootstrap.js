@@ -28,6 +28,43 @@ if (!bot) {
       ctx.state.totalDeclarado = Number(String(totalDeclaradoMatch[1]).replace(',', '.'));
     }
 
+    // ── NORMALIZACIÓN TEMPRANA DE "PAREJA + MODIFICADOR" ──────────────────
+    // "pareja" significa las 10 parejas dobles: 00,11,...,99.
+    // Cuando se combina con parle/candado, debemos conservar esa semántica
+    // antes de que el core elimine la palabra "pareja" como ruido DSL.
+    // Se acepta tanto "parle 10000" como "parle10000" y lo mismo para candado.
+    // Ejemplos:
+    //   polo pareja parle10000
+    //   polo pareja parle 10000
+    //   polo pareja candado10000
+    //   polo pareja candado 10000
+    // Se convierten en:
+    //   polo\n00 11 22 33 44 55 66 77 88 99 parle con 10000
+    //   polo\n00 11 22 33 44 55 66 77 88 99 candado con 10000
+    const numerosPareja = '00 11 22 33 44 55 66 77 88 99';
+    const patronParejaModificador =
+      /^([^\d\r\n]+?)\s+(?:pareja|parejas|pares)\s+(parle|parlet|p|candado|c)\s*(\d+(?:[.,]\d+)?)\s*$/gim;
+
+    texto = texto.replace(
+      patronParejaModificador,
+      (_, nombre, modificador, monto) => {
+        const mod = /^(p|parlet)$/i.test(modificador) ? 'parle' :
+          (/^c$/i.test(modificador) ? 'candado' : modificador.toLowerCase());
+        return `${nombre.trim()}\n${numerosPareja} ${mod} con ${monto}`;
+      }
+    );
+
+    // Variante con el monto pegado al modificador cuando el nombre ya fue
+    // separado previamente o cuando la línea llega sin nombre.
+    texto = texto.replace(
+      /^(?:pareja|parejas|pares)\s+(parle|parlet|p|candado|c)\s*(\d+(?:[.,]\d+)?)\s*$/gim,
+      (_, modificador, monto) => {
+        const mod = /^(p|parlet)$/i.test(modificador) ? 'parle' :
+          (/^c$/i.test(modificador) ? 'candado' : modificador.toLowerCase());
+        return `${numerosPareja} ${mod} con ${monto}`;
+      }
+    );
+
     // FIX: cuando el nombre del jugador viene en la misma línea que
     // "pareja candado 10000", el preprocesador del core puede interpretar
     // el nombre como parte de la jugada y dejar una línea inválida.
