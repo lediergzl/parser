@@ -15,6 +15,32 @@ if (!bot) {
   console.error('❌ No se pudo obtener el bot de Telegram para registrar las jugadas.');
   process.exitCode = 1;
 } else {
+  // Normaliza formatos monetarios comunes antes de que cualquier detector
+  // de números ambiguos vea el mensaje.
+  //
+  // 25,00 / 25.00 -> 25
+  // 25,05 / 25.05 -> se conserva como decimal
+  // También elimina líneas informativas "Total de 1101,00" o "Total-210",
+  // que son resúmenes del comprobante y no una jugada adicional.
+  bot.use(async (ctx, next) => {
+    if (typeof ctx.message?.text !== 'string') return next();
+
+    let texto = ctx.message.text;
+
+    texto = texto.replace(
+      /(\b(?:con|a|de|parle|candado|p|c)\s+)\$?(\d+)[.,]00\b/gi,
+      (_, prefijo, numero) => `${prefijo}${numero}`
+    );
+
+    texto = texto.replace(
+      /^\s*total\s*(?:[-:]\s*|\s+de\s+)\$?\d+(?:[.,]\d+)?\s*$/gim,
+      ''
+    );
+
+    ctx.message.text = texto.trim();
+    return next();
+  });
+
   registrarRevisionHumana(bot)
     .then(() => registrarPendientesPorSaldo(bot))
     .then(() => registrarFlujoApuesta(bot))
