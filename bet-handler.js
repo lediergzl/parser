@@ -160,18 +160,23 @@ async function registrarFlujoApuesta(bot) {
       if (rpcError) {
         const code = String(rpcError.message || '');
         if (code.includes('INSUFFICIENT_BALANCE')) {
+          const { data: saldoUsuario, error: saldoError } = await supabase.from('users').select('saldo').eq('telegram_id', ctx.from.id).maybeSingle();
+          if (saldoError) throw saldoError;
+          const saldoDisponible = Number(saldoUsuario?.saldo || 0);
+          const faltante = Math.max(0, total - saldoDisponible);
+
           const { data: existente } = await supabase.from('pending_bets').select('id,status').eq('user_telegram_id', ctx.from.id).eq('status', 'awaiting_balance').eq('original_input', texto).maybeSingle();
           let pendingId = existente?.id;
           if (!pendingId) {
             const { data: pending, error: pendingError } = await supabase.from('pending_bets').insert([{
               user_telegram_id: ctx.from.id, chat_id: ctx.chat.id, loteria_id: contexto.pref.loteria_id, sorteo_id: contexto.pref.sorteo_id,
               moneda: contexto.pref.moneda || 'cup', original_input: texto, ambiguous_numbers: [], status: 'awaiting_balance',
-              error_message: `Saldo insuficiente. Total requerido: ${total}`
+              error_message: `Saldo insuficiente. Total requerido: ${total}. Saldo disponible: ${saldoDisponible}. Faltante: ${faltante}.`
             }]).select('id').single();
             if (pendingError) throw pendingError;
             pendingId = pending.id;
           }
-          await ctx.reply(`💰 *Saldo insuficiente*\n\nTotal de la jugada: $${fmtMoney(total)}\n\nTu jugada quedó guardada como pendiente *#${pendingId}*.\n\nDeposita saldo. Cuando la recarga sea confirmada, recibirás botones para decidir si deseas procesarla.`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '💰 Depositar saldo', callback_data: 'menu_depositar' }],[{ text: '📋 Ver jugada pendiente', callback_data: `balance_view_${pendingId}` }]] } });
+          await ctx.reply(`💰 *Saldo insuficiente*\n\nTotal de la jugada: *$${fmtMoney(total)}*\nSaldo disponible: *$${fmtMoney(saldoDisponible)}*\n❗ *Te faltan: $${fmtMoney(faltante)}*\n\nTu jugada quedó guardada como pendiente *#${pendingId}*.\n\nDeposita al menos el monto faltante. Cuando la recarga sea confirmada, recibirás botones para decidir si deseas procesarla.`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '💰 Depositar saldo', callback_data: 'menu_depositar' }],[{ text: '📋 Ver jugada pendiente', callback_data: `balance_view_${pendingId}` }]] } });
           return;
         }
         if (code.includes('USER_NOT_FOUND')) { await ctx.reply('❌ Tu usuario todavía no está registrado. Envía /start e inténtalo de nuevo.'); return; }
