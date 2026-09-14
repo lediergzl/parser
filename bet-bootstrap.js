@@ -17,21 +17,16 @@ if (!bot) {
 } else {
   // Normaliza formatos monetarios comunes antes de que cualquier detector
   // de números ambiguos vea el mensaje.
-  //
-  // 25,00 / 25.00 -> 25
-  // 25,05 / 25.05 -> se conserva como decimal
-  // También elimina resúmenes de comprobantes como "Total de 1101,00"
-  // o "Total-210" cuando aparecen al final o dentro de una misma línea.
   bot.use(async (ctx, next) => {
     if (typeof ctx.message?.text !== 'string') return next();
 
     let texto = ctx.message.text;
 
-    // Conservar el importe declarado por el jugador/comprobante ANTES de
-    // retirarlo del texto que recibe el motor. Esto permite distinguir entre
-    // el total calculado de la jugada y el total declarado en el recibo.
+    // El total del comprobante NO es una jugada. Lo guardamos antes de
+    // retirarlo para poder mostrar luego CALCULADO vs DECLARADO.
+    // Acepta: Total 400, Total: 400, Total-400 y Total de 400.
     const totalDeclaradoMatch = texto.match(
-      /\btotal\s*(?:(?:[-:]\s*)|(?:\s+de\s+))\$?\s*(\d+(?:[.,]\d+)?)/i
+      /\btotal\s*(?:(?:[-:]\s*)|(?:de\s+))?\$?\s*(\d+(?:[.,]\d+)?)/i
     );
     if (totalDeclaradoMatch) {
       ctx.state = ctx.state || {};
@@ -44,8 +39,6 @@ if (!bot) {
     );
 
     // "Total" es un resumen informativo del comprobante, no una jugada.
-    // Se elimina desde esa palabra hasta el importe para que 1101 nunca sea
-    // confundido con un número de 4 cifras.
     texto = texto.replace(
       /\btotal\s*(?:(?:[-:]\s*)|(?:\s+de\s+))\$?\d+(?:[.,]\d+)?/gi,
       ''
