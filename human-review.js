@@ -9,7 +9,12 @@ function detectarAmbiguos(texto) {
   const encontrados = [];
   const regex = /(^|[^\d])([0-9]{4})(?=$|[^\d])/g;
   let match;
-  while ((match = regex.exec(String(texto || ''))) !== null) encontrados.push(match[2]);
+  while ((match = regex.exec(String(texto || ''))) !== null) {
+    // Un bloque de 4 cifras inmediatamente después de "con" o "a" es un monto.
+    const antes = String(texto || '').slice(0, match.index + match[1].length);
+    if (/\b(?:con|a)\s*$/i.test(antes)) continue;
+    encontrados.push(match[2]);
+  }
   return [...new Set(encontrados)];
 }
 
@@ -29,23 +34,13 @@ function extraerCorreccionDeJugadaParcial(original, ambiguo, raw) {
   const texto = String(raw || '').trim();
   const indice = textoOriginal.indexOf(ambiguo);
   if (indice < 0) return null;
-
   const prefijo = textoOriginal.slice(0, indice).trim();
   const sufijo = textoOriginal.slice(indice + ambiguo.length).trim();
-
-  // Si el administrador pegó la jugada completa, conservarla tal cual.
-  if (prefijo && texto.startsWith(prefijo) && (!sufijo || texto.endsWith(sufijo))) {
-    return { __fullInput: texto };
-  }
-
-  // Si pegó solo la sustitución más el resto de la jugada, por ejemplo:
-  // "25 85 con 50" para "... 2585 con 50", extraer únicamente "25 85".
+  if (prefijo && texto.startsWith(prefijo) && (!sufijo || texto.endsWith(sufijo))) return { __fullInput: texto };
   if (sufijo && texto.endsWith(sufijo)) {
     const posibleReemplazo = texto.slice(0, -sufijo.length).trim();
     if (posibleReemplazo) return { [ambiguo]: posibleReemplazo };
   }
-
-  // Corrección simple: "25 85".
   if (!prefijo && texto) return { [ambiguo]: texto };
   return null;
 }
@@ -53,9 +48,6 @@ function extraerCorreccionDeJugadaParcial(original, ambiguo, raw) {
 function parsearCorreccion(texto, ambiguos, original) {
   const raw = String(texto || '').trim();
   const mapa = {};
-
-  // Para un único ambiguo, aceptar tanto "25 85" como
-  // "25 85 con 50" y una jugada completa ya corregida.
   if (ambiguos.length === 1 && !/^\d{4}\s*=/.test(raw)) {
     const especial = extraerCorreccionDeJugadaParcial(original, ambiguos[0], raw);
     if (especial) {
@@ -63,7 +55,6 @@ function parsearCorreccion(texto, ambiguos, original) {
       if (!detectarAmbiguos(especial[ambiguos[0]]).length) return especial;
     }
   }
-
   const asignaciones = raw.split(/[;\n]+/).map(x => x.trim()).filter(Boolean);
   const tieneAsignacion = asignaciones.some(x => /^\d{4}\s*=/.test(x));
   if (tieneAsignacion) {
@@ -72,10 +63,7 @@ function parsearCorreccion(texto, ambiguos, original) {
       if (!m) continue;
       mapa[m[1]] = m[2].trim();
     }
-  } else if (ambiguos.length === 1) {
-    mapa[ambiguos[0]] = raw;
-  }
-
+  } else if (ambiguos.length === 1) mapa[ambiguos[0]] = raw;
   for (const numero of ambiguos) {
     if (!mapa[numero]) return null;
     if (detectarAmbiguos(mapa[numero]).length) return null;
@@ -136,7 +124,6 @@ async function registrarRevisionHumana(bot) {
   bot.on('text', async (ctx, next) => {
     const texto = String(ctx.message?.text || '').trim();
     if (!texto || texto.startsWith('/')) return next();
-
     if (adminIds.includes(ctx.from.id) && estados.has(ctx.from.id)) {
       const state = estados.get(ctx.from.id);
       estados.delete(ctx.from.id);
@@ -144,7 +131,6 @@ async function registrarRevisionHumana(bot) {
         const { data: pending, error } = await supabase.from('pending_bets').select('*').eq('id', state.pendingId).eq('status', 'pending').maybeSingle();
         if (error) throw error;
         if (!pending) { await ctx.reply('❌ La solicitud ya no está pendiente.'); return; }
-
         const correccion = parsearCorreccion(texto, pending.ambiguous_numbers || [], pending.original_input);
         if (!correccion) {
           estados.set(ctx.from.id, state);
@@ -153,41 +139,27 @@ async function registrarRevisionHumana(bot) {
             : '❌ Corrección no válida. Usa `2585=25 85; 1234=12 34` o pega la jugada completa corregida.', { parse_mode: 'Markdown' });
           return;
         }
-
-        const correctedInput = correccion.__fullInput
-          ? correccion.__fullInput
-          : reemplazarAmbiguos(pending.original_input, pending.ambiguous_numbers, correccion);
+        const correctedInput = correccion.__fullInput ? correccion.__fullInput : reemplazarAmbiguos(pending.original_input, pending.ambiguous_numbers, correccion);
         if (detectarAmbiguos(correctedInput).length) {
           estados.set(ctx.from.id, state);
           await ctx.reply('❌ La corrección todavía contiene un bloque ambiguo de 4 cifras. Indica explícitamente su separación.');
           return;
         }
-
         const { error: updateError } = await supabase.from('pending_bets').update({ corrected_input: correctedInput, reviewed_by: ctx.from.id, reviewed_at: new Date(), status: 'approved', updated_at: new Date() }).eq('id', pending.id).eq('status', 'pending');
         if (updateError) throw updateError;
-
         await ctx.reply(`⏳ Procesando solicitud #${pending.id} con la corrección:\n\`${correctedInput}\``, { parse_mode: 'Markdown' });
         await bot.handleUpdate({ update_id: nuevoUpdateId(), message: {
           message_id: Math.floor(Date.now() / 1000), date: Math.floor(Date.now() / 1000),
           chat: { id: pending.chat_id, type: 'private' },
           from: { id: pending.user_telegram_id, is_bot: false, first_name: 'Usuario' }, text: correctedInput
         }});
-
-        // No marcar como procesada si el flujo interno no llegó a registrar la apuesta.
-        const { data: bet, error: betError } = await supabase.from('bets')
-          .select('id,total_apuesta,saldo_antes,saldo_despues')
-          .eq('user_telegram_id', pending.user_telegram_id)
-          .eq('input_raw', correctedInput)
-          .order('id', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+        const { data: bet, error: betError } = await supabase.from('bets').select('id,total_apuesta,saldo_antes,saldo_despues').eq('user_telegram_id', pending.user_telegram_id).eq('input_raw', correctedInput).order('id', { ascending: false }).limit(1).maybeSingle();
         if (betError) throw betError;
         if (!bet) {
           await supabase.from('pending_bets').update({ status: 'error', error_message: 'El flujo de apuesta no registró una apuesta después de la revisión.', updated_at: new Date() }).eq('id', pending.id).eq('status', 'approved');
           await ctx.reply(`⚠️ La solicitud #${pending.id} no fue marcada como procesada porque no se encontró una apuesta registrada. No se debe repetir el cobro hasta revisar el motivo.`);
           return;
         }
-
         await supabase.from('pending_bets').update({ status: 'processed', updated_at: new Date() }).eq('id', pending.id).eq('status', 'approved');
       } catch (err) {
         console.error('❌ Error procesando revisión humana:', err && err.stack ? err.stack : err);
@@ -196,7 +168,6 @@ async function registrarRevisionHumana(bot) {
       }
       return;
     }
-
     const ambiguos = detectarAmbiguos(texto);
     if (!ambiguos.length) return next();
     try { await crearPendiente(ctx, texto, ambiguos); }
@@ -233,17 +204,11 @@ async function registrarRevisionHumana(bot) {
     const { data: rows, error } = await supabase.from('pending_bets').select('id,user_telegram_id,original_input,ambiguous_numbers,created_at').eq('status', 'pending').order('created_at', { ascending: true }).limit(20);
     if (error) return ctx.reply('❌ No se pudieron cargar las revisiones.');
     if (!rows?.length) return ctx.reply('📋 No hay jugadas pendientes de revisión humana.');
-
     for (const r of rows) {
-      const keyboard = { inline_keyboard: [
-        [{ text: `✏️ Corregir #${r.id}`, callback_data: `review_edit_${r.id}` }],
-        [{ text: `❌ Rechazar #${r.id}`, callback_data: `review_reject_${r.id}` }]
-      ]};
-      await ctx.reply(`⚠️ *Solicitud #${r.id}*\n\nUsuario: ${r.user_telegram_id}\nJugada:\n\`${r.original_input}\`\n\nAmbiguo(s): *${(r.ambiguous_numbers || []).join(', ')}*`, { parse_mode: 'Markdown', reply_markup: keyboard });
+      const keyboard = { inline_keyboard: [[{ text: `✏️ Corregir #${r.id}`, callback_data: `review_edit_${r.id}` }], [{ text: `❌ Rechazar #${r.id}`, callback_data: `review_reject_${r.id}` }]] };
+      await ctx.reply(`📋 *Solicitud #${r.id}*\nUsuario: ${r.user_telegram_id}\nJugada: \`${r.original_input}\`\nAmbiguo(s): ${r.ambiguous_numbers.join(', ')}`, { parse_mode: 'Markdown', reply_markup: keyboard });
     }
   });
-
-  console.log('✅ Cola de revisión humana registrada');
 }
 
-module.exports = { registrarRevisionHumana };
+module.exports = { registrarRevisionHumana, detectarAmbiguos };
