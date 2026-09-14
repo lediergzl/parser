@@ -3,6 +3,7 @@
 // la instancia de Telegraf y registrado el catálogo.
 
 const { createClient } = require('@supabase/supabase-js');
+const { enviarJugadaAlComercial } = require('./whatsapp');
 
 function fmtMoney(value) { return Number(value || 0).toFixed(2); }
 
@@ -186,6 +187,25 @@ async function registrarFlujoApuesta(bot) {
       const fila = Array.isArray(rpcData) ? rpcData[0] : rpcData;
       const saldoDespues = Number(fila?.saldo_despues || 0);
       const contextoTexto = { loteriaNombre: loteria?.nombre || 'Lotería', sorteo: contexto.sorteo, moneda: contexto.pref.moneda || 'cup' };
+
+      // WhatsApp es una notificación secundaria: si falla, la apuesta ya confirmada
+      // no se revierte ni se vuelve a cobrar.
+      try {
+        await enviarJugadaAlComercial({
+          betId: fila?.bet_id,
+          telegramId: ctx.from.id,
+          loteriaNombre: contextoTexto.loteriaNombre,
+          sorteoNombre: contexto.sorteo.nombre,
+          fecha,
+          inputRaw: texto,
+          total,
+          moneda: contextoTexto.moneda,
+          saldoDespues
+        });
+      } catch (whatsappError) {
+        console.error('❌ Error enviando la jugada al WhatsApp del comercial:', whatsappError && whatsappError.stack ? whatsappError.stack : whatsappError);
+      }
+
       await replyLong(ctx, `${mensajeResultado(resultado, contextoTexto)}\n\n✅ *Jugada guardada correctamente.*\n💰 Saldo restante: *$${fmtMoney(saldoDespues)}*`, { parse_mode: 'Markdown' });
     } catch (err) {
       console.error('❌ Error procesando jugada:', err && err.stack ? err.stack : err);
