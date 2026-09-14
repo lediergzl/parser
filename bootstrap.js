@@ -1,5 +1,6 @@
-// Diagnóstico de arranque para Render.
-// Carga index.js sin ocultar errores de inicialización.
+// Bootstrap de arranque para Render.
+// index.js actualmente crea el servidor Express, pero no lo inicia.
+// Capturamos esa instancia para mantener el servicio HTTP activo.
 
 console.log('🔎 Bootstrap LotoPro iniciando...');
 console.log('🔎 Node:', process.version);
@@ -20,18 +21,34 @@ process.on('unhandledRejection', (reason) => {
   process.exitCode = 1;
 });
 
-const originalExit = process.exit;
-process.exit = function diagnosticExit(code) {
-  console.error(`❌ index.js intentó ejecutar process.exit(${code}) durante el arranque.`);
-  console.error('🔎 Esto permite identificar exactamente qué validación está provocando la salida en Render.');
-  process.exitCode = Number.isInteger(code) ? code : 1;
-  return originalExit.call(process, code);
+// Capturar la instancia Express que index.js crea con express().
+const expressModulePath = require.resolve('express');
+const realExpress = require('express');
+const wrappedExpress = function (...args) {
+  const app = realExpress(...args);
+  global.__LOTO_APP__ = app;
+  return app;
 };
+Object.assign(wrappedExpress, realExpress);
+require.cache[expressModulePath].exports = wrappedExpress;
 
 try {
   require('./index.js');
+
+  const app = global.__LOTO_APP__;
+  if (!app) {
+    throw new Error('No se pudo capturar la instancia Express creada por index.js');
+  }
+
+  const PORT = Number(process.env.PORT) || 10000;
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Servidor escuchando en puerto ${PORT}`);
+    console.log('✅ Webhook disponible en POST /webhook');
+    console.log(`🏠 Health check: /ping`);
+  });
 } catch (err) {
-  console.error('❌ ERROR SINCRÓNICO AL CARGAR index.js:');
+  console.error('❌ ERROR DURANTE EL ARRANQUE:');
   console.error(err && err.stack ? err.stack : err);
   process.exitCode = 1;
 }
