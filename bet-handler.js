@@ -112,7 +112,7 @@ function formatearDetalles(resultado) {
   const lineas = [];
   for (const d of detalles) {
     const tipo = String(d.tipo || '').toLowerCase();
-    let etiqueta = ({ fijo: 'Fijos', fijos: 'Fijos', parle: 'Parles', pareja: 'Parejas', parejas: 'Parejas', centena: 'Centenas', corrido: 'Corridos', corridos: 'Corridos', candado: 'Parles', candado_global: 'Parles' })[tipo] || (d.tipo || 'Jugadas');
+    const etiqueta = ({ fijo: 'Fijos', fijos: 'Fijos', parle: 'Parles', pareja: 'Parejas', parejas: 'Parejas', centena: 'Centenas', corrido: 'Corridos', corridos: 'Corridos', candado: 'Parles', candado_global: 'Parles' })[tipo] || (d.tipo || 'Jugadas');
     let numeros = Array.isArray(d.numeros) ? d.numeros : [];
     if (!numeros.length && Array.isArray(d.pares)) numeros = d.pares.flat ? d.pares.flat() : d.pares;
     numeros = numeros.map(n => String(n).padStart(2, '0'));
@@ -126,8 +126,11 @@ function formatearDetalles(resultado) {
 
 function mensajeResultado(resultado, contexto, datos = {}) {
   let texto = `🧾 *Jugada calculada*\n\n`;
-  texto += `🎰 ${contexto.loteriaNombre} — ${contexto.sorteo.nombre}\n`;
-  texto += `💵 Moneda: ${String(contexto.moneda).toUpperCase()}\n\n`;
+  const loteriaNombre = contexto.loteriaNombre || contexto.pref?.loteriaNombre || 'Lotería';
+  const sorteoNombre = contexto.sorteo?.nombre || 'Sorteo';
+  const moneda = contexto.moneda || contexto.pref?.moneda || 'cup';
+  texto += `🎰 ${loteriaNombre} — ${sorteoNombre}\n`;
+  texto += `💵 Moneda: ${String(moneda).toUpperCase()}\n\n`;
   if (datos.nombreJugador) texto += `=== JUGADOR: ${datos.nombreJugador} ===\n\n`;
   texto += formatearDetalles(resultado);
   const calculado = Number(resultado.totalGeneral || 0);
@@ -141,9 +144,12 @@ function mensajeRespaldo(resultado, contexto, datos) {
   const solicitado = Number(datos.totalSolicitado || datos.total || 0);
   const cobrado = Number(datos.total || 0);
   const ahorro = Math.max(0, solicitado - cobrado);
+  const loteriaNombre = contexto.loteriaNombre || contexto.pref?.loteriaNombre || 'Lotería';
+  const sorteoNombre = contexto.sorteo?.nombre || 'Sorteo';
+  const moneda = contexto.moneda || contexto.pref?.moneda || 'cup';
   let texto = `🧾 *JUGADA REGISTRADA*\n\n`;
-  texto += `🎰 *${contexto.loteriaNombre} — ${contexto.sorteo.nombre}*\n`;
-  texto += `💵 Moneda: *${String(contexto.moneda).toUpperCase()}*\n`;
+  texto += `🎰 *${loteriaNombre} — ${sorteoNombre}*\n`;
+  texto += `💵 Moneda: *${String(moneda).toUpperCase()}*\n`;
   texto += `👤 Jugador: *${datos.nombreJugador || 'Sin nombre'}*\n`;
   texto += `🆔 Apuesta: *#${datos.betId || 'N/D'}*\n`;
   texto += `👤 Telegram ID: *${datos.telegramId || 'N/D'}*\n`;
@@ -226,35 +232,62 @@ async function registrarFlujoApuesta(bot) {
               error_message: `Saldo insuficiente. Total requerido: ${total}. Saldo disponible: ${saldoDisponible}. Faltante: ${faltante}.`
             }]).select('id').single();
             if (pendingError) throw pendingError;
-            pendingId = pending?.id;
+            pendingId = pending.id;
           }
-          await ctx.reply(`💸 *Saldo insuficiente*\n\nTotal requerido: *$${fmtMoney(total)}*\nSaldo disponible: *$${fmtMoney(saldoDisponible)}*\nFaltante: *$${fmtMoney(faltante)}*\n\nLa jugada quedó pendiente hasta que haya saldo suficiente.\nID pendiente: *${pendingId || 'N/D'}*`, { parse_mode: 'Markdown' });
+          await ctx.reply(`💰 *Saldo insuficiente*\n\nTotal de la jugada: *$${fmtMoney(total)}*\nSaldo disponible: *$${fmtMoney(saldoDisponible)}*\n❗ *Te faltan: $${fmtMoney(faltante)}*\n\nTu jugada quedó guardada como pendiente *#${pendingId}*.\n\nDeposita al menos el monto faltante. Cuando la recarga sea confirmada, recibirás botones para decidir si deseas procesarla.`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '💰 Depositar saldo', callback_data: 'menu_depositar' }],[{ text: '📋 Ver jugada pendiente', callback_data: `balance_view_${pendingId}` }]] } });
           return;
         }
+        if (code.includes('USER_NOT_FOUND')) { await ctx.reply('❌ Tu usuario todavía no está registrado. Envía /start e inténtalo de nuevo.'); return; }
         throw rpcError;
       }
 
-      const betId = rpcData?.bet_id || rpcData?.id || rpcData;
-      const totalSolicitado = Number(rpcData?.total_solicitado || total);
-      const totalCobrado = Number(rpcData?.total_cobrado || total);
-      const saldoDespues = Number(rpcData?.saldo_despues ?? rpcData?.saldo ?? 0);
-      const nombreJugador = String(rpcData?.nombre_jugador || '').trim();
+      const fila = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+      const saldoDespues = Number(fila?.saldo_despues || 0);
+      const contextoTexto = { loteriaNombre: loteria?.nombre || 'Lotería', sorteo: contexto.sorteo, moneda: contexto.pref.moneda || 'cup' };
+      const nombreJugador = String(fila?.nombre_jugador || ctx.from?.first_name || '').trim() || String(ctx.from?.username || '').trim() || `Telegram ${ctx.from.id}`;
       const totalDeclarado = Number(ctx.state?.totalDeclarado || 0);
-      const datosMensaje = { totalDeclarado, nombreJugador, totalSolicitado, total: totalCobrado, betId, telegramId: ctx.from.id, fecha, inputRaw: texto, saldoDespues };
+      const totalSolicitado = Number(fila?.total_solicitado || resultado.totalOriginal || total);
+      const totalCobrado = Number(fila?.total_cobrado || total);
+      const datosMensaje = {
+        totalDeclarado,
+        nombreJugador,
+        totalSolicitado,
+        total: totalCobrado,
+        betId: fila?.bet_id,
+        telegramId: ctx.from.id,
+        fecha,
+        inputRaw: texto,
+        saldoDespues
+      };
 
-      await ctx.reply(mensajeResultado(resultado, contexto, datosMensaje), { parse_mode: 'Markdown' });
-      await enviarRespaldoTelegram(bot, resultado, contexto, datosMensaje);
-
+      // WhatsApp es una notificación secundaria: si falla, la apuesta ya confirmada
+      // no se revierte ni se vuelve a cobrar.
       try {
-        await enviarJugadaAlComercial({ resultado, contexto, datos: datosMensaje });
-      } catch (error) {
-        console.error('⚠️ Error enviando la jugada al comercial:', error && error.stack ? error.stack : error);
+        await enviarJugadaAlComercial({
+          betId: fila?.bet_id,
+          telegramId: ctx.from.id,
+          loteriaNombre: contextoTexto.loteriaNombre,
+          sorteoNombre: contexto.sorteo.nombre,
+          fecha,
+          inputRaw: texto,
+          total: totalCobrado,
+          moneda: contextoTexto.moneda,
+          saldoDespues
+        });
+      } catch (whatsappError) {
+        console.error('❌ Error enviando la jugada al WhatsApp del comercial:', whatsappError && whatsappError.stack ? whatsappError.stack : whatsappError);
       }
-    } catch (error) {
-      console.error('❌ Error procesando jugada:', error && error.stack ? error.stack : error);
-      await ctx.reply('❌ Ocurrió un error procesando la jugada.');
+
+      await enviarRespaldoTelegram(bot, resultado, contextoTexto, datosMensaje);
+
+      await replyLong(ctx, `${mensajeResultado(resultado, contextoTexto, datosMensaje)}\n\n⚙️ *Importe cobrado: $${fmtMoney(totalCobrado)}*\n\n✅ *Jugada guardada correctamente.*\n💳 *Saldo restante: $${fmtMoney(saldoDespues)}*`, { parse_mode: 'Markdown' });
+    } catch (err) {
+      console.error('❌ Error procesando jugada:', err && err.stack ? err.stack : err);
+      try { await ctx.reply('❌ Ocurrió un error al procesar la jugada. No se guardó ningún cargo. Intenta nuevamente.'); } catch (replyError) { console.error('❌ No se pudo enviar el mensaje de error a Telegram:', replyError && replyError.stack ? replyError.stack : replyError); }
     }
   });
+
+  console.log('✅ Flujo de jugadas registrado');
 }
 
 module.exports = { registrarFlujoApuesta };
