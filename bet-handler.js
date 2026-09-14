@@ -8,8 +8,6 @@ function fmtMoney(value) {
   return Number(value || 0).toFixed(2);
 }
 
-// Telegram limita los mensajes de texto a 4096 caracteres. Dejamos margen
-// para Markdown y para evitar que un recibo grande provoque un 400.
 async function replyLong(ctx, text, options = {}) {
   const MAX = 3900;
   const contenido = String(text || '');
@@ -17,7 +15,6 @@ async function replyLong(ctx, text, options = {}) {
     await ctx.reply(contenido, options);
     return;
   }
-
   const partes = [];
   let restante = contenido;
   while (restante.length > MAX) {
@@ -28,22 +25,16 @@ async function replyLong(ctx, text, options = {}) {
     restante = restante.slice(corte).replace(/^\s+/, '');
   }
   if (restante) partes.push(restante);
-
   for (let i = 0; i < partes.length; i++) {
     const opts = { ...options };
-    if (i === 0 && partes.length > 1) {
-      opts.parse_mode = options.parse_mode;
-    }
+    if (i === 0 && partes.length > 1) opts.parse_mode = options.parse_mode;
     await ctx.reply(partes[i], opts);
   }
 }
 
 function fechaCuba() {
   const partes = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Havana',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
+    timeZone: 'America/Havana', year: 'numeric', month: '2-digit', day: '2-digit'
   }).formatToParts(new Date());
   const y = partes.find(p => p.type === 'year')?.value;
   const m = partes.find(p => p.type === 'month')?.value;
@@ -53,14 +44,21 @@ function fechaCuba() {
 
 function horaMinutosCuba() {
   const partes = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Havana',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
+    timeZone: 'America/Havana', hour: '2-digit', minute: '2-digit', hour12: false
   }).formatToParts(new Date());
   const h = Number(partes.find(p => p.type === 'hour')?.value || 0);
   const m = Number(partes.find(p => p.type === 'minute')?.value || 0);
   return h * 60 + m;
+}
+
+// Un bloque de 4 cifras sin operador explícito es ambiguo.
+// Ej.: 2585 puede requerir interpretación humana (25 + 85, etc.).
+function detectarNumerosAmbiguos(texto) {
+  const encontrados = [];
+  const regex = /(^|[^\d])([0-9]{4})(?=$|[^\d])/g;
+  let match;
+  while ((match = regex.exec(String(texto || ''))) !== null) encontrados.push(match[2]);
+  return [...new Set(encontrados)];
 }
 
 async function obtenerContextoUsuario(supabase, telegramId) {
@@ -91,21 +89,15 @@ async function obtenerContextoUsuario(supabase, telegramId) {
     const [ch, cm] = String(sorteo.hora_cierre).slice(0, 5).split(':').map(Number);
     const apertura = ah * 60 + am;
     const cierre = ch * 60 + cm;
-    if (ahora < apertura) {
-      return { ok: false, message: `⏰ El sorteo *${sorteo.nombre}* aún no ha abierto.\nHorario: ${String(sorteo.hora_apertura).slice(0,5)} - ${String(sorteo.hora_cierre).slice(0,5)} (Cuba).` };
-    }
-    if (ahora >= cierre) {
-      return { ok: false, message: `⏰ El sorteo *${sorteo.nombre}* ya cerró.\nHorario: ${String(sorteo.hora_apertura).slice(0,5)} - ${String(sorteo.hora_cierre).slice(0,5)} (Cuba).` };
-    }
+    if (ahora < apertura) return { ok: false, message: `⏰ El sorteo *${sorteo.nombre}* aún no ha abierto.\nHorario: ${String(sorteo.hora_apertura).slice(0,5)} - ${String(sorteo.hora_cierre).slice(0,5)} (Cuba).` };
+    if (ahora >= cierre) return { ok: false, message: `⏰ El sorteo *${sorteo.nombre}* ya cerró.\nHorario: ${String(sorteo.hora_apertura).slice(0,5)} - ${String(sorteo.hora_cierre).slice(0,5)} (Cuba).` };
   }
-
   return { ok: true, pref, sorteo };
 }
 
 async function validarLimites(supabase, loteriaId, sorteoId, fecha, detalles) {
   const { data: limites, error: limitesError } = await supabase
-    .from('limits')
-    .select('tipo,monto_maximo')
+    .from('limits').select('tipo,monto_maximo')
     .or(`loteria_id.eq.${loteriaId},loteria_id.is.null`)
     .or(`sorteo_id.eq.${sorteoId},sorteo_id.is.null`);
   if (limitesError) throw limitesError;
@@ -115,11 +107,7 @@ async function validarLimites(supabase, loteriaId, sorteoId, fecha, detalles) {
   for (const l of limites) limitesMap[l.tipo] = Number(l.monto_maximo);
 
   const { data: bets, error: betsError } = await supabase
-    .from('bets')
-    .select('detalle')
-    .eq('loteria_id', loteriaId)
-    .eq('sorteo_id', sorteoId)
-    .eq('fecha_apuesta', fecha);
+    .from('bets').select('detalle').eq('loteria_id', loteriaId).eq('sorteo_id', sorteoId).eq('fecha_apuesta', fecha);
   if (betsError) throw betsError;
 
   const acumulado = {};
@@ -196,6 +184,17 @@ async function registrarFlujoApuesta(bot) {
         return;
       }
 
+      // SEGURIDAD: nunca cobrar una entrada que contenga un bloque numérico
+      // de 4 cifras ambiguo. Atención humana debe decidir su interpretación.
+      const ambiguos = detectarNumerosAmbiguos(texto);
+      if (ambiguos.length) {
+        await ctx.reply(
+          `⚠️ *Jugada requiere atención humana*\n\nSe detectó un número ambiguo de 4 cifras: *${ambiguos.join(', ')}*.\n\nEl bot no puede determinar de forma segura su interpretación.\n\n❌ *No se calculó ni se descontó saldo.*\n\nPor favor, solicita atención humana para confirmar la jugada.`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
       const { data: loteria, error: loteriaError } = await supabase
         .from('loterias').select('nombre').eq('id', contexto.pref.loteria_id).maybeSingle();
       if (loteriaError) throw loteriaError;
@@ -223,11 +222,7 @@ async function registrarFlujoApuesta(bot) {
           const linea = e.line ? `Línea ${e.line}: ` : '';
           return `• ${linea}${e.message || e.reason || 'Error de procesamiento'}`;
         }).join('\n');
-        await replyLong(
-          ctx,
-          `❌ *No se puede guardar la jugada.*\n\n${resultado?.message || 'El motor detectó un error.'}${errores ? `\n\n${errores}` : ''}`,
-          { parse_mode: 'Markdown' }
-        );
+        await replyLong(ctx, `❌ *No se puede guardar la jugada.*\n\n${resultado?.message || 'El motor detectó un error.'}${errores ? `\n\n${errores}` : ''}`, { parse_mode: 'Markdown' });
         return;
       }
 
@@ -241,10 +236,7 @@ async function registrarFlujoApuesta(bot) {
       const fecha = fechaCuba();
       const limite = await validarLimites(supabase, contexto.pref.loteria_id, contexto.pref.sorteo_id, fecha, detalles);
       if (limite) {
-        await ctx.reply(
-          `🚫 *Límite excedido*\n\nNúmero: ${limite.numero}\nTipo: ${limite.tipo}\nAcumulado anterior: $${fmtMoney(limite.anterior)}\nEsta jugada: $${fmtMoney(limite.actual)}\nLímite: $${fmtMoney(limite.limite)}\n\nLa jugada no fue guardada.`,
-          { parse_mode: 'Markdown' }
-        );
+        await ctx.reply(`🚫 *Límite excedido*\n\nNúmero: ${limite.numero}\nTipo: ${limite.tipo}\nAcumulado anterior: $${fmtMoney(limite.anterior)}\nEsta jugada: $${fmtMoney(limite.actual)}\nLímite: $${fmtMoney(limite.limite)}\n\nLa jugada no fue guardada.`, { parse_mode: 'Markdown' });
         return;
       }
 
@@ -280,11 +272,7 @@ async function registrarFlujoApuesta(bot) {
         moneda: contexto.pref.moneda || 'cup'
       };
 
-      await replyLong(
-        ctx,
-        `${mensajeResultado(resultado, contextoTexto)}\n\n✅ *Jugada guardada correctamente.*\n💰 Saldo restante: *$${fmtMoney(saldoDespues)}*`,
-        { parse_mode: 'Markdown' }
-      );
+      await replyLong(ctx, `${mensajeResultado(resultado, contextoTexto)}\n\n✅ *Jugada guardada correctamente.*\n💰 Saldo restante: *$${fmtMoney(saldoDespues)}*`, { parse_mode: 'Markdown' });
     } catch (err) {
       console.error('❌ Error procesando jugada:', err && err.stack ? err.stack : err);
       try {
