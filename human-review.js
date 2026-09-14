@@ -30,9 +30,40 @@ function reemplazarAmbiguos(original, ambiguos, correccion) {
   return resultado;
 }
 
-function parsearCorreccion(texto, ambiguos) {
+function parsearCorreccion(texto, ambiguos, originalInput) {
   const raw = String(texto || '').trim();
   const mapa = {};
+
+  // Si el administrador pega la jugada COMPLETA ya corregida,
+  // aceptarla directamente. Antes el código interpretaba toda esa
+  // jugada como el reemplazo de 2585 y terminaba duplicando el texto.
+  if (
+    ambiguos.length === 1 &&
+    raw &&
+    raw !== String(originalInput || '').trim() &&
+    !detectarAmbiguos(raw).length &&
+    /\d/.test(raw)
+  ) {
+    const original = String(originalInput || '').trim();
+    const partesOriginal = original.split(/\s+/).filter(Boolean);
+    const partesRaw = raw.split(/\s+/).filter(Boolean);
+
+    // Si la entrada empieza como la original hasta antes del ambiguo,
+    // tratamos el mensaje como una jugada completa corregida.
+    const numero = ambiguos[0];
+    const indice = partesOriginal.indexOf(numero);
+    if (indice >= 0) {
+      const prefijoOriginal = partesOriginal.slice(0, indice).join(' ');
+      const sufijoOriginal = partesOriginal.slice(indice + 1).join(' ');
+      if (
+        prefijoOriginal &&
+        raw.startsWith(prefijoOriginal) &&
+        (!sufijoOriginal || raw.endsWith(sufijoOriginal))
+      ) {
+        return { __fullInput: raw };
+      }
+    }
+  }
 
   // Formato completo para varias ambigüedades: 2585=25 85; 1234=12 34
   const asignaciones = raw.split(/[;\n]+/).map(x => x.trim()).filter(Boolean);
@@ -168,30 +199,34 @@ async function registrarRevisionHumana(bot) {
           return;
         }
 
-        const correccion = parsearCorreccion(texto, pending.ambiguous_numbers || []);
+        const correccion = parsearCorreccion(texto, pending.ambiguous_numbers || [], pending.original_input);
         if (!correccion) {
           estados.set(ctx.from.id, state);
           await ctx.reply(
             pending.ambiguous_numbers.length === 1
-              ? `❌ Corrección no válida. Escribe cómo interpretar *${pending.ambiguous_numbers[0]}*, por ejemplo: \`25 85\`.`
+              ? `❌ Corrección no válida. Escribe cómo interpretar *${pending.ambiguous_numbers[0]}*, por ejemplo: \`25 85\`, o pega la jugada completa ya corregida.`
               : '❌ Corrección no válida. Usa el formato: `2585=25 85; 1234=12 34`.',
             { parse_mode: 'Markdown' }
           );
           return;
         }
 
-        const correctedInput = reemplazarAmbiguos(pending.original_input, pending.ambiguous_numbers, correccion);
+        const correctedInput = correccion.__fullInput
+          ? correccion.__fullInput
+          : reemplazarAmbiguos(pending.original_input, pending.ambiguous_numbers, correccion);
+
         if (detectarAmbiguos(correctedInput).length) {
           estados.set(ctx.from.id, state);
           await ctx.reply('❌ La corrección todavía contiene un bloque ambiguo de 4 cifras. Indica explícitamente su separación.');
           return;
         }
 
-        await supabase
+        const { error: updateError } = await supabase
           .from('pending_bets')
           .update({ corrected_input: correctedInput, reviewed_by: ctx.from.id, reviewed_at: new Date(), status: 'approved', updated_at: new Date() })
           .eq('id', pending.id)
           .eq('status', 'pending');
+        if (updateError) throw updateError;
 
         await ctx.reply(`⏳ Procesando solicitud #${pending.id} con la corrección:\n\`${correctedInput}\``, { parse_mode: 'Markdown' });
 
