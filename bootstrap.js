@@ -155,9 +155,20 @@ async function registerMenuCallbacks(bot) {
   bot.action('menu_mis_jugadas', async (ctx) => {
     await answer(ctx);
     try {
-      const { data: bets, error } = await supabase.from('bets').select('id,fecha_apuesta,total_apuesta,moneda,created_at,sorteos(nombre)').eq('user_telegram_id', ctx.from.id).order('created_at', { ascending: false }).limit(10);
+      const { data: pref, error: prefError } = await supabase.from('user_preferences').select('loteria_id').eq('telegram_id', ctx.from.id).maybeSingle();
+      if (prefError) throw prefError;
+      if (!pref?.loteria_id) {
+        return ctx.editMessageText('📋 *Mis Jugadas*\n\nPrimero selecciona una lotería y un sorteo.', { parse_mode: 'Markdown', ...mainKeyboard });
+      }
+      const { data: sorteos, error: sorteosError } = await supabase.from('sorteos').select('id').eq('loteria_id', pref.loteria_id);
+      if (sorteosError) throw sorteosError;
+      const sorteoIds = (sorteos || []).map(s => s.id);
+      if (!sorteoIds.length) {
+        return ctx.editMessageText('📋 *Mis Jugadas*\n\nLa lotería seleccionada no tiene sorteos configurados.', { parse_mode: 'Markdown', ...mainKeyboard });
+      }
+      const { data: bets, error } = await supabase.from('bets').select('id,fecha_apuesta,total_apuesta,moneda,created_at,sorteos(nombre)').eq('user_telegram_id', ctx.from.id).in('sorteo_id', sorteoIds).order('created_at', { ascending: false }).limit(10);
       if (error) throw error;
-      if (!bets?.length) return ctx.editMessageText('📋 *Mis Jugadas*\n\nNo tienes jugadas registradas todavía.', { parse_mode: 'Markdown', ...mainKeyboard });
+      if (!bets?.length) return ctx.editMessageText('📋 *Mis Jugadas*\n\nNo tienes jugadas registradas para la lotería seleccionada.', { parse_mode: 'Markdown', ...mainKeyboard });
       const lines = bets.map((b, i) => `${i + 1}. ${b.fecha_apuesta} — ${b.sorteos?.nombre || 'Sorteo'} — $${fmtMoney(b.total_apuesta)} ${String(b.moneda || 'cup').toUpperCase()}`);
       await ctx.editMessageText(`📋 *Mis Jugadas*\n\n${lines.join('\n')}`, { parse_mode: 'Markdown', ...mainKeyboard });
     } catch (err) {
@@ -169,9 +180,20 @@ async function registerMenuCallbacks(bot) {
   bot.action('menu_historial', async (ctx) => {
     await answer(ctx);
     try {
-      const { data: bets, error } = await supabase.from('bets').select('fecha_apuesta,total_apuesta,moneda,sorteos(nombre)').eq('user_telegram_id', ctx.from.id).order('created_at', { ascending: false }).limit(20);
+      const { data: pref, error: prefError } = await supabase.from('user_preferences').select('loteria_id').eq('telegram_id', ctx.from.id).maybeSingle();
+      if (prefError) throw prefError;
+      if (!pref?.loteria_id) {
+        return ctx.editMessageText('📜 *Historial*\n\nPrimero selecciona una lotería y un sorteo.', { parse_mode: 'Markdown', ...mainKeyboard });
+      }
+      const { data: sorteos, error: sorteosError } = await supabase.from('sorteos').select('id').eq('loteria_id', pref.loteria_id);
+      if (sorteosError) throw sorteosError;
+      const sorteoIds = (sorteos || []).map(s => s.id);
+      if (!sorteoIds.length) {
+        return ctx.editMessageText('📜 *Historial*\n\nLa lotería seleccionada no tiene sorteos configurados.', { parse_mode: 'Markdown', ...mainKeyboard });
+      }
+      const { data: bets, error } = await supabase.from('bets').select('fecha_apuesta,total_apuesta,moneda,sorteos(nombre)').eq('user_telegram_id', ctx.from.id).in('sorteo_id', sorteoIds).order('created_at', { ascending: false }).limit(20);
       if (error) throw error;
-      if (!bets?.length) return ctx.editMessageText('📜 *Historial*\n\nNo hay movimientos de apuestas registrados.', { parse_mode: 'Markdown', ...mainKeyboard });
+      if (!bets?.length) return ctx.editMessageText('📜 *Historial*\n\nNo hay movimientos de apuestas registrados para la lotería seleccionada.', { parse_mode: 'Markdown', ...mainKeyboard });
       const total = bets.reduce((s, b) => s + Number(b.total_apuesta || 0), 0);
       const lines = bets.slice(0, 12).map(b => `• ${b.fecha_apuesta} — ${b.sorteos?.nombre || 'Sorteo'} — $${fmtMoney(b.total_apuesta)} ${String(b.moneda || 'cup').toUpperCase()}`);
       await ctx.editMessageText(`📜 *Historial*\n\n${lines.join('\n')}\n\n💵 Total mostrado: $${fmtMoney(total)}`, { parse_mode: 'Markdown', ...mainKeyboard });
