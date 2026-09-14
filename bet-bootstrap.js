@@ -5,6 +5,7 @@ require('./decimal-amount-patch');
 
 const { registrarRevisionHumana } = require('./human-review');
 const { registrarPendientesPorSaldo } = require('./pending-balance');
+const { registrarModuloComercial } = require('./banca');
 const { registrarFlujoApuesta } = require('./bet-handler');
 
 const bot = global.__LOTO_BOT__;
@@ -103,6 +104,7 @@ if (!bot) {
 
   registrarRevisionHumana(bot)
     .then(() => registrarPendientesPorSaldo(bot))
+    .then(() => registrarModuloComercial(bot))
     .then(() => registrarFlujoApuesta(bot))
     .catch(err => {
       console.error('❌ Error registrando flujos de jugadas:', err && err.stack ? err.stack : err);
