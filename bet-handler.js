@@ -115,6 +115,35 @@ function mensajeResultado(resultado, contexto) {
   return texto;
 }
 
+function mensajeRespaldo(resultado, contexto, datos) {
+  const solicitado = Number(datos.totalSolicitado || datos.total || 0);
+  const cobrado = Number(datos.total || 0);
+  const ahorro = Math.max(0, solicitado - cobrado);
+  let texto = `🧾 *JUGADA REGISTRADA*\n\n`;
+  texto += `🎰 *${contexto.loteriaNombre} — ${contexto.sorteo.nombre}*\n`;
+  texto += `💵 Moneda: *${String(contexto.moneda).toUpperCase()}*\n`;
+  texto += `👤 Jugador: *${datos.nombreJugador || 'Sin nombre'}*\n`;
+  texto += `🆔 Apuesta: *#${datos.betId || 'N/D'}*\n`;
+  texto += `👤 Telegram ID: *${datos.telegramId || 'N/D'}*\n`;
+  texto += `📅 Fecha: *${datos.fecha}*\n\n`;
+  texto += `📝 *Entrada original:*\n\`${String(datos.inputRaw || '').replace(/`/g, "'")}\`\n\n`;
+  texto += resultado.detalleTexto || '';
+  texto += `\n💰 *TOTAL COBRADO: $${fmtMoney(cobrado)}*`;
+  if (ahorro > 0.001) texto += `\n⚙️ Ajuste: solicitado $${fmtMoney(solicitado)} → cobrado $${fmtMoney(cobrado)}\n💾 Ahorro: $${fmtMoney(ahorro)}`;
+  texto += `\n💳 Saldo restante: *$${fmtMoney(datos.saldoDespues)}*`;
+  return texto;
+}
+
+async function enviarRespaldoTelegram(bot, resultado, contexto, datos) {
+  const chatId = String(process.env.TELEGRAM_BACKUP_CHAT_ID || '').trim();
+  if (!chatId) return;
+  try {
+    await replyLong({ reply: (text, options) => bot.telegram.sendMessage(chatId, text, options) }, mensajeRespaldo(resultado, contexto, datos), { parse_mode: 'Markdown' });
+  } catch (error) {
+    console.error('❌ Error enviando la jugada al canal de respaldo de Telegram:', error && error.stack ? error.stack : error);
+  }
+}
+
 async function registrarFlujoApuesta(bot) {
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
   try { global.Tracer?.disableTrace?.(); } catch (_) {}
@@ -187,6 +216,7 @@ async function registrarFlujoApuesta(bot) {
       const fila = Array.isArray(rpcData) ? rpcData[0] : rpcData;
       const saldoDespues = Number(fila?.saldo_despues || 0);
       const contextoTexto = { loteriaNombre: loteria?.nombre || 'Lotería', sorteo: contexto.sorteo, moneda: contexto.pref.moneda || 'cup' };
+      const nombreJugador = String(ctx.from?.first_name || '').trim() || String(ctx.from?.username || '').trim() || `Telegram ${ctx.from.id}`;
 
       // WhatsApp es una notificación secundaria: si falla, la apuesta ya confirmada
       // no se revierte ni se vuelve a cobrar.
@@ -206,7 +236,18 @@ async function registrarFlujoApuesta(bot) {
         console.error('❌ Error enviando la jugada al WhatsApp del comercial:', whatsappError && whatsappError.stack ? whatsappError.stack : whatsappError);
       }
 
-      await replyLong(ctx, `${mensajeResultado(resultado, contextoTexto)}\n\n✅ *Jugada guardada correctamente.*\n💰 Saldo restante: *$${fmtMoney(saldoDespues)}*`, { parse_mode: 'Markdown' });
+      await enviarRespaldoTelegram(bot, resultado, contextoTexto, {
+        betId: fila?.bet_id,
+        telegramId: ctx.from.id,
+        nombreJugador,
+        fecha,
+        inputRaw: texto,
+        totalSolicitado: Number(resultado.totalOriginal ?? resultado.totalGeneral ?? total),
+        total,
+        saldoDespues
+      });
+
+      await replyLong(ctx, `${mensajeResultado(resultado, contextoTexto)}\n\n⚙️ *Importe cobrado: $${fmtMoney(total)}*\n\n✅ *Jugada guardada correctamente.*\n💳 *Saldo restante: $${fmtMoney(saldoDespues)}*`, { parse_mode: 'Markdown' });
     } catch (err) {
       console.error('❌ Error procesando jugada:', err && err.stack ? err.stack : err);
       try { await ctx.reply('❌ Ocurrió un error al procesar la jugada. No se guardó ningún cargo. Intenta nuevamente.'); } catch (replyError) { console.error('❌ No se pudo enviar el mensaje de error a Telegram:', replyError && replyError.stack ? replyError.stack : replyError); }
