@@ -5,11 +5,12 @@
 // Aquí protegemos los montos decimales antes de entrar al motor usando una
 // escala entera y devolvemos el resultado a su valor monetario original.
 //
-// Ejemplo:
-//   plo t2 con 61.50
-// se ejecuta internamente como:
-//   plo t2 con 6150
-// y todos los montos resultantes se dividen entre 100.
+// También normalizamos montos monetarios con .00/,00 a enteros:
+//   25,00  -> 25
+//   1101.00 -> 1101
+// mientras conservamos los decimales reales:
+//   25,05 -> 25,05
+//   61.50 -> 61.50
 
 (function instalarCompatibilidadDecimal(global) {
   const Engine = global && global.Engine;
@@ -31,9 +32,17 @@
     // siguiente token es realmente un monto decimal. Así "t2a 0.55" pasa a
     // "t2 a 0.55" y entra en la misma ruta de protección decimal que
     // "t2 a 0.55" o "02 12 a 0.55".
-    const texto = String(rawInput || '').replace(
+    let texto = String(rawInput || '').replace(
       /(\d)a\s+(?=\$?\d+[.,]\d+)/gi,
       '$1 a '
+    );
+
+    // Un monto terminado en .00/,00 es monetariamente entero. Se normaliza
+    // solo después de un con/a/de (o modificador equivalente), nunca sobre
+    // los números de la jugada.
+    texto = texto.replace(
+      /\b(?:con|a|de|parle|candado|p|c)\s+(\$?\d+)[.,]00\b/gi,
+      (_, numero) => `${_.slice(0, 0)}${numero}`
     );
 
     const montos = [];
@@ -74,14 +83,12 @@
 
     const salida = { ...resultado };
 
-    // Totales monetarios del resultado raíz.
     for (const key of ['totalGeneral', 'totalSolicitado', 'total', 'monto']) {
       if (Object.prototype.hasOwnProperty.call(salida, key)) {
         salida[key] = escalarValor(salida[key], scale);
       }
     }
 
-    // Detalle estructurado usado por bet-handler.js y por los límites.
     const escalarObjeto = (obj) => {
       if (!obj || typeof obj !== 'object') return obj;
       if (Array.isArray(obj)) return obj.map(escalarObjeto);
@@ -103,9 +110,6 @@
       }
     }
 
-    // detalleTexto contiene importes formateados por el motor. Los números de
-    // jugada son de 2 cifras y no llevan decimales, así que solo convertimos
-    // valores con parte decimal, que son los importes generados.
     if (typeof salida.detalleTexto === 'string') {
       salida.detalleTexto = salida.detalleTexto.replace(/\d+(?:\.\d{2,})/g, token => {
         const valor = Number(token);
