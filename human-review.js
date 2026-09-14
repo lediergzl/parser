@@ -56,7 +56,7 @@ function parsearCorreccion(texto, ambiguos, original) {
     }
   }
   const asignaciones = raw.split(/[;\n]+/).map(x => x.trim()).filter(Boolean);
-  const tieneAsignacion = asignaciones.some(x => /^\d{4}\s*=/.test(x));
+  const tieneAsignacion = asignaciones.some(x => /^\d{4}\s*=/ .test(x));
   if (tieneAsignacion) {
     for (const parte of asignaciones) {
       const m = parte.match(/^(\d{4})\s*=\s*(.+)$/);
@@ -103,7 +103,9 @@ async function registrarRevisionHumana(bot) {
     const { data: existente, error: existenteError } = await supabase.from('pending_bets').select('id,status,original_input').eq('user_telegram_id', ctx.from.id).eq('status', 'pending').maybeSingle();
     if (existenteError) throw existenteError;
     if (existente) {
-      await ctx.reply(`⚠️ Ya tienes una jugada pendiente de revisión humana (#${existente.id}). No se ha realizado ningún cobro.`);
+      await ctx.reply(`⚠️ Ya tienes una jugada pendiente de revisión humana (#${existente.id}). No se ha realizado ningún cobro.`, {
+        reply_markup: { inline_keyboard: [[{ text: `👁️ Ver jugada #${existente.id}`, callback_data: `review_view_user_${existente.id}` }]] }
+      });
       return;
     }
     const { data: pref, error: prefError } = await supabase.from('user_preferences').select('loteria_id,sorteo_id,moneda').eq('telegram_id', ctx.from.id).maybeSingle();
@@ -117,7 +119,10 @@ async function registrarRevisionHumana(bot) {
       moneda: pref.moneda || 'cup', original_input: texto, ambiguous_numbers: ambiguos, status: 'pending'
     }]).select('*').single();
     if (error) throw error;
-    await ctx.reply(`⚠️ *Jugada requiere atención humana*\n\nSe detectó un número ambiguo de 4 cifras: *${ambiguos.join(', ')}*.\n\nEl bot no puede determinar de forma segura su interpretación.\n\n❌ *No se calculó ni se descontó saldo.*\n\nLa jugada quedó registrada como solicitud *#${pending.id}*. No necesitas pegarla nuevamente; atención humana podrá corregirla y procesarla.`, { parse_mode: 'Markdown' });
+    await ctx.reply(`⚠️ *Jugada requiere atención humana*\n\nSe detectó un número ambiguo de 4 cifras: *${ambiguos.join(', ')}*.\n\nEl bot no puede determinar de forma segura su interpretación.\n\n❌ *No se calculó ni se descontó saldo.*\n\nLa jugada quedó registrada como solicitud *#${pending.id}*.`, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: `👁️ Ver jugada #${pending.id}`, callback_data: `review_view_user_${pending.id}` }]] }
+    });
     await avisarAdmins(pending);
   }
 
@@ -172,6 +177,46 @@ async function registrarRevisionHumana(bot) {
     if (!ambiguos.length) return next();
     try { await crearPendiente(ctx, texto, ambiguos); }
     catch (err) { console.error('❌ Error creando revisión humana:', err && err.stack ? err.stack : err); await ctx.reply('❌ No se pudo registrar la jugada para revisión humana. No se descontó ningún saldo.'); }
+  });
+
+  // El usuario puede consultar su propia solicitud pendiente desde el botón
+  // incluido en el aviso. Nunca se permite consultar la de otro usuario.
+  bot.action(/^review_view_user_(\d+)$/, async ctx => {
+    try { await ctx.answerCbQuery(); } catch (_) {}
+    const pendingId = Number(ctx.match[1]);
+    const { data: pending, error } = await supabase.from('pending_bets').select('id,user_telegram_id,loteria_id,sorteo_id,moneda,original_input,ambiguous_numbers,status,created_at').eq('id', pendingId).maybeSingle();
+    if (error) return ctx.reply('❌ No se pudo cargar la jugada pendiente.');
+    if (!pending) return ctx.reply('❌ La jugada pendiente no existe.');
+    if (Number(pending.user_telegram_id) !== Number(ctx.from.id)) return ctx.reply('❌ No autorizado.');
+
+    const { data: loteria } = await supabase.from('loterias').select('nombre').eq('id', pending.loteria_id).maybeSingle();
+    const { data: sorteo } = await supabase.from('sorteos').select('nombre').eq('id', pending.sorteo_id).maybeSingle();
+    const estadoTexto = pending.status === 'pending' ? '⏳ Pendiente de revisión humana' : `Estado: ${pending.status}`;
+    const ambiguos = Array.isArray(pending.ambiguous_numbers) ? pending.ambiguous_numbers.join(', ') : String(pending.ambiguous_numbers || '');
+
+    await ctx.editMessageText(
+      `🔎 *Jugada pendiente #${pending.id}*\n\n` +
+      `🎰 ${loteria?.nombre || 'Lotería'} — ${sorteo?.nombre || 'Sorteo'}\n` +
+      `💵 Moneda: ${String(pending.moneda || 'cup').toUpperCase()}\n` +
+      `📝 *Jugada original:*\n\`${String(pending.original_input || '').replace(/`/g, "'")}\`\n` +
+      `🔢 Número(s) a revisar: ${ambiguos || 'N/D'}\n\n` +
+      `${estadoTexto}\n\n` +
+      `❌ *No se ha calculado ni cobrado.*`,
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '⬅️ Volver', callback_data: `review_view_user_back_${pending.id}` }]] } }
+    );
+  });
+
+  bot.action(/^review_view_user_back_(\d+)$/, async ctx => {
+    try { await ctx.answerCbQuery(); } catch (_) {}
+    const pendingId = Number(ctx.match[1]);
+    const { data: pending, error } = await supabase.from('pending_bets').select('id,user_telegram_id,status').eq('id', pendingId).maybeSingle();
+    if (error) return ctx.reply('❌ No se pudo cargar la solicitud.');
+    if (!pending || Number(pending.user_telegram_id) !== Number(ctx.from.id)) return ctx.reply('❌ No autorizado.');
+    if (pending.status !== 'pending') return ctx.editMessageText(`ℹ️ La solicitud #${pendingId} ya no está pendiente.`);
+    await ctx.editMessageText(`⚠️ *Jugada requiere atención humana*\n\nLa jugada quedó registrada como solicitud *#${pendingId}*.\n\n❌ *No se ha realizado ningún cobro.*`, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: `👁️ Ver jugada #${pendingId}`, callback_data: `review_view_user_${pendingId}` }]] }
+    });
   });
 
   bot.action(/^review_edit_(\d+)$/, async ctx => {
