@@ -24,14 +24,44 @@ function reemplazarAmbiguos(original, ambiguos, correccion) {
   return resultado;
 }
 
+function extraerCorreccionDeJugadaParcial(original, ambiguo, raw) {
+  const textoOriginal = String(original || '').trim();
+  const texto = String(raw || '').trim();
+  const indice = textoOriginal.indexOf(ambiguo);
+  if (indice < 0) return null;
+
+  const prefijo = textoOriginal.slice(0, indice).trim();
+  const sufijo = textoOriginal.slice(indice + ambiguo.length).trim();
+
+  // Si el administrador pegó la jugada completa, conservarla tal cual.
+  if (prefijo && texto.startsWith(prefijo) && (!sufijo || texto.endsWith(sufijo))) {
+    return { __fullInput: texto };
+  }
+
+  // Si pegó solo la sustitución más el resto de la jugada, por ejemplo:
+  // "25 85 con 50" para "... 2585 con 50", extraer únicamente "25 85".
+  if (sufijo && texto.endsWith(sufijo)) {
+    const posibleReemplazo = texto.slice(0, -sufijo.length).trim();
+    if (posibleReemplazo) return { [ambiguo]: posibleReemplazo };
+  }
+
+  // Corrección simple: "25 85".
+  if (!prefijo && texto) return { [ambiguo]: texto };
+  return null;
+}
+
 function parsearCorreccion(texto, ambiguos, original) {
   const raw = String(texto || '').trim();
   const mapa = {};
 
-  // Si el administrador pega la jugada completa ya corregida, usarla directamente.
-  // Se acepta si ya no contiene ninguno de los bloques ambiguos originales.
-  if (original && raw !== original && !/^\d{4}\s*=/.test(raw) && detectarAmbiguos(raw).length === 0) {
-    return { __fullInput: raw };
+  // Para un único ambiguo, aceptar tanto "25 85" como
+  // "25 85 con 50" y una jugada completa ya corregida.
+  if (ambiguos.length === 1 && !/^\d{4}\s*=/.test(raw)) {
+    const especial = extraerCorreccionDeJugadaParcial(original, ambiguos[0], raw);
+    if (especial) {
+      if (especial.__fullInput) return especial;
+      if (!detectarAmbiguos(especial[ambiguos[0]]).length) return especial;
+    }
   }
 
   const asignaciones = raw.split(/[;\n]+/).map(x => x.trim()).filter(Boolean);
@@ -142,6 +172,21 @@ async function registrarRevisionHumana(bot) {
           chat: { id: pending.chat_id, type: 'private' },
           from: { id: pending.user_telegram_id, is_bot: false, first_name: 'Usuario' }, text: correctedInput
         }});
+
+        // No marcar como procesada si el flujo interno no llegó a registrar la apuesta.
+        const { data: bet, error: betError } = await supabase.from('bets')
+          .select('id,total_apuesta,saldo_antes,saldo_despues')
+          .eq('user_telegram_id', pending.user_telegram_id)
+          .eq('input_raw', correctedInput)
+          .order('id', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (betError) throw betError;
+        if (!bet) {
+          await supabase.from('pending_bets').update({ status: 'error', error_message: 'El flujo de apuesta no registró una apuesta después de la revisión.', updated_at: new Date() }).eq('id', pending.id).eq('status', 'approved');
+          await ctx.reply(`⚠️ La solicitud #${pending.id} no fue marcada como procesada porque no se encontró una apuesta registrada. No se debe repetir el cobro hasta revisar el motivo.`);
+          return;
+        }
 
         await supabase.from('pending_bets').update({ status: 'processed', updated_at: new Date() }).eq('id', pending.id).eq('status', 'approved');
       } catch (err) {
