@@ -42,7 +42,11 @@ function detectarNumerosAmbiguos(texto) {
   const encontrados = [];
   const regex = /(^|[^\d])([0-9]{4})(?=$|[^\d])/g;
   let match;
-  while ((match = regex.exec(String(texto || ''))) !== null) encontrados.push(match[2]);
+  while ((match = regex.exec(String(texto || ''))) !== null) {
+    const antes = String(texto || '').slice(0, match.index + match[1].length);
+    if (/\b(?:con|a)\s*$/i.test(antes)) continue;
+    encontrados.push(match[2]);
+  }
   return [...new Set(encontrados)];
 }
 
@@ -156,19 +160,12 @@ async function registrarFlujoApuesta(bot) {
       if (rpcError) {
         const code = String(rpcError.message || '');
         if (code.includes('INSUFFICIENT_BALANCE')) {
-          // Conservamos la jugada para que el usuario no tenga que escribirla otra vez.
           const { data: existente } = await supabase.from('pending_bets').select('id,status').eq('user_telegram_id', ctx.from.id).eq('status', 'awaiting_balance').eq('original_input', texto).maybeSingle();
           let pendingId = existente?.id;
           if (!pendingId) {
             const { data: pending, error: pendingError } = await supabase.from('pending_bets').insert([{
-              user_telegram_id: ctx.from.id,
-              chat_id: ctx.chat.id,
-              loteria_id: contexto.pref.loteria_id,
-              sorteo_id: contexto.pref.sorteo_id,
-              moneda: contexto.pref.moneda || 'cup',
-              original_input: texto,
-              ambiguous_numbers: [],
-              status: 'awaiting_balance',
+              user_telegram_id: ctx.from.id, chat_id: ctx.chat.id, loteria_id: contexto.pref.loteria_id, sorteo_id: contexto.pref.sorteo_id,
+              moneda: contexto.pref.moneda || 'cup', original_input: texto, ambiguous_numbers: [], status: 'awaiting_balance',
               error_message: `Saldo insuficiente. Total requerido: ${total}`
             }]).select('id').single();
             if (pendingError) throw pendingError;
