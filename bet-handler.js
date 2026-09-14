@@ -8,6 +8,36 @@ function fmtMoney(value) {
   return Number(value || 0).toFixed(2);
 }
 
+// Telegram limita los mensajes de texto a 4096 caracteres. Dejamos margen
+// para Markdown y para evitar que un recibo grande provoque un 400.
+async function replyLong(ctx, text, options = {}) {
+  const MAX = 3900;
+  const contenido = String(text || '');
+  if (contenido.length <= MAX) {
+    await ctx.reply(contenido, options);
+    return;
+  }
+
+  const partes = [];
+  let restante = contenido;
+  while (restante.length > MAX) {
+    let corte = restante.lastIndexOf('\n', MAX);
+    if (corte < 1000) corte = restante.lastIndexOf(' ', MAX);
+    if (corte < 1) corte = MAX;
+    partes.push(restante.slice(0, corte));
+    restante = restante.slice(corte).replace(/^\s+/, '');
+  }
+  if (restante) partes.push(restante);
+
+  for (let i = 0; i < partes.length; i++) {
+    const opts = { ...options };
+    if (i === 0 && partes.length > 1) {
+      opts.parse_mode = options.parse_mode;
+    }
+    await ctx.reply(partes[i], opts);
+  }
+}
+
 function fechaCuba() {
   const partes = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Havana',
@@ -193,7 +223,8 @@ async function registrarFlujoApuesta(bot) {
           const linea = e.line ? `Línea ${e.line}: ` : '';
           return `• ${linea}${e.message || e.reason || 'Error de procesamiento'}`;
         }).join('\n');
-        await ctx.reply(
+        await replyLong(
+          ctx,
           `❌ *No se puede guardar la jugada.*\n\n${resultado?.message || 'El motor detectó un error.'}${errores ? `\n\n${errores}` : ''}`,
           { parse_mode: 'Markdown' }
         );
@@ -249,13 +280,18 @@ async function registrarFlujoApuesta(bot) {
         moneda: contexto.pref.moneda || 'cup'
       };
 
-      await ctx.reply(
+      await replyLong(
+        ctx,
         `${mensajeResultado(resultado, contextoTexto)}\n\n✅ *Jugada guardada correctamente.*\n💰 Saldo restante: *$${fmtMoney(saldoDespues)}*`,
         { parse_mode: 'Markdown' }
       );
     } catch (err) {
       console.error('❌ Error procesando jugada:', err && err.stack ? err.stack : err);
-      await ctx.reply('❌ Ocurrió un error al procesar la jugada. No se guardó ningún cargo. Intenta nuevamente.');
+      try {
+        await ctx.reply('❌ Ocurrió un error al procesar la jugada. No se guardó ningún cargo. Intenta nuevamente.');
+      } catch (replyError) {
+        console.error('❌ No se pudo enviar el mensaje de error a Telegram:', replyError && replyError.stack ? replyError.stack : replyError);
+      }
     }
   });
 
