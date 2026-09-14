@@ -28,6 +28,26 @@ if (!bot) {
       ctx.state.totalDeclarado = Number(String(totalDeclaradoMatch[1]).replace(',', '.'));
     }
 
+    // FIX: cuando el nombre del jugador viene en la misma línea que
+    // "pareja candado 10000", el preprocesador del core puede interpretar
+    // el nombre como parte de la jugada y dejar una línea inválida.
+    // Separamos únicamente este patrón, conservando el nombre intacto.
+    // Ejemplo:
+    //   "polo pareja candado 10000"
+    // se convierte en:
+    //   "polo\npareja candado 10000"
+    // y el core aplica su normalización existente de pareja+candado.
+    texto = texto.replace(
+      /^([^\d\r\n]+?)\s+(?:pareja|parejas|pares)\s+(?:de\s+)?candado\s+(\d+(?:[.,]\d+)?)[ \t]*$/gim,
+      (_, nombre, monto) => `${nombre.trim()}\npareja candado ${monto}`
+    );
+
+    // También soportar el orden inverso: "polo candado pareja 10000".
+    texto = texto.replace(
+      /^([^\d\r\n]+?)\s+candado\s+(?:pareja|parejas|pares)\s+(\d+(?:[.,]\d+)?)[ \t]*$/gim,
+      (_, nombre, monto) => `${nombre.trim()}\ncandado pareja ${monto}`
+    );
+
     texto = texto.replace(
       /(\b(?:con|a|de|parle|candado|p|c)\s+)\$?(\d+)[.,]00\b/gi,
       (_, prefijo, numero) => `${prefijo}${numero}`
