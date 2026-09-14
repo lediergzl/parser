@@ -27,7 +27,15 @@
   }
 
   function prepararEntrada(rawInput) {
-    const texto = String(rawInput || '');
+    // Normaliza conectores "a" pegados al número de la jugada cuando el
+    // siguiente token es realmente un monto decimal. Así "t2a 0.55" pasa a
+    // "t2 a 0.55" y entra en la misma ruta de protección decimal que
+    // "t2 a 0.55" o "02 12 a 0.55".
+    const texto = String(rawInput || '').replace(
+      /(\d)a\s+(?=\$?\d+[.,]\d+)/gi,
+      '$1 a '
+    );
+
     const montos = [];
     const regex = /\b(?:con|a|de|parle|candado|p|c)\s+\$?\s*(\d+[.,]\d+)\b/gi;
     let match;
