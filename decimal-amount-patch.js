@@ -6,7 +6,7 @@
 // escala entera y devolvemos el resultado a su valor monetario original.
 //
 // También normalizamos montos monetarios con .00/,00 a enteros:
-//   25,00  -> 25
+//   25,00   -> 25
 //   1101.00 -> 1101
 // mientras conservamos los decimales reales:
 //   25,05 -> 25,05
@@ -30,8 +30,7 @@
   function prepararEntrada(rawInput) {
     // Normaliza conectores "a" pegados al número de la jugada cuando el
     // siguiente token es realmente un monto decimal. Así "t2a 0.55" pasa a
-    // "t2 a 0.55" y entra en la misma ruta de protección decimal que
-    // "t2 a 0.55" o "02 12 a 0.55".
+    // "t2 a 0.55" y entra en la misma ruta de protección decimal.
     let texto = String(rawInput || '').replace(
       /(\d)a\s+(?=\$?\d+[.,]\d+)/gi,
       '$1 a '
@@ -41,8 +40,8 @@
     // solo después de un con/a/de (o modificador equivalente), nunca sobre
     // los números de la jugada.
     texto = texto.replace(
-      /\b(?:con|a|de|parle|candado|p|c)\s+(\$?\d+)[.,]00\b/gi,
-      (_, numero) => `${_.slice(0, 0)}${numero}`
+      /(\b(?:con|a|de|parle|candado|p|c)\s+)\$?(\d+)[.,]00\b/gi,
+      (_, prefijo, numero) => `${prefijo}${numero}`
     );
 
     const montos = [];
