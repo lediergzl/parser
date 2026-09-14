@@ -112,6 +112,10 @@ const STAGE_COLORS = {
   // Errores → rojo
   ERROR: '#C62828',
   NUMERIC_LINE_DISCARDED_FATAL: '#C62828',  // siempre rojo — violación de NO_BET_LOSS
+
+  // PATCH: aliases semánticos y validación contextual de tokens
+  ALIAS:    '#00838F',  // teal — conversión dec→d / ter→t
+  SEMANTIC: '#F57F17',  // ámbar — validación contextual del token "y"
 };
 
 // ─────────────────────────────────────────────────────────────────
@@ -641,7 +645,7 @@ function validarEstructuraTokens(tokens, lineaNum) {
   const errors = [];
   const typoToken = tokens.find(t => t.type === 'TYPO_OP');
   if (typoToken) {
-    errors.push({ code: 'E_TYPO_OP', line: lineaNum, message: `"${typoToken.tok}" parece un operador mal escrito.` });
+    errors.push({ code: 'E_TYPO_OP', line: lineaNum, message: `"${typoToken.tok}" no es una palabra reconocida. ¿Quiso escribir "parle", "candado" o "con"?` });
     return errors;
   }
   const conIdx = tokens.findIndex(t => t.type === 'CON');
@@ -653,7 +657,7 @@ function validarEstructuraTokens(tokens, lineaNum) {
     const intraNums = preCon.slice(firstNum, lastNum + 1);
     const unkIntra = intraNums.find(t => t.type === 'UNK');
     if (unkIntra) {
-      errors.push({ code: 'E_UNK_INTRA_NUM', line: lineaNum, message: `"${unkIntra.tok}" aparece entre números y genera ambigüedad.` });
+      errors.push({ code: 'E_UNK_INTRA_NUM', line: lineaNum, message: `"${unkIntra.tok}" no se entiende entre los números. Revise esa parte de la línea.` });
       return errors;
     }
   }
@@ -710,7 +714,7 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
                              /(?:^|\s)(\d+(?:[.,]\d+)?)\s*$/.test(linea.trim()) &&
                              /\b(parejas?|candado)\b.*\b(parejas?|candado)\b/i.test(linea);
   if (!/\b(con|de|a)\b/i.test(linea) && !_isCandadoParejas) {
-    const err = { code: 'E_SIN_OPERADOR_MONTO', line: lineaNum, message: 'Línea inválida: falta operador de monto (con / de / a).' };
+    const err = { code: 'E_SIN_OPERADOR_MONTO', line: lineaNum, message: 'Falta el monto. Escriba "con" seguido del valor, por ejemplo: 23 45 con 100' };
     trace('ERROR', { source: 'validarLinea:sinOperador', ...err });
     errors.push(err);
     return errors;
@@ -728,7 +732,7 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
     const err = {
       code: 'E_MULTIPLE_CON',
       line: lineaNum,
-      message: `Múltiples bloques de apuesta en una línea. Use líneas separadas.`,
+      message: `Hay más de una apuesta en la misma línea. Sepárelas en líneas distintas.`,
     };
     trace('ERROR', { source: 'validarLinea', ...err });
     errors.push(err);
@@ -747,19 +751,19 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
   }
 
   if (/\bcon\s+\d+(?:[.,]\d+)?\s+con\b/i.test(linea) && !tieneCandado && !tieneParle) {
-    const err = { code: 'R010_CON_X_CON_Y', line: lineaNum, message: '"con X con Y" no válido. Use "con X y Y".' };
+    const err = { code: 'R010_CON_X_CON_Y', line: lineaNum, message: 'Para dos montos use "y" entre ellos, por ejemplo: 23 45 con 50 y 30' };
     trace('ERROR', { source: 'validarLinea', ...err });
     errors.push(err);
     return errors;
   }
   if (/\by\s+candado\b/i.test(linea)) {
-    const err = { code: 'R010_Y_ANTES_CANDADO', line: lineaNum, message: '"y candado" no válido.' };
+    const err = { code: 'R010_Y_ANTES_CANDADO', line: lineaNum, message: 'Escriba el candado antes del monto, por ejemplo: 23 45 67 candado con 100' };
     trace('ERROR', { source: 'validarLinea', ...err });
     errors.push(err);
     return errors;
   }
   if (/\by\s+parle\b/i.test(linea)) {
-    const err = { code: 'R010_Y_ANTES_PARLE', line: lineaNum, message: '"y parle" no válido.' };
+    const err = { code: 'R010_Y_ANTES_PARLE', line: lineaNum, message: 'Escriba el parle antes del monto, por ejemplo: 23 45 parle con 100' };
     trace('ERROR', { source: 'validarLinea', ...err });
     errors.push(err);
     return errors;
@@ -776,8 +780,26 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
     const montosRaw = afterCon.split(/\s+/);
     const montosNumericos = montosRaw.filter(t => /^\d+(?:[.,]\d+)?$/.test(t));
     const hasY = /\by\b/i.test(afterCon);
+
+    // ── PATCH: Validación semántica contextual del token "y" ─────────────────
+    // "y" es válido SOLO en dos contextos:
+    //   1. FIJO_CORRIDO: "N con A y B"  (separa fijo de corrido)
+    //   2. CENTENA_SPLIT: "NNN con A y B y C"  (montos por posición en centena)
+    // Fuera de esos contextos se ignora o rechaza. Aquí solo trazamos el contexto
+    // válido; el rechazo de "y" espurio lo maneja _eliminarPalabrasNoReservadas
+    // más arriba en el pipeline (line 3175: 'y' no antes de dígito → se descarta).
+    if (hasY && montosNumericos.length >= 2) {
+      const esContextoCentena = centenas.length > 0;
+      const contexto = esContextoCentena ? 'CENTENA_SPLIT' : 'FIJO_CORRIDO';
+      trace('SEMANTIC', { token: 'y', accion: 'accepted', context: contexto, afterCon, lineaNum });
+    } else if (hasY && montosNumericos.length < 2) {
+      // "y" presente pero no hay dos montos numéricos → "y" es basura ignorada
+      trace('SEMANTIC', { token: 'y', accion: 'rejected', reason: 'no hay par de montos numéricos', afterCon, lineaNum });
+    }
+    // ── FIN PATCH semántico y ────────────────────────────────────────────────
+
     if (montosNumericos.length > 1 && !hasY) {
-      const err = { code: 'R004_CORRIDO_SIN_Y', line: lineaNum, message: 'Para múltiples montos se requiere la palabra "y". Use "con X y Y" para corrido.' };
+      const err = { code: 'R004_CORRIDO_SIN_Y', line: lineaNum, message: 'Para poner fijo y corrido use "y" entre los montos, por ejemplo: 23 con 50 y 30' };
       trace('ERROR', { source: 'validarLinea', ...err });
       errors.push(err);
       return errors;
@@ -786,12 +808,12 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
 
   if (!centenas.length) {
     if (tieneCandado && numerosBase.length > 0 && numerosBase.length < 3) {
-      const err = { code: 'R006_CANDADO_MIN3', line: lineaNum, message: `Candado necesita al menos 3 números (hay ${numerosBase.length}).` };
+      const err = { code: 'R006_CANDADO_MIN3', line: lineaNum, message: `El candado necesita al menos 3 números. Usted escribió ${numerosBase.length}. Agregue más números.` };
       trace('ERROR', { source: 'validarLinea', ...err });
       errors.push(err);
     }
     if (tieneParle && numerosBase.length > 0 && numerosBase.length < 2) {
-      const err = { code: 'R005_PARLE_MIN2', line: lineaNum, message: `Parle necesita al menos 2 números (hay ${numerosBase.length}).` };
+      const err = { code: 'R005_PARLE_MIN2', line: lineaNum, message: `El parle necesita al menos 2 números. Usted escribió ${numerosBase.length}. Agregue otro número.` };
       trace('ERROR', { source: 'validarLinea', ...err });
       errors.push(err);
     }
@@ -799,12 +821,12 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
 
   if (centenas.length) {
     if (tieneParle && fijosDerivados.length < 2) {
-      const err = { code: 'R008_PARLE_CENTENA_MIN2', line: lineaNum, message: `Parle sobre centenas requiere al menos 2 fijos derivados (hay ${fijosDerivados.length}).` };
+      const err = { code: 'R008_PARLE_CENTENA_MIN2', line: lineaNum, message: `Para hacer parle por centena necesita al menos 2 números base. Solo hay ${fijosDerivados.length}.` };
       trace('ERROR', { source: 'validarLinea', ...err });
       errors.push(err);
     }
     if (tieneCandado && fijosDerivados.length < 3) {
-      const err = { code: 'R009_CANDADO_CENTENA_MIN3', line: lineaNum, message: `Candado sobre centenas requiere al menos 3 fijos derivados (hay ${fijosDerivados.length}).` };
+      const err = { code: 'R009_CANDADO_CENTENA_MIN3', line: lineaNum, message: `Para hacer candado por centena necesita al menos 3 números base. Solo hay ${fijosDerivados.length}.` };
       trace('ERROR', { source: 'validarLinea', ...err });
       errors.push(err);
     }
@@ -816,7 +838,7 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
     const digitosCub = new Set(pares.flatMap(p => [pad2(p[0]), pad2(p[1])]));
     const sueltos = todosTokens.filter(t => String(t).length === 2 && !digitosCub.has(pad2(t)));
     if (sueltos.length) {
-      const err = { code: 'R010_MEZCLA_SUELTOS_PARES', line: lineaNum, message: `Mezcla inválida: números sueltos y pares parle.` };
+      const err = { code: 'R010_MEZCLA_SUELTOS_PARES', line: lineaNum, message: `No se pueden mezclar números sueltos con pares de parle en la misma línea. Sepárelos.` };
       trace('ERROR', { source: 'validarLinea', ...err });
       errors.push(err);
     }
@@ -1661,9 +1683,61 @@ function normalizeSpaces(s) {
  * @param {string} rawLine - Línea tal como llega del usuario (sin split por \n)
  * @returns {string}       - Línea con whitespace normalizado
  */
+// ── PRETOKENIZER DSL: separa keywords pegadas a dígitos ─────────────────────
+// Transforma: "05parle10" → "05 parle 10", "06candado10" → "06 candado 10"
+// NO destructivo: solo inserta espacios, nunca altera ni consume dígitos.
+// Corre antes que cualquier parseo semántico (incluido normalizarLineaLexica).
+function pretokenizarDSL(s) {
+  if (typeof s !== 'string' || !s) return s;
+
+  // Keywords DSL ordenadas de mayor a menor longitud para evitar match parcial
+  // (ej: "parlet" antes de "parle", "corrido" antes de "con")
+  const KW = [
+    'parlet','parlé','parle','palé','pale',
+    'candado','candao',
+    'corrido',
+    'centena',
+    'volteo',
+    'fijo',
+    'direct','directo',
+    'box',
+    'con','p','c'
+  ];
+
+  // Construir regex: ( dígito pegado a keyword ) | ( keyword pegada a dígito )
+  // Usar lookahead/lookbehind para NO consumir los dígitos adyacentes.
+  // Las keywords de 1 letra (p, c) requieren word-boundary extra para no
+  // romper tokens como "10x20" o decimales "5.50".
+  let result = s;
+  for (const kw of KW) {
+    const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Dígito inmediatamente seguido de keyword → insertar espacio entre ellos
+    // Ej: "05parle" → "05 parle", "10con" → "10 con"
+    // Para keywords de 1 letra: evitar romper "10x20" (x no es keyword aquí)
+    if (kw.length === 1) {
+      // Solo separar si la keyword está entre dígitos o al inicio pegada a dígito
+      // y NO es parte de una notación NxN / N*N
+      result = result.replace(
+        new RegExp('(\\d)(' + escaped + ')(?=\\d)', 'gi'),
+        function(_, d, k) { return d + ' ' + k + ' '; }
+      );
+    } else {
+      result = result.replace(
+        new RegExp('(\\d)(' + escaped + ')', 'gi'),
+        '$1 $2'
+      );
+      result = result.replace(
+        new RegExp('(' + escaped + ')(\\d)', 'gi'),
+        '$1 $2'
+      );
+    }
+  }
+  return result;
+}
+
 function normalizarLineaLexica(rawLine) {
   if (typeof rawLine !== 'string') return '';
-  return normalizeSpaces(rawLine);
+  return normalizeSpaces(pretokenizarDSL(rawLine));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2179,7 +2253,9 @@ const DSL_KEYWORDS = new Set([
   'pareja', 'parejas', 'p', 'c', 'd', 't', 'v', 'decena', 'terminal',
   'fijo', 'corrido', 'volteo', 'bote', 'tarjeta', 'rango',
   'ponme', 'nota', 'obs', 'observacion', 'ref', 'referencia',
-  'flo', 'parlet', 'candao'
+  'flo', 'parlet', 'candao',
+  // PATCH: aliases cortos dec/ter son DSL — no pueden ser nombres de bloque
+  'dec', 'ter',
 ]);
 
 /**
@@ -3131,7 +3207,8 @@ function _eliminarPalabrasNoReservadas(l) {
     // con error explícito. Solo sanitizar si todos los tokens de texto son ruido DSL
     // conocido (fijo, corrido, volteo, etc.) que el engine ya maneja.
     const wordTokens = l.match(/\b[a-záéíóúüñ]{1,}\b/gi) || [];
-    const DSL_LEFT_NOISE = new Set(['fijo','corrido','volteo','v','pr','total','rango','bote','pareja','parejas','terminal','decena','cent']);
+    // PATCH: 'dec' y 'ter' incluidos como ruido DSL del lado izquierdo
+    const DSL_LEFT_NOISE = new Set(['fijo','corrido','volteo','v','pr','total','rango','bote','pareja','parejas','terminal','decena','cent','dec','ter']);
     const allNoise = wordTokens.every(t => DSL_LEFT_NOISE.has(t.toLowerCase()));
     if (wordTokens.length > 0 && !allNoise) {
       // Hay palabras no-DSL sin operador de monto → no tocar, dejar que validarLinea rechace.
@@ -3147,7 +3224,9 @@ const ruidoSet = new Set([
   'fijo', 'corrido', 'parle', 'parlet', 'candado', 'candao',
   'total', 'centena', 'y', 'al', 'de', 'a', 'con', 'p', 'c', 't', 'd', 'v',
   'flo', 'tarjeta', 'rango', 'bote', 'pareja', 'parejas', 'terminal', 'decena', 'cent',
-  'volteo', 'ponme', 'nota', 'obs', 'observacion', 'ref', 'referencia'
+  'volteo', 'ponme', 'nota', 'obs', 'observacion', 'ref', 'referencia',
+  // PATCH: aliases cortos dec/ter — si aparecen solos sin dígito, son ruido semántico
+  'dec', 'ter',
 ]);
 
 function esLineaRuido(linea) {
@@ -3250,12 +3329,19 @@ function _normalizarBancaGuion(linea) {
   if (typeof linea !== 'string') return linea;
   if (/\b(con|parle|candado)\b/i.test(linea)) return linea;
 
-  // Líneas con operadores de par: normalizar N/M→NxM y extraer monto final
-  if (/[xX*\/]/.test(linea)) {
-    const norm = linea.replace(/(\d{1,2})\/(\d{1,2})/g, '$1x$2');
-    const mMonto = norm.match(/^(.+?)\s+-\s*(\d+)\s*$/) || norm.match(/^(.+)-(\d+)\s*$/);
+  // FIX: '/' es SIEMPRE separador de números (85/58/51 → 85 58 51), nunca operador parle.
+  // Solo x, * y × entre EXACTAMENTE dos números son operadores parle.
+  // Convertir slash a espacio ANTES de evaluar operadores de par.
+  linea = linea.replace(/(\d{1,2})\/(\d{1,2})/g, '$1 $2');
+  // Después de normalizar slashes, re-aplicar para cadenas largas (85/58/51/15/88)
+  while (/(\d{1,2})\/(\d{1,2})/.test(linea))
+    linea = linea.replace(/(\d{1,2})\/(\d{1,2})/g, '$1 $2');
+
+  // Líneas con operadores de par (x, *, ×): extraer monto final si hay guion
+  if (/[xX*]/.test(linea)) {
+    const mMonto = linea.match(/^(.+?)\s+-\s*(\d+)\s*$/) || linea.match(/^(.+)-(\d+)\s*$/);
     if (mMonto && /^\d+$/.test(mMonto[2])) return mMonto[1].trimEnd() + ' con ' + mMonto[2];
-    return norm;
+    return linea;
   }
 
   // Notación banca: N-M o N1-N2-...-MONTO
@@ -3297,6 +3383,46 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
     .replace(/\bcandao\b/gi, 'candado');
   // RULE: BANCA_GUION_NOTATION — convertir "33-300" → "33 con 300" antes de todo
   l = _normalizarBancaGuion(l);
+
+  // ── NORMALIZACIÓN DE SEPARADORES NO-DSL ────────────────────────────────────
+  // Regla: el único operador entre números con significado semántico es NNxNN
+  // (exactamente dos operandos de 1-2 dígitos = par parle).
+  // Todo otro separador entre números (/, -, ,, ., x con 3+ operandos, etc.)
+  // se limpia a espacio — los números se extraen limpios.
+  // Se aplica a toda la línea (no solo al lado izquierdo del con) porque
+  // el RightSideSanitizer maneja el lado derecho independientemente.
+  // EXCEPCIÓN: montos decimales como "10.50" o "10,50" deben preservarse.
+  // La heurística: punto/coma entre números se preserva SOLO en el lado derecho
+  // del 'con', que el RightSideSanitizer ya valida. En el lado izquierdo,
+  // punto/coma entre números siempre es separador → limpiar a espacio.
+  l = (function _limpiarSeparadoresNoDSL(linea) {
+    // 1. Proteger pares NNxNN válidos (exactamente 1-2 dígitos en cada lado)
+    const pares = [];
+    let protegida = linea.replace(/(\d{1,2})[xX](\d{1,2})/g, (m, a, b) => {
+      const idx = pares.length;
+      pares.push(m);
+      return `__PAR${idx}__`;
+    });
+
+    // 2. Separar en lado izquierdo y derecho del 'con'
+    const conIdx = protegida.search(/con/i);
+    const izq = conIdx === -1 ? protegida : protegida.slice(0, conIdx);
+    const der = conIdx === -1 ? '' : protegida.slice(conIdx);
+
+    // 3. En el lado izquierdo: limpiar todo separador entre números a espacio
+    //    (/  -  ,  .  *  x con 3+ operandos ya desprotegidos)
+    const izqLimpia = izq
+      // x con 3+ operandos (20x30x40 → 20 30 40): desprotegidos, ya no son __PARn__
+      .replace(/(\d{1,2})[xX](\d{1,2}(?:[xX]\d{1,2})+)/g, (m) => m.replace(/[xX]/g, ' '))
+      .replace(/(\d)[\/\-,.](\d)/g, '$1 $2')   // separadores directos: 40/50 → 40 50
+      .replace(/(\d)\s*[\/\-,.]\s*(\d)/g, '$1 $2'); // con espacios alrededor
+
+    // 4. Restaurar pares protegidos
+    const resultado = (izqLimpia + der).replace(/__PAR(\d+)__/g, (_, i) => pares[+i]);
+
+    return resultado.replace(/\s+/g, ' ').trim();
+  })(l);
+
   trace('PRE_RAW', { id, rawLine });
 
   const trimmed = l.trim();
@@ -3380,8 +3506,11 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
     const esCandadoParle = /^\s*(candado|parle)\b/i.test(trimmed);
     // "parejas candado N" / "candado parejas N" — tienen su propia normalización más adelante
     const esParejasCandado = /\b(parejas?|pares)\b/i.test(trimmed) && /\bcandado\b/i.test(trimmed);
+    // PATCH: "dec N" y "ter N" son alias semánticos válidos — no entrar en numeric-recovery,
+    // sino continuar al procesamiento completo donde se expanden a d/t correctamente.
+    const esAliasDecTer = /^\s*(?:dec|ter)\s+\d+\s*$/i.test(trimmed);
 
-    if (sinCon && tieneTexto && soloUnNumero && !esTotal && !esParejasSinCon && !esCandadoParle && !esParejasCandado) {
+    if (sinCon && tieneTexto && soloUnNumero && !esTotal && !esParejasSinCon && !esCandadoParle && !esParejasCandado && !esAliasDecTer) {
       // Extraer el número presente en la línea
       const mNum = trimmed.match(/(\d+(?:[.,]\d+)?)/);
       const numStr = mNum ? mNum[1] : null;
@@ -3496,6 +3625,22 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
   // "parle a N" / "candado a N" — 'a' como conector de monto tras keyword
   l = l.replace(/\bparle[ \t]+a[ \t]+(\d)/ig, 'parle con $1');
   l = l.replace(/\bcandado[ \t]+a[ \t]+(\d)/ig, 'candado con $1');
+  // ── PATCH: alias semánticos "dec" → "d" y "ter" → "t" ───────────────────────
+  // "dec" y "ter" son formas cortas de "decena" y "terminal" no cubiertas por las
+  // regex anteriores (que requieren 3+ letras pegadas a un dígito).
+  // Al convertirlos a 'd'/'t' aquí, los bloques de expansión de líneas 3591/3596
+  // los procesan correctamente: "d 1" → 10–19, "t 5" → 05,15,...,95.
+  // Se aplica solo cuando "dec"/"ter" aparece como token aislado (word boundary),
+  // para no romper tokens como "decimal" o "tercero" si aparecieran.
+  if (/\bdec\b/i.test(l)) {
+    trace('ALIAS', { alias: 'dec', canonical: 'decena (d)', linea: l });
+    l = l.replace(/\bdec\b/gi, 'd');
+  }
+  if (/\bter\b/i.test(l)) {
+    trace('ALIAS', { alias: 'ter', canonical: 'terminal (t)', linea: l });
+    l = l.replace(/\bter\b/gi, 't');
+  }
+  // ── FIN PATCH alias ──────────────────────────────────────────────────────────
   l = l.replace(/\b(terminal|termin(?:a(?:r)?)?|termi)[ \t]*(\d)/gi, 't$2');
   l = l.replace(/\b(decenas?|decen|dece|decer)[ \t]*(\d)/gi, 'd$2');
   l = l.replace(/\b(ter(?:m(?:in(?:a(?:r)?)?)?)?)[ \t]*(\d)\b/gi, 't$2');
@@ -4421,10 +4566,17 @@ function procesarBloque(bloque, deps) {
     }
 
     // ── SEPARATOR ──────────────────────────────────────────────────────────
+    // Regla: la línea vacía es siempre ruido de formato cuando hay números
+    // acumulados pendientes de monto. Solo se resetea el contexto cuando
+    // collectedNums está vacío (sub-bloque ya cerrado con su 'con').
     if (token.type === LineType.SEPARATOR) {
       stats.skippedTokens++;
-      trace('ENGINE_SEPARATOR', { id: tokenId, reset: true, lineNum: token.lineNum });
-      ctx.reset('SEPARATOR token');
+      if (ctx.collectedNums.length === 0) {
+        ctx.reset('SEPARATOR token');
+        trace('ENGINE_SEPARATOR', { id: tokenId, reset: true, lineNum: token.lineNum });
+      } else {
+        trace('ENGINE_SEPARATOR', { id: tokenId, reset: false, reason: 'collectedNums pendientes — línea vacía ignorada', collectedNums: [...ctx.collectedNums], lineNum: token.lineNum });
+      }
       continue;
     }
 
@@ -4493,7 +4645,7 @@ function procesarBloque(bloque, deps) {
           const err = {
             code: 'R005_PARLE_GLOBAL_MIN2',
             line: lineNum,
-            message: `Parle global requiere al menos 2 números acumulados (hay ${ctx.collectedNums.length}).`,
+            message: `Para hacer parle necesita al menos 2 números antes del "parle con ...". Solo hay ${ctx.collectedNums.length}.`,
           };
           trace('ERROR', { id: tokenId, ...err });
           errors.push(err);
@@ -4504,7 +4656,7 @@ function procesarBloque(bloque, deps) {
         ops = buildOpsParleGlobal(lineaExp, ctx.collectedNums, lm);
         trace('ENGINE_PARLE_GLOBAL_OPS', { id: tokenId, ops, lineNum });
         if (!ops.length) {
-          const err = { code: 'R005_PARLE_SIN_MONTO', line: lineNum, message: `Parle global sin monto válido.` };
+          const err = { code: 'R005_PARLE_SIN_MONTO', line: lineNum, message: `El parle no tiene monto. Escriba "parle con" seguido del valor, por ejemplo: parle con 100` };
           trace('ERROR', { id: tokenId, ...err });
           errors.push(err);
           hasError = true;
@@ -4522,7 +4674,7 @@ function procesarBloque(bloque, deps) {
           const err = {
             code: 'R006_CANDADO_GLOBAL_MIN3',
             line: lineNum,
-            message: `Candado global requiere al menos 3 números acumulados (hay ${ctx.collectedNums.length}).`,
+            message: `Para hacer candado necesita al menos 3 números antes del "candado con ...". Solo hay ${ctx.collectedNums.length}.`,
           };
           trace('ERROR', { id: tokenId, ...err });
           errors.push(err);
@@ -4533,7 +4685,7 @@ function procesarBloque(bloque, deps) {
         ops = buildOpsCandadoGlobal(lineaExp, ctx.collectedNums, lm);
         trace('ENGINE_CANDADO_GLOBAL_OPS', { id: tokenId, ops, lineNum });
         if (!ops.length) {
-          const err = { code: 'R006_CANDADO_SIN_MONTO', line: lineNum, message: `Candado global sin monto válido.` };
+          const err = { code: 'R006_CANDADO_SIN_MONTO', line: lineNum, message: `El candado no tiene monto. Escriba "candado con" seguido del valor, por ejemplo: candado con 100` };
           trace('ERROR', { id: tokenId, ...err });
           errors.push(err);
           hasError = true;
@@ -4575,7 +4727,7 @@ function procesarBloque(bloque, deps) {
           const err = {
             code: 'R007_MONTO_SOLO_SIN_PARES',
             line: lineNum,
-            message: 'Monto suelto "con X" sin pares NxN acumulados. Escriba los pares antes del monto.',
+            message: 'Se encontró un monto suelto sin pares de parle antes. Escriba los pares primero, por ejemplo: 23x45 con 100',
           };
           trace('ERROR', { id: tokenId, ...err });
           errors.push(err);
@@ -4587,7 +4739,7 @@ function procesarBloque(bloque, deps) {
         // Extraer el monto de la línea
         const montoMatch = lineaExp.match(/con\s+([\d.]+)/i);
         if (!montoMatch) {
-          const err = { code: 'R007_MONTO_SOLO_INVALIDO', line: lineNum, message: 'No se pudo extraer el monto.' };
+          const err = { code: 'R007_MONTO_SOLO_INVALIDO', line: lineNum, message: 'No se pudo leer el monto de esta línea. Verifique que el valor sea un número válido.' };
           trace('ERROR', { id: tokenId, ...err });
           errors.push(err);
           hasError = true;
@@ -4618,7 +4770,7 @@ function procesarBloque(bloque, deps) {
           const err = {
             code: 'R010_NUMS_SIN_MONTO',
             line: lineNum,
-            message: `Números sin monto (${db.numerosBase.join(', ')}). Agregue "con X".`,
+            message: `Los números ${db.numerosBase.join(', ')} no tienen monto. Agregue "con" y el valor, por ejemplo: ${db.numerosBase.join(' ')} con 100`,
           };
           trace('ERROR', { id: tokenId, ...err });
           errors.push(err);
@@ -4689,7 +4841,7 @@ function procesarBloque(bloque, deps) {
           const warn = {
             code: 'W_CENTENA_GLOBAL_SIN_BASE',
             line: lineNum,
-            message: 'Centena global ignorada: no hay números base en el bloque.',
+            message: 'La instrucción de centena no tiene números antes. Escriba primero los números y luego la centena.',
           };
           trace('ERROR', { id: tokenId, ...warn });
           errors.push(warn);
@@ -4702,7 +4854,7 @@ function procesarBloque(bloque, deps) {
           const warn = {
             code: 'W_CENTENA_GLOBAL_SIN_OPS',
             line: lineNum,
-            message: 'Centena global no generó operaciones (todos los números tienen > 2 dígitos).',
+            message: 'La centena no pudo aplicarse porque todos los números tienen más de 2 dígitos.',
           };
           trace('ERROR', { id: tokenId, ...warn });
           errors.push(warn);
@@ -4718,7 +4870,7 @@ function procesarBloque(bloque, deps) {
           id: tokenId,
           code: 'E_UNKNOWN_OPKIND',
           line: lineNum,
-          message: `OpKind "${opKind}" desconocido.`,
+          message: `Error interno: tipo de operación desconocido ("${opKind}"). Contacte soporte.`,
           token,
         });
         errors.push({ code: 'E_UNKNOWN_OPKIND', line: lineNum, message: `OpKind "${opKind}" desconocido.` });
@@ -4759,7 +4911,7 @@ function procesarBloque(bloque, deps) {
       totalComputed:   total,
       totalDeclarado,
       diff,
-      message:         `Total declarado (${totalDeclarado.toFixed(2)}) ≠ total calculado (${total.toFixed(2)}). Diferencia: ${diff.toFixed(2)}.`,
+      message:         `El total declarado (${totalDeclarado.toFixed(2)}) no coincide con el calculado (${total.toFixed(2)}). Diferencia: ${diff.toFixed(2)}.`,
     });
   }
 
@@ -4830,27 +4982,34 @@ function calcular(ctx, deps) {
   trace('INPUT_START', { rawInput, loteriaId, sorteoId });
 
   if (!loteriaId || !sorteoId)
-    return { ok: false, error: 'MISSING_LOTERIA_SORTEO', message: 'Seleccione Lotería y Sorteo.', totalGeneral: 0, jugadas: [], detalleTexto: '', errors: [], bloques: [] };
+    return { ok: false, error: 'MISSING_LOTERIA_SORTEO', message: 'Debe seleccionar la lotería y el sorteo antes de calcular.', totalGeneral: 0, jugadas: [], detalleTexto: '', errors: [], bloques: [] };
   if (!rawInput || !rawInput.trim())
-    return { ok: false, error: 'EMPTY_INPUT', message: 'Ingrese una jugada.', totalGeneral: 0, jugadas: [], detalleTexto: '', errors: [], bloques: [] };
+    return { ok: false, error: 'EMPTY_INPUT', message: 'No hay jugadas para procesar. Escriba al menos una jugada.', totalGeneral: 0, jugadas: [], detalleTexto: '', errors: [], bloques: [] };
 
   const { errors: parseErrors, bloques, audit } = parsearInput(rawInput, deps);
 
   // ── NO_BET_LOSS_GUARANTEE: separar errores críticos de warnings de auditoría ──
   // AUDIT_MISSING_CANDIDATES es CRÍTICO — abortar (candidato sin estado = pérdida).
-  // FLAGGED items son warnings — continuar el engine pero incluirlos en el resultado.
-  const criticalErrors = parseErrors.filter(e => e.code === 'AUDIT_MISSING_CANDIDATES');
-  const flaggedWarnings = parseErrors.filter(e => e.status === 'FLAGGED');
-  const otherErrors    = parseErrors.filter(e => e.code !== 'AUDIT_MISSING_CANDIDATES' && e.status !== 'FLAGGED');
+  // FLAGGED severity:'error' son BLOQUEANTES — una línea descartada impide certificar el total.
+  // FLAGGED severity:'warning' son no-bloqueantes — se incluyen en el resultado pero no abortan.
+  const criticalErrors   = parseErrors.filter(e => e.code === 'AUDIT_MISSING_CANDIDATES');
+  const flaggedErrors    = parseErrors.filter(e => e.status === 'FLAGGED' && e.severity === 'error');
+  const flaggedWarnings  = parseErrors.filter(e => e.status === 'FLAGGED' && e.severity !== 'error');
+  const otherErrors      = parseErrors.filter(e => e.code !== 'AUDIT_MISSING_CANDIDATES' && e.status !== 'FLAGGED');
 
-  if (criticalErrors.length || otherErrors.length) {
+  if (criticalErrors.length || otherErrors.length || flaggedErrors.length) {
     return {
       ok: false,
-      error: 'PARSE_ERROR',
+      error: flaggedErrors.length && !criticalErrors.length && !otherErrors.length
+        ? 'FLAGGED_LINES_PRESENT'
+        : 'PARSE_ERROR',
+      message: flaggedErrors.length
+        ? `No se puede calcular el total: ${flaggedErrors.length} línea(s) no pudieron procesarse. Revise y corrija esas líneas antes de continuar.`
+        : undefined,
       totalGeneral: 0,
       jugadas: [],
       detalleTexto: '',
-      errors: [...criticalErrors, ...otherErrors],
+      errors: [...criticalErrors, ...otherErrors, ...flaggedErrors],
       flaggedWarnings,
       bloques: [],
       audit,
@@ -4858,7 +5017,7 @@ function calcular(ctx, deps) {
   }
 
   if (!bloques.length)
-    return { ok: false, error: 'NO_BLOQUES', message: 'No se detectaron bloques.', totalGeneral: 0, jugadas: [], detalleTexto: '', errors: [], flaggedWarnings, bloques: [], audit };
+    return { ok: false, error: 'NO_BLOQUES', message: 'No se encontraron jugadas válidas en el texto ingresado. Verifique el formato.', totalGeneral: 0, jugadas: [], detalleTexto: '', errors: [], flaggedWarnings, bloques: [], audit };
 
   let totalGeneral = 0, detalleTexto = '';
   const jugadas = [];
@@ -4937,8 +5096,31 @@ function calcular(ctx, deps) {
     });
   }
 
+  // ── CERTIFICACIÓN DEL TOTAL: el total solo puede considerarse válido si
+  // ningún bloque tiene hasError===true. Un bloque con error devuelve total=0
+  // (ver procesarBloque), pero la verificación explícita aquí garantiza que
+  // ok:true NUNCA se emita cuando hay jugadas omitidas o errores de validación.
+  const bloquesConError = jugadas.filter(j => j.tiene_error);
+  if (bloquesConError.length > 0) {
+    return {
+      ok: false,
+      error: 'BLOCK_ERRORS_PRESENT',
+      message: `No se puede calcular el total: hay ${bloquesConError.length} jugada(s) con errores que deben corregirse primero.`,
+      totalGeneral,
+      jugadas,
+      detalleTexto,
+      errors: [],
+      flaggedWarnings,
+      bloques,
+      hayJugadasSinNombre,
+      audit,
+      engineStats,
+    };
+  }
+
   return {
     ok: true,
+    certified: true,   // total certificado: todas las líneas procesadas sin errores ni FLAGGED
     totalGeneral,
     jugadas,
     detalleTexto,
