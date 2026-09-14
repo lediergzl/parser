@@ -9,12 +9,16 @@ function fmtMoney(value) {
 }
 
 function fechaCuba() {
-  return new Intl.DateTimeFormat('en-CA', {
+  const partes = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Havana',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit'
-  }).format(new Date());
+  }).formatToParts(new Date());
+  const y = partes.find(p => p.type === 'year')?.value;
+  const m = partes.find(p => p.type === 'month')?.value;
+  const d = partes.find(p => p.type === 'day')?.value;
+  return `${y}-${m}-${d}`;
 }
 
 function horaMinutosCuba() {
@@ -115,13 +119,7 @@ async function validarLimites(supabase, loteriaId, sorteoId, fecha, detalles) {
       const key = `${tipo}:${String(num)}`;
       const anterior = acumulado[key] || 0;
       if (anterior + monto > limite) {
-        return {
-          numero: String(num),
-          tipo,
-          anterior,
-          actual: monto,
-          limite
-        };
+        return { numero: String(num), tipo, anterior, actual: monto, limite };
       }
       acumulado[key] = anterior + monto;
     }
@@ -189,11 +187,7 @@ async function registrarFlujoApuesta(bot) {
       }
 
       const resultado = Engine.calcular(
-        {
-          rawInput: texto,
-          loteriaId: contexto.pref.loteria_id,
-          sorteoId: contexto.pref.sorteo_id
-        },
+        { rawInput: texto, loteriaId: contexto.pref.loteria_id, sorteoId: contexto.pref.sorteo_id },
         {
           limpiarMonto: Utils.limpiarMonto,
           preprocesarJugada: Preprocesador.preprocesarJugada,
@@ -220,13 +214,8 @@ async function registrarFlujoApuesta(bot) {
       }
 
       const detalles = normalizarDetalles(resultado);
-      const limite = await validarLimites(
-        supabase,
-        contexto.pref.loteria_id,
-        contexto.pref.sorteo_id,
-        fechaCuba(),
-        detalles
-      );
+      const fecha = fechaCuba();
+      const limite = await validarLimites(supabase, contexto.pref.loteria_id, contexto.pref.sorteo_id, fecha, detalles);
       if (limite) {
         await ctx.reply(
           `🚫 *Límite excedido*\n\nNúmero: ${limite.numero}\nTipo: ${limite.tipo}\nAcumulado anterior: $${fmtMoney(limite.anterior)}\nEsta jugada: $${fmtMoney(limite.actual)}\nLímite: $${fmtMoney(limite.limite)}\n\nLa jugada no fue guardada.`,
@@ -239,7 +228,7 @@ async function registrarFlujoApuesta(bot) {
         p_telegram_id: ctx.from.id,
         p_loteria_id: contexto.pref.loteria_id,
         p_sorteo_id: contexto.pref.sorteo_id,
-        p_fecha: fechaCuba(),
+        p_fecha: fecha,
         p_input_raw: texto,
         p_total: total,
         p_detalle: JSON.stringify(detalles),
