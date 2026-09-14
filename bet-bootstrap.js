@@ -20,8 +20,8 @@ if (!bot) {
   //
   // 25,00 / 25.00 -> 25
   // 25,05 / 25.05 -> se conserva como decimal
-  // También elimina líneas informativas "Total de 1101,00" o "Total-210",
-  // que son resúmenes del comprobante y no una jugada adicional.
+  // También elimina resúmenes de comprobantes como "Total de 1101,00"
+  // o "Total-210" cuando aparecen al final o dentro de una misma línea.
   bot.use(async (ctx, next) => {
     if (typeof ctx.message?.text !== 'string') return next();
 
@@ -32,8 +32,11 @@ if (!bot) {
       (_, prefijo, numero) => `${prefijo}${numero}`
     );
 
+    // "Total" es un resumen informativo del comprobante, no una jugada.
+    // Se elimina desde esa palabra hasta el importe para que 1101 nunca sea
+    // confundido con un número de 4 cifras.
     texto = texto.replace(
-      /^\s*total\s*(?:[-:]\s*|\s+de\s+)\$?\d+(?:[.,]\d+)?\s*$/gim,
+      /\btotal\s*(?:(?:[-:]\s*)|(?:\s+de\s+))\$?\d+(?:[.,]\d+)?/gi,
       ''
     );
 
