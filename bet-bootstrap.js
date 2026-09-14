@@ -27,6 +27,17 @@ if (!bot) {
 
     let texto = ctx.message.text;
 
+    // Conservar el importe declarado por el jugador/comprobante ANTES de
+    // retirarlo del texto que recibe el motor. Esto permite distinguir entre
+    // el total calculado de la jugada y el total declarado en el recibo.
+    const totalDeclaradoMatch = texto.match(
+      /\btotal\s*(?:(?:[-:]\s*)|(?:\s+de\s+))\$?\s*(\d+(?:[.,]\d+)?)/i
+    );
+    if (totalDeclaradoMatch) {
+      ctx.state = ctx.state || {};
+      ctx.state.totalDeclarado = Number(String(totalDeclaradoMatch[1]).replace(',', '.'));
+    }
+
     texto = texto.replace(
       /(\b(?:con|a|de|parle|candado|p|c)\s+)\$?(\d+)[.,]00\b/gi,
       (_, prefijo, numero) => `${prefijo}${numero}`
