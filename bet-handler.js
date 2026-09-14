@@ -82,9 +82,7 @@ async function validarLimites(supabase, loteriaId, sorteoId, fecha, detalles) {
   if (!limites?.length) return null;
 
   const limitesMap = {};
-  for (const l of limites) {
-    limitesMap[l.tipo] = Number(l.monto_maximo);
-  }
+  for (const l of limites) limitesMap[l.tipo] = Number(l.monto_maximo);
 
   const { data: bets, error: betsError } = await supabase
     .from('bets')
@@ -118,9 +116,7 @@ async function validarLimites(supabase, loteriaId, sorteoId, fecha, detalles) {
     for (const num of d.numeros || []) {
       const key = `${tipo}:${String(num)}`;
       const anterior = acumulado[key] || 0;
-      if (anterior + monto > limite) {
-        return { numero: String(num), tipo, anterior, actual: monto, limite };
-      }
+      if (anterior + monto > limite) return { numero: String(num), tipo, anterior, actual: monto, limite };
       acumulado[key] = anterior + monto;
     }
   }
@@ -150,8 +146,6 @@ function mensajeResultado(resultado, contexto) {
 
 async function registrarFlujoApuesta(bot) {
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-
-  // Desactivar el tracing del motor en producción para no llenar los logs de Render.
   try { global.Tracer?.disableTrace?.(); } catch (_) {}
 
   bot.command('jugar', async (ctx) => {
@@ -173,22 +167,21 @@ async function registrarFlujoApuesta(bot) {
       }
 
       const { data: loteria, error: loteriaError } = await supabase
-        .from('loterias')
-        .select('nombre')
-        .eq('id', contexto.pref.loteria_id)
-        .maybeSingle();
+        .from('loterias').select('nombre').eq('id', contexto.pref.loteria_id).maybeSingle();
       if (loteriaError) throw loteriaError;
 
       const Engine = global.Engine;
       const Preprocesador = global.Preprocesador;
       const Utils = global.Utils;
-      if (!Engine?.calcular || !Preprocesador?.preprocesarJugada || !Utils?.limpiarMonto) {
+      const Expansion = global.Expansion;
+      if (!Engine?.calcular || !Preprocesador?.preprocesarJugada || !Utils?.limpiarMonto || !Expansion) {
         throw new Error('Motor LotoPro no disponible en el proceso del bot');
       }
 
       const resultado = Engine.calcular(
         { rawInput: texto, loteriaId: contexto.pref.loteria_id, sorteoId: contexto.pref.sorteo_id },
         {
+          Expansion,
           limpiarMonto: Utils.limpiarMonto,
           preprocesarJugada: Preprocesador.preprocesarJugada,
           obtenerTimestampLocal: () => new Date().toISOString()
