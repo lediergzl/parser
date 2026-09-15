@@ -86,12 +86,16 @@ function separarLoteriaYTermino(claveLinea) {
 const cacheLoteriaId = new Map(); // nombreNormalizado -> id
 const cacheSorteoId  = new Map(); // `${loteriaId}::nombreNormalizado` -> id
 
+function dumpCodePoints(s) {
+  return Array.from(String(s || '')).map(ch => `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`).join(' ');
+}
+
 async function obtenerLoteriaId(nombre) {
   const key = normalizar(nombre);
   if (cacheLoteriaId.has(key)) return { id: cacheLoteriaId.get(key) };
   const { data, error } = await supabase.from('loterias').select('id').ilike('nombre', nombre).maybeSingle();
   if (error) return { error: error.message };
-  if (!data) return { error: `no existe una lotería con nombre "${nombre}" en la tabla loterias` };
+  if (!data) return { error: `no existe una lotería con nombre "${nombre}" [${dumpCodePoints(nombre)}] en la tabla loterias` };
   cacheLoteriaId.set(key, data.id);
   return { id: data.id };
 }
