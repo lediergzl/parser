@@ -31,13 +31,26 @@ fijo 80x, corrido 30x, centena 500x, parle 1000x — sobre el monto unitario
 apostado a esa combinación, no sobre el total de la línea. Candado queda sin
 tasa definida a propósito: su premio se confirma a mano en `/premios`.
 
-## Pendiente de correr aparte (no bloquea el bot)
+## Un solo proceso (no hace falta un servicio aparte en Render)
+
+El userbot corre **dentro del mismo proceso** del bot: `bet-bootstrap.js` lo
+arranca al final, envuelto en try/catch, así que si faltan las variables de
+entorno o el paquete no está instalado, el bot sigue funcionando igual, solo
+sin escuchar resultados. Lo único que sí es un paso aparte es **generar la
+sesión** (`generar-session.js`), porque pide el código de Telegram por
+consola de forma interactiva — eso se corre una vez, localmente, antes de
+desplegar; después solo hace falta copiar `TG_SESSION` a las variables de
+entorno del mismo servicio.
+
+## Pendiente de correr aparte (una sola vez, no es un servicio nuevo)
 
 1. Aplicar las dos migraciones nuevas en Supabase.
-2. Generar la sesión del userbot: `TG_API_ID=... TG_API_HASH=... node generar-session.js`.
-3. Completar `TERMINO_A_SORTEO` en `userbot-resultados.js` si aparecen
+2. `npm install` (ya agregado `telegram` e `input` a package.json).
+3. Localmente: `TG_API_ID=... TG_API_HASH=... node generar-session.js` →
+   copiar el `TG_SESSION` que imprime.
+4. En las variables de entorno del servicio del bot (Render), agregar
+   `TG_API_ID`, `TG_API_HASH`, `TG_SESSION` (y `RESULTADOS_ORIGEN` si el
+   username de @boliterostop_bot cambiara).
+5. Completar `TERMINO_A_SORTEO` en `userbot-resultados.js` si aparecen
    loterías/sorteos nuevos (hoy cubre Florida/New York/Georgia con Día,
-   Tarde, Noche — que es el catálogo real del proyecto).
-4. Correr `userbot-resultados.js` como proceso independiente (otro servicio
-   en Render, o un cron/worker) con `TG_API_ID`, `TG_API_HASH`, `TG_SESSION`,
-   `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
+   Tarde, Noche — el catálogo real del proyecto).

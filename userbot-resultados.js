@@ -164,42 +164,57 @@ async function guardarResultado({ loteriaId, sorteoId, fijo, corrido, centena, f
   }
 }
 
-(async () => {
+async function iniciarUserbotResultados() {
   if (!apiId || !apiHash || !sessionString) {
-    console.error('❌ Faltan TG_API_ID / TG_API_HASH / TG_SESSION. Corre primero generar-session.js.');
-    process.exit(1);
+    console.warn('⚠️  Userbot de resultados desactivado: faltan TG_API_ID / TG_API_HASH / TG_SESSION.');
+    console.warn('    Corre generar-session.js una vez (localmente, con consola) y define esas 3 variables.');
+    return; // nunca tumba el proceso principal por esto
   }
 
   const client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, { connectionRetries: 5 });
   await client.connect();
-  console.log('✅ Userbot conectado, escuchando resultados...');
+  console.log('✅ Userbot conectado, escuchando resultados de', ORIGEN_ESPERADO);
 
   client.addEventHandler(async (event) => {
-    const msg = event.message;
-    if (!msg || !msg.message) return;
+    try {
+      const msg = event.message;
+      if (!msg || !msg.message) return;
 
-    const remitente = await msg.getSender();
-    const username = remitente?.username ? `@${remitente.username}` : null;
-    if (username !== ORIGEN_ESPERADO) return;
+      const remitente = await msg.getSender();
+      const username = remitente?.username ? `@${remitente.username}` : null;
+      if (username !== ORIGEN_ESPERADO) return;
 
-    console.log('📩 Mensaje de', username, ':\n', msg.message, '\n---');
+      console.log('📩 Mensaje de', username, ':\n', msg.message, '\n---');
 
-    const parsed = parsearMensajeResultado(msg.message);
-    if (!parsed) {
-      console.log('⚠️  No se pudo parsear (parser pendiente de completar). Texto crudo arriba ☝️');
-      return;
+      const parsed = parsearMensajeResultado(msg.message);
+      if (!parsed) {
+        console.log('⚠️  No se pudo parsear (parser pendiente de completar). Texto crudo arriba ☝️');
+        return;
+      }
+
+      const destino = await resolverLoteriaSorteo(parsed.clave);
+      if (!destino) {
+        console.log(`⚠️  No se pudo resolver lotería/sorteo para "${parsed.clave}". Revisa TERMINO_A_SORTEO o que exista en tu catálogo.`);
+        return;
+      }
+
+      await guardarResultado({
+        loteriaId: destino.loteriaId, sorteoId: destino.sorteoId,
+        fijo: parsed.fijo, corrido: parsed.corrido, centena: parsed.centena,
+        fecha: parsed.fecha,
+      });
+    } catch (e) {
+      // Un error acá NUNCA debe tumbar el bot principal.
+      console.error('❌ Error procesando mensaje de resultado:', e);
     }
-
-    const destino = await resolverLoteriaSorteo(parsed.clave);
-    if (!destino) {
-      console.log(`⚠️  No se pudo resolver lotería/sorteo para "${parsed.clave}". Revisa TERMINO_A_SORTEO o que exista en tu catálogo.`);
-      return;
-    }
-
-    await guardarResultado({
-      loteriaId: destino.loteriaId, sorteoId: destino.sorteoId,
-      fijo: parsed.fijo, corrido: parsed.corrido, centena: parsed.centena,
-      fecha: parsed.fecha,
-    });
   }, new NewMessage({}));
-})();
+}
+
+// Permite seguir usándolo como script independiente (`node userbot-resultados.js`)
+// además de requerirlo desde bet-bootstrap.js.
+if (require.main === module) {
+  iniciarUserbotResultados().catch(e => { console.error('❌ Userbot no pudo iniciar:', e); });
+} else {
+  module.exports = { iniciarUserbotResultados };
+}
+

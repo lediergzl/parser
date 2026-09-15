@@ -110,4 +110,14 @@ if (!bot) {
       console.error('❌ Error registrando flujos de jugadas:', err && err.stack ? err.stack : err);
       process.exitCode = 1;
     });
+
+  // ── Userbot de resultados (@boliterostop_bot) — mismo proceso, opcional ──
+  // Si faltan TG_API_ID/TG_API_HASH/TG_SESSION, o el paquete 'telegram' no
+  // está instalado todavía, simplemente no arranca y el bot sigue normal.
+  try {
+    require('./userbot-resultados').iniciarUserbotResultados()
+      .catch(err => console.error('❌ Userbot de resultados no pudo iniciar:', err && err.stack ? err.stack : err));
+  } catch (err) {
+    console.error('⚠️  Userbot de resultados no disponible (¿falta "npm install telegram input"?):', err.message);
+  }
 }
