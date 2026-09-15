@@ -76,44 +76,49 @@ const cacheSorteoId  = new Map(); // `${loteriaId}::nombreNormalizado` -> id
 
 async function obtenerLoteriaId(nombre) {
   const key = normalizar(nombre);
-  if (cacheLoteriaId.has(key)) return cacheLoteriaId.get(key);
+  if (cacheLoteriaId.has(key)) return { id: cacheLoteriaId.get(key) };
   const { data, error } = await supabase.from('loterias').select('id').ilike('nombre', nombre).maybeSingle();
-  if (error || !data) return null;
+  if (error) return { error: error.message };
+  if (!data) return { error: `no existe una lotería con nombre "${nombre}" en la tabla loterias` };
   cacheLoteriaId.set(key, data.id);
-  return data.id;
+  return { id: data.id };
 }
 
 async function obtenerSorteoId(loteriaId, nombreSorteo) {
   const key = `${loteriaId}::${normalizar(nombreSorteo)}`;
-  if (cacheSorteoId.has(key)) return cacheSorteoId.get(key);
+  if (cacheSorteoId.has(key)) return { id: cacheSorteoId.get(key) };
   const { data, error } = await supabase.from('sorteos').select('id')
     .eq('loteria_id', loteriaId).ilike('nombre', nombreSorteo).maybeSingle();
-  if (error || !data) return null;
+  if (error) return { error: error.message };
+  if (!data) return { error: `no existe un sorteo "${nombreSorteo}" para loteria_id=${loteriaId} en la tabla sorteos` };
   cacheSorteoId.set(key, data.id);
-  return data.id;
+  return { id: data.id };
 }
 
 // Resuelve "Georgia - Night" -> { loteriaId, sorteoId } consultando Supabase.
-// Devuelve null si la lotería, el término o el sorteo no se pueden mapear.
+// Devuelve { error: '<motivo>' } si algo no se puede mapear, para poder
+// diagnosticar exactamente en qué paso falló (nunca un null mudo).
 async function resolverLoteriaSorteo(claveLinea) {
   const { loteriaNombre, termino } = separarLoteriaYTermino(claveLinea);
-  if (!loteriaNombre || !termino) return null;
+  if (!loteriaNombre || !termino) return { error: `no se pudo separar lotería/término de "${claveLinea}"` };
 
   const loteriaKey = normalizar(loteriaNombre);
   const dict = CONCEPTO_A_SORTEO[loteriaKey];
-  if (!dict) return null; // lotería no está en el catálogo que conocemos
+  if (!dict) return { error: `lotería "${loteriaNombre}" (normalizada "${loteriaKey}") no está en CONCEPTO_A_SORTEO` };
 
-  const concepto = TERMINO_GENERICO[normalizar(termino)];
-  if (!concepto) return null; // término desconocido (ni inglés ni español)
+  const conceptoKey = normalizar(termino);
+  const concepto = TERMINO_GENERICO[conceptoKey];
+  if (!concepto) return { error: `término "${termino}" (normalizado "${conceptoKey}") no está en TERMINO_GENERICO` };
+
   const nombreSorteo = dict[concepto];
-  if (!nombreSorteo) return null; // esa lotería no tiene ese sorteo
+  if (!nombreSorteo) return { error: `"${loteriaKey}" no tiene sorteo mapeado para el concepto "${concepto}"` };
 
-  const loteriaId = await obtenerLoteriaId(loteriaNombre);
-  if (!loteriaId) return null;
-  const sorteoId = await obtenerSorteoId(loteriaId, nombreSorteo);
-  if (!sorteoId) return null;
+  const loteria = await obtenerLoteriaId(loteriaNombre);
+  if (loteria.error) return { error: `buscando lotería "${loteriaNombre}": ${loteria.error}` };
+  const sorteo = await obtenerSorteoId(loteria.id, nombreSorteo);
+  if (sorteo.error) return { error: `buscando sorteo "${nombreSorteo}": ${sorteo.error}` };
 
-  return { loteriaId, sorteoId };
+  return { loteriaId: loteria.id, sorteoId: sorteo.id };
 }
 
 // Ejemplo real de @boliterostop_bot:
@@ -218,8 +223,8 @@ async function iniciarUserbotResultados() {
       }
 
       const destino = await resolverLoteriaSorteo(parsed.clave);
-      if (!destino) {
-        console.log(`⚠️  No se pudo resolver lotería/sorteo para "${parsed.clave}". Revisa TERMINO_A_SORTEO o que exista en tu catálogo.`);
+      if (destino.error) {
+        console.log(`⚠️  No se pudo resolver lotería/sorteo para "${parsed.clave}": ${destino.error}`);
         return;
       }
 
@@ -279,7 +284,7 @@ async function buscarUltimoResultadoEnChat(chat) {
   if (!parsed) return { ok: false, message: 'No se pudo parsear ese mensaje con el formato esperado.', texto: encontrado.message };
 
   const destino = await resolverLoteriaSorteo(parsed.clave);
-  if (!destino) return { ok: false, message: `No se pudo resolver lotería/sorteo para "${parsed.clave}".`, texto: encontrado.message, parsed };
+  if (destino.error) return { ok: false, message: `No se pudo resolver lotería/sorteo para "${parsed.clave}": ${destino.error}`, texto: encontrado.message, parsed };
 
   await guardarResultado({
     loteriaId: destino.loteriaId, sorteoId: destino.sorteoId,

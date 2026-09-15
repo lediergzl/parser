@@ -64,8 +64,8 @@ const CHAT = process.env.CHAT_RESULTADOS || '@MentesMillonariasbolitachat';
   console.log('✅ Parseado:', parsed);
 
   const destino = await resolverLoteriaSorteo(parsed.clave);
-  if (!destino) {
-    console.log(`❌ No se pudo resolver lotería/sorteo para "${parsed.clave}". Revisa TERMINO_A_SORTEO o el catálogo en Supabase.`);
+  if (destino.error) {
+    console.log(`❌ No se pudo resolver lotería/sorteo para "${parsed.clave}": ${destino.error}`);
     process.exit(1);
   }
   console.log('✅ Resuelto a:', destino);
