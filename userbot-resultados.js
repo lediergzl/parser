@@ -1,25 +1,4 @@
 // userbot-resultados.js
-// ----------------------------------------------------------------------------
-// Proceso INDEPENDIENTE (correr con `node userbot-resultados.js`, separado
-// del bot de Telegraf). Usa una sesión de usuario real (MTProto vía GramJS)
-// porque un bot normal NO puede recibir mensajes de otro bot en un canal.
-//
-// Qué hace:
-//   1. Se conecta con la sesión generada por generar-session.js
-//   2. Escucha mensajes nuevos de @boliterostop_bot (en el canal/grupo donde
-//      publica, o en DM si te escribe en privado — ajusta CHATS_A_ESCUCHAR)
-//   3. Parsea el texto del resultado → { loteriaNombre, sorteoNombre, fijo, corrido, centena }
-//   4. Mapea loteriaNombre/sorteoNombre a tus loteria_id/sorteo_id reales
-//   5. Inserta/actualiza en `resultados_sorteo` con fuente: 'bot_externo'
-//   6. Llama la misma lógica de detección de premios que ya usa /resultado
-//
-// Requiere: npm install telegram @supabase/supabase-js
-//
-// ⚠️ PENDIENTE: parsearMensajeResultado() está sin terminar — necesito un
-// mensaje real de @boliterostop_bot para escribir el regex correcto.
-// Como está, SOLO loguea el texto crudo por consola para que puedas
-// copiarlo y mandármelo; no inserta nada todavía (ver TODO más abajo).
-// ----------------------------------------------------------------------------
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
@@ -29,19 +8,9 @@ const { detectarPremios } = require('./premios.js');
 const apiId = parseInt(process.env.TG_API_ID || '', 10);
 const apiHash = process.env.TG_API_HASH || '';
 const sessionString = process.env.TG_SESSION || '';
-
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-
-// Usuario/canal cuyos mensajes nos interesan. Puede ser '@boliterostop_bot'
-// directamente (si te escribe en DM) o el username/ID del canal/grupo donde
-// publica (si ahí es donde lo viste).
 const ORIGEN_ESPERADO = process.env.RESULTADOS_ORIGEN || '@boliterostop_bot';
 
-// El bot mezcla inglés y español según la lotería ("Georgia - Night" vs
-// "New York - Medio Día"), así que primero se normaliza el término a un
-// concepto genérico (mediodia/tarde/noche) y luego cada lotería lo mapea a
-// su sorteo real. Georgia tiene 3 sorteos; Florida y New York, 2 (sin
-// "Tarde" — "evening"/"tarde" en esas dos cae en "Noche").
 const TERMINO_GENERICO = {
   midday: 'mediodia', day: 'mediodia', noon: 'mediodia',
   'medio dia': 'mediodia', mediodia: 'mediodia', dia: 'mediodia',
@@ -50,16 +19,11 @@ const TERMINO_GENERICO = {
 };
 
 const CONCEPTO_A_SORTEO = {
-  'florida':  { mediodia: 'Día', tarde: 'Noche', noche: 'Noche' },
+  florida: { mediodia: 'Día', tarde: 'Noche', noche: 'Noche' },
   'new york': { mediodia: 'Día', tarde: 'Noche', noche: 'Noche' },
-  'georgia':  { mediodia: 'Día', tarde: 'Tarde', noche: 'Noche' },
+  georgia: { mediodia: 'Día', tarde: 'Tarde', noche: 'Noche' },
 };
 
-// El bot a veces usa caracteres Unicode invisibles/anchos raros para
-// espaciar el texto (zero-width space, NBSP, etc.) que el .trim() normal de
-// JS NO elimina — mismo patrón que ya existe en lotopro-core.bundle.js
-// (normalizeSpaces). Sin esto, "New York" con un invisible pegado adelante
-// nunca hace match exacto contra la fila real de la tabla loterias.
 function limpiarInvisibles(s) {
   return String(s || '')
     .replace(/[\u200B\u200C\u200D\uFEFF\u2060\u00AD]/g, '')
@@ -74,17 +38,20 @@ function normalizar(s) {
     .trim();
 }
 
-// "Georgia - Night" -> { loteriaNombre: "Georgia", termino: "Night" }
+// Acepta mensajes como "🎉 New York - Medio Día" eliminando cualquier
+// símbolo/emoji decorativo antes de la primera letra o número.
 function separarLoteriaYTermino(claveLinea) {
-  const limpio = limpiarInvisibles(claveLinea).trim();
-  const m = limpio.match(/^(.+?)\s*-\s*(.+)$/);
+  let limpio = limpiarInvisibles(claveLinea).trim();
+  limpio = limpio.replace(/^[^\p{L}\p{N}]*/u, '').trim();
+  const m = limpio.match(/^(.+?)\s*-\s*(.+)$/u);
   if (!m) return { loteriaNombre: limpio, termino: null };
-  return { loteriaNombre: m[1].trim(), termino: m[2].trim() };
+  const loteriaNombre = m[1].replace(/^[^\p{L}\p{N}]*/u, '').trim();
+  const termino = m[2].replace(/[^\p{L}\p{N}]*(?=\s*$)/u, '').trim();
+  return { loteriaNombre, termino };
 }
 
-// Cache simple en memoria para no consultar Supabase en cada mensaje.
-const cacheLoteriaId = new Map(); // nombreNormalizado -> id
-const cacheSorteoId  = new Map(); // `${loteriaId}::nombreNormalizado` -> id
+const cacheLoteriaId = new Map();
+const cacheSorteoId = new Map();
 
 function dumpCodePoints(s) {
   return Array.from(String(s || '')).map(ch => `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`).join(' ');
@@ -111,84 +78,54 @@ async function obtenerSorteoId(loteriaId, nombreSorteo) {
   return { id: data.id };
 }
 
-// Resuelve "Georgia - Night" -> { loteriaId, sorteoId } consultando Supabase.
-// Devuelve { error: '<motivo>' } si algo no se puede mapear, para poder
-// diagnosticar exactamente en qué paso falló (nunca un null mudo).
 async function resolverLoteriaSorteo(claveLinea) {
   const { loteriaNombre, termino } = separarLoteriaYTermino(claveLinea);
   if (!loteriaNombre || !termino) return { error: `no se pudo separar lotería/término de "${claveLinea}"` };
-
   const loteriaKey = normalizar(loteriaNombre);
   const dict = CONCEPTO_A_SORTEO[loteriaKey];
   if (!dict) return { error: `lotería "${loteriaNombre}" (normalizada "${loteriaKey}") no está en CONCEPTO_A_SORTEO` };
-
   const conceptoKey = normalizar(termino);
   const concepto = TERMINO_GENERICO[conceptoKey];
   if (!concepto) return { error: `término "${termino}" (normalizado "${conceptoKey}") no está en TERMINO_GENERICO` };
-
   const nombreSorteo = dict[concepto];
   if (!nombreSorteo) return { error: `"${loteriaKey}" no tiene sorteo mapeado para el concepto "${concepto}"` };
-
   const loteria = await obtenerLoteriaId(loteriaNombre);
   if (loteria.error) return { error: `buscando lotería "${loteriaNombre}": ${loteria.error}` };
   const sorteo = await obtenerSorteoId(loteria.id, nombreSorteo);
   if (sorteo.error) return { error: `buscando sorteo "${nombreSorteo}": ${sorteo.error}` };
-
   return { loteriaId: loteria.id, sorteoId: sorteo.id };
 }
 
-// Ejemplo real de @boliterostop_bot:
-//
-//   Georgia - Night
-//   Fecha: 26/08/2026
-//   Pick 3: `536`
-//   Pick 4: `3328`
-//   [@boliterostop_bot](https://t.me/boliterostop_bot)
-//
-// Conversión (misma que usa el pipeline de boliteros.com en LotoPro):
-//   centena = Pick 3 completo (3 dígitos)
-//   fijo    = últimos 2 dígitos de Pick 3
-//   corrido = últimos 2 dígitos de Pick 4
 function parsearMensajeResultado(texto) {
   if (!texto) return null;
   texto = limpiarInvisibles(texto);
   const lineas = texto.split('\n').map(l => l.trim()).filter(Boolean);
   if (!lineas.length) return null;
-
   const mPick3 = texto.match(/pick\s*3\s*:?\s*`?(\d{1,3})`?/i);
   const mPick4 = texto.match(/pick\s*4\s*:?\s*`?(\d{1,4})`?/i);
-  if (!mPick3 && !mPick4) return null; // no es un mensaje de resultado reconocible
-
+  if (!mPick3 && !mPick4) return null;
   const pick3 = mPick3 ? mPick3[1].padStart(3, '0') : null;
   const pick4 = mPick4 ? mPick4[1].padStart(4, '0') : null;
-
   const centena = pick3 || null;
-  const fijo    = pick3 ? pick3.slice(-2) : null;
+  const fijo = pick3 ? pick3.slice(-2) : null;
   const corrido = pick4 ? pick4.slice(-2) : null;
-
   let fecha = null;
   const mFecha = texto.match(/fecha\s*:?\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i);
   if (mFecha) {
     const [, dd, mm, yyyy] = mFecha;
-    fecha = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`; // ISO yyyy-mm-dd
+    fecha = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
   }
-
-  // La primera línea no vacía es el nombre de lotería/sorteo, ej. "Georgia - Night"
   return { clave: lineas[0], fijo, corrido, centena, fecha };
 }
 
 async function guardarResultado({ loteriaId, sorteoId, fijo, corrido, centena, fecha }) {
   const fechaFinal = fecha || new Date().toISOString().slice(0, 10);
-  const { data: resultado, error } = await supabase.from('resultados_sorteo')
-    .upsert([{
-      loteria_id: loteriaId, sorteo_id: sorteoId, fecha: fechaFinal,
-      numero_ganado: { fijo, corrido, centena }, fuente: 'bot_externo',
-    }], { onConflict: 'loteria_id,sorteo_id,fecha' })
-    .select('*').single();
-
+  const { data: resultado, error } = await supabase.from('resultados_sorteo').upsert([{
+    loteria_id: loteriaId, sorteo_id: sorteoId, fecha: fechaFinal,
+    numero_ganado: { fijo, corrido, centena }, fuente: 'bot_externo',
+  }], { onConflict: 'loteria_id,sorteo_id,fecha' }).select('*').single();
   if (error) { console.error('❌ Error guardando resultado:', error); return; }
   console.log(`✅ Resultado guardado: loteria=${loteriaId} sorteo=${sorteoId} fecha=${fechaFinal} fijo=${fijo} corrido=${corrido} centena=${centena}`);
-
   try {
     await detectarPremios(supabase, resultado);
     console.log('🔍 Detección de premios completada.');
@@ -211,9 +148,9 @@ async function iniciarUserbotResultados() {
   const client = await crearClienteConectado();
   if (!client) {
     console.warn('    Corre generar-session.js una vez (localmente, con consola) y define esas 3 variables.');
-    return; // nunca tumba el proceso principal por esto
+    return;
   }
-  global.__USERBOT_CLIENT__ = client; // reutilizable por comandos manuales (ej. /probar_resultado)
+  global.__USERBOT_CLIENT__ = client;
   try {
     const me = await client.getMe();
     console.log(`✅ Userbot conectado como ${me?.bot ? 'BOT ⚠️ (debería ser cuenta de usuario)' : 'usuario'}: @${me?.username || '?'} (id ${me?.id})`);
@@ -221,109 +158,58 @@ async function iniciarUserbotResultados() {
     console.warn('⚠️ No se pudo verificar la identidad de la sesión del userbot:', e.message);
   }
   console.log('👂 Escuchando resultados de', ORIGEN_ESPERADO);
-
   client.addEventHandler(async (event) => {
     try {
       const msg = event.message;
       if (!msg || !msg.message) return;
-
       const remitente = await msg.getSender();
       const username = remitente?.username ? `@${remitente.username}` : null;
       if (username !== ORIGEN_ESPERADO) return;
-
       console.log('📩 Mensaje de', username, ':\n', msg.message, '\n---');
-
       const parsed = parsearMensajeResultado(msg.message);
       if (!parsed) {
         console.log('⚠️  No se pudo parsear (parser pendiente de completar). Texto crudo arriba ☝️');
         return;
       }
-
       const destino = await resolverLoteriaSorteo(parsed.clave);
       if (destino.error) {
         console.log(`⚠️  No se pudo resolver lotería/sorteo para "${parsed.clave}": ${destino.error}`);
         return;
       }
-
-      await guardarResultado({
-        loteriaId: destino.loteriaId, sorteoId: destino.sorteoId,
-        fijo: parsed.fijo, corrido: parsed.corrido, centena: parsed.centena,
-        fecha: parsed.fecha,
-      });
+      await guardarResultado({ loteriaId: destino.loteriaId, sorteoId: destino.sorteoId, fijo: parsed.fijo, corrido: parsed.corrido, centena: parsed.centena, fecha: parsed.fecha });
     } catch (e) {
-      // Un error acá NUNCA debe tumbar el bot principal.
       console.error('❌ Error procesando mensaje de resultado:', e);
     }
   }, new NewMessage({}));
 }
 
-// Reusa el cliente YA conectado por iniciarUserbotResultados (no abre una
-// segunda conexión con la misma sesión, eso puede provocar desconexiones).
-// Pensado para dispararse manualmente, ej. desde un comando /probar_resultado.
 async function buscarUltimoResultadoEnChat(chat) {
   const client = global.__USERBOT_CLIENT__;
-  if (!client) {
-    return { ok: false, message: 'El userbot no está conectado (revisa TG_API_ID / TG_API_HASH / TG_SESSION).' };
-  }
-
-  // Diagnóstico: confirmar que la sesión es una cuenta de USUARIO real, no
-  // un bot — BOT_METHOD_INVALID en getMessages casi siempre significa que
-  // la sesión terminó autenticada como bot en vez de como usuario.
+  if (!client) return { ok: false, message: 'El userbot no está conectado (revisa TG_API_ID / TG_API_HASH / TG_SESSION).' };
   let me;
-  try {
-    me = await client.getMe();
-  } catch (e) {
-    return { ok: false, message: `No se pudo verificar la cuenta del userbot: ${e.message}` };
-  }
-  if (me?.bot) {
-    return { ok: false, message: `⚠️ La sesión TG_SESSION está autenticada como BOT (@${me.username || '?'}), no como cuenta de usuario. Hay que regenerarla con generar-session.js usando el teléfono, no un token de bot.` };
-  }
-
+  try { me = await client.getMe(); } catch (e) { return { ok: false, message: `No se pudo verificar la cuenta del userbot: ${e.message}` }; }
+  if (me?.bot) return { ok: false, message: `⚠️ La sesión TG_SESSION está autenticada como BOT (@${me.username || '?'}), no como cuenta de usuario. Hay que regenerarla con generar-session.js usando el teléfono, no un token de bot.` };
   let entity;
-  try {
-    entity = await client.getEntity(chat);
-  } catch (e) {
-    return { ok: false, message: `No se pudo acceder a "${chat}". ¿La cuenta del userbot está unida a ese grupo? (${e.message})` };
-  }
-
-  const mensajes = await client.getMessages(entity, { limit: 50 });  let encontrado = null;
-  for (const msg of mensajes) { // del más reciente al más viejo
+  try { entity = await client.getEntity(chat); } catch (e) { return { ok: false, message: `No se pudo acceder a "${chat}". ¿La cuenta del userbot está unida a ese grupo? (${e.message})` }; }
+  const mensajes = await client.getMessages(entity, { limit: 50 });
+  let encontrado = null;
+  for (const msg of mensajes) {
     if (!msg.message) continue;
     const remitente = await msg.getSender();
     const username = remitente?.username ? `@${remitente.username}` : null;
     if (username === ORIGEN_ESPERADO) { encontrado = msg; break; }
   }
-  if (!encontrado) {
-    return { ok: false, message: `No encontré ningún mensaje de ${ORIGEN_ESPERADO} en los últimos 50 mensajes de "${chat}".` };
-  }
-
+  if (!encontrado) return { ok: false, message: `No encontré ningún mensaje de ${ORIGEN_ESPERADO} en los últimos 50 mensajes de "${chat}".` };
   const parsed = parsearMensajeResultado(encontrado.message);
   if (!parsed) return { ok: false, message: 'No se pudo parsear ese mensaje con el formato esperado.', texto: encontrado.message };
-
   const destino = await resolverLoteriaSorteo(parsed.clave);
   if (destino.error) return { ok: false, message: `No se pudo resolver lotería/sorteo para "${parsed.clave}": ${destino.error}`, texto: encontrado.message, parsed };
-
-  await guardarResultado({
-    loteriaId: destino.loteriaId, sorteoId: destino.sorteoId,
-    fijo: parsed.fijo, corrido: parsed.corrido, centena: parsed.centena, fecha: parsed.fecha,
-  });
-
+  await guardarResultado({ loteriaId: destino.loteriaId, sorteoId: destino.sorteoId, fijo: parsed.fijo, corrido: parsed.corrido, centena: parsed.centena, fecha: parsed.fecha });
   return { ok: true, texto: encontrado.message, parsed, destino };
 }
 
-module.exports = {
-  iniciarUserbotResultados,
-  crearClienteConectado,
-  buscarUltimoResultadoEnChat,
-  parsearMensajeResultado,
-  resolverLoteriaSorteo,
-  guardarResultado,
-  ORIGEN_ESPERADO,
-};
+module.exports = { iniciarUserbotResultados, crearClienteConectado, buscarUltimoResultadoEnChat, parsearMensajeResultado, resolverLoteriaSorteo, guardarResultado, ORIGEN_ESPERADO };
 
-// Permite seguir usándolo como script independiente (`node userbot-resultados.js`)
-// además de requerirlo desde bet-bootstrap.js o desde test-ultimo-resultado.js.
 if (require.main === module) {
   iniciarUserbotResultados().catch(e => { console.error('❌ Userbot no pudo iniciar:', e); });
 }
-
