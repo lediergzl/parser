@@ -56,7 +56,7 @@ function parsearCorreccion(texto, ambiguos, original) {
     }
   }
   const asignaciones = raw.split(/[;\n]+/).map(x => x.trim()).filter(Boolean);
-  const tieneAsignacion = asignaciones.some(x => /^\d{4}\s*=/ .test(x));
+  const tieneAsignacion = asignaciones.some(x => /^\d{4}\s*=/.test(x));
   if (tieneAsignacion) {
     for (const parte of asignaciones) {
       const m = parte.match(/^(\d{4})\s*=\s*(.+)$/);
@@ -81,6 +81,24 @@ async function registrarRevisionHumana(bot) {
   const adminIds = getAdminIds();
   const estados = new Map();
 
+  // Cierra automáticamente pendientes cuyo sorteo ya pasó su hora de cierre.
+  // Esto evita que una solicitud antigua bloquee al usuario indefinidamente.
+  async function expirarPendientesVencidas() {
+    try {
+      const { data, error } = await supabase.rpc('expire_pending_bets');
+      if (error) {
+        console.error('⚠️ No se pudieron expirar pendientes vencidas:', error);
+        return 0;
+      }
+      const cantidad = Number(data || 0);
+      if (cantidad > 0) console.log(`⏰ Pendientes vencidas marcadas como expired: ${cantidad}`);
+      return cantidad;
+    } catch (err) {
+      console.error('⚠️ Error expirando pendientes vencidas:', err);
+      return 0;
+    }
+  }
+
   async function avisarAdmins(pending) {
     const texto = [
       '⚠️ JUGADA REQUIERE ATENCIÓN HUMANA', '',
@@ -100,6 +118,7 @@ async function registrarRevisionHumana(bot) {
   }
 
   async function crearPendiente(ctx, texto, ambiguos) {
+    await expirarPendientesVencidas();
     const { data: existente, error: existenteError } = await supabase.from('pending_bets').select('id,status,original_input').eq('user_telegram_id', ctx.from.id).eq('status', 'pending').maybeSingle();
     if (existenteError) throw existenteError;
     if (existente) {
@@ -183,6 +202,7 @@ async function registrarRevisionHumana(bot) {
   // incluido en el aviso. Nunca se permite consultar la de otro usuario.
   bot.action(/^review_view_user_(\d+)$/, async ctx => {
     try { await ctx.answerCbQuery(); } catch (_) {}
+    await expirarPendientesVencidas();
     const pendingId = Number(ctx.match[1]);
     const { data: pending, error } = await supabase.from('pending_bets').select('id,user_telegram_id,loteria_id,sorteo_id,moneda,original_input,ambiguous_numbers,status,created_at').eq('id', pendingId).maybeSingle();
     if (error) return ctx.reply('❌ No se pudo cargar la jugada pendiente.');
@@ -201,18 +221,19 @@ async function registrarRevisionHumana(bot) {
       `📝 *Jugada original:*\n\`${String(pending.original_input || '').replace(/`/g, "'")}\`\n` +
       `🔢 Número(s) a revisar: ${ambiguos || 'N/D'}\n\n` +
       `${estadoTexto}\n\n` +
-      `❌ *No se ha calculado ni cobrado.*`,
+      (pending.status === 'expired' ? '⏰ *El sorteo ya cerró. Esta jugada no puede procesarse ni cobrarse.*' : '❌ *No se ha calculado ni cobrado.*'),
       { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '⬅️ Volver', callback_data: `review_view_user_back_${pending.id}` }]] } }
     );
   });
 
   bot.action(/^review_view_user_back_(\d+)$/, async ctx => {
     try { await ctx.answerCbQuery(); } catch (_) {}
+    await expirarPendientesVencidas();
     const pendingId = Number(ctx.match[1]);
     const { data: pending, error } = await supabase.from('pending_bets').select('id,user_telegram_id,status').eq('id', pendingId).maybeSingle();
     if (error) return ctx.reply('❌ No se pudo cargar la solicitud.');
     if (!pending || Number(pending.user_telegram_id) !== Number(ctx.from.id)) return ctx.reply('❌ No autorizado.');
-    if (pending.status !== 'pending') return ctx.editMessageText(`ℹ️ La solicitud #${pendingId} ya no está pendiente.`);
+    if (pending.status !== 'pending') return ctx.editMessageText(`ℹ️ La solicitud #${pendingId} ya no está pendiente. Estado: ${pending.status}`);
     await ctx.editMessageText(`⚠️ *Jugada requiere atención humana*\n\nLa jugada quedó registrada como solicitud *#${pendingId}*.\n\n❌ *No se ha realizado ningún cobro.*`, {
       parse_mode: 'Markdown',
       reply_markup: { inline_keyboard: [[{ text: `👁️ Ver jugada #${pendingId}`, callback_data: `review_view_user_${pendingId}` }]] }
@@ -222,6 +243,7 @@ async function registrarRevisionHumana(bot) {
   bot.action(/^review_edit_(\d+)$/, async ctx => {
     try { await ctx.answerCbQuery(); } catch (_) {}
     if (!adminIds.includes(ctx.from.id)) return ctx.reply('❌ No autorizado.');
+    await expirarPendientesVencidas();
     const pendingId = Number(ctx.match[1]);
     const { data: pending, error } = await supabase.from('pending_bets').select('id,original_input,ambiguous_numbers,status').eq('id', pendingId).maybeSingle();
     if (error) return ctx.reply('❌ No se pudo cargar la solicitud.');
@@ -246,6 +268,7 @@ async function registrarRevisionHumana(bot) {
 
   bot.command('revision', async ctx => {
     if (!adminIds.includes(ctx.from.id)) return ctx.reply('❌ No autorizado.');
+    await expirarPendientesVencidas();
     const { data: rows, error } = await supabase.from('pending_bets').select('id,user_telegram_id,original_input,ambiguous_numbers,created_at').eq('status', 'pending').order('created_at', { ascending: true }).limit(20);
     if (error) return ctx.reply('❌ No se pudieron cargar las revisiones.');
     if (!rows?.length) return ctx.reply('📋 No hay jugadas pendientes de revisión humana.');
