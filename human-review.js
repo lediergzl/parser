@@ -6,12 +6,36 @@ function getAdminIds() {
 }
 
 function detectarAmbiguos(texto) {
+  const raw = String(texto || '');
   const encontrados = [];
+
+  // Los importes finales no deben confundirse con números de 4 cifras.
+  // Ejemplos: "t5 candado 1500", "t5 candado 1500.00" y "... Total de 1101,00".
+  let rangoMontoFinal = null;
+  const montoFinal = raw.match(/(?:^|\s)(?:[$€£]\s*)?(\d+(?:[.,]\d{1,2})?)\s*[$€£]?\s*$/);
+  if (montoFinal) {
+    const inicioNumero = raw.length - montoFinal[1].length;
+    const prefijo = raw.slice(0, inicioNumero).trim();
+    const numero = montoFinal[1];
+    const tieneDecimal = /[.,]\d{1,2}$/.test(numero);
+    const tieneJugada = /(?:\b(?:t\d+|d\d+|parejas?|parle|p|candado|c|fijo|corrid[ao])\b|(?:^|\s)\d{1,3}(?=\s|$))/i.test(prefijo);
+
+    // Un decimal final es claramente un importe. Un entero de 4 cifras
+    // solo se trata como importe cuando antes ya existe una jugada reconocible.
+    // Así, "polito 1234" sigue siendo ambiguo.
+    if (tieneDecimal || (numero.length === 4 && tieneJugada)) {
+      rangoMontoFinal = [inicioNumero, raw.length];
+    }
+  }
+
   const regex = /(^|[^\d])([0-9]{4})(?=$|[^\d])/g;
   let match;
-  while ((match = regex.exec(String(texto || ''))) !== null) {
+  while ((match = regex.exec(raw)) !== null) {
+    const inicioNumero = match.index + match[1].length;
+    if (rangoMontoFinal && inicioNumero >= rangoMontoFinal[0] && inicioNumero < rangoMontoFinal[1]) continue;
+
     // Un bloque de 4 cifras inmediatamente después de "con" o "a" es un monto.
-    const antes = String(texto || '').slice(0, match.index + match[1].length);
+    const antes = raw.slice(0, inicioNumero);
     if (/\b(?:con|a)\s*$/i.test(antes)) continue;
     encontrados.push(match[2]);
   }
@@ -81,8 +105,6 @@ async function registrarRevisionHumana(bot) {
   const adminIds = getAdminIds();
   const estados = new Map();
 
-  // Cierra automáticamente pendientes cuyo sorteo ya pasó su hora de cierre.
-  // Esto evita que una solicitud antigua bloquee al usuario indefinidamente.
   async function expirarPendientesVencidas() {
     try {
       const { data, error } = await supabase.rpc('expire_pending_bets');
@@ -122,9 +144,7 @@ async function registrarRevisionHumana(bot) {
     const { data: existente, error: existenteError } = await supabase.from('pending_bets').select('id,status,original_input').eq('user_telegram_id', ctx.from.id).eq('status', 'pending').maybeSingle();
     if (existenteError) throw existenteError;
     if (existente) {
-      await ctx.reply(`⚠️ Ya tienes una jugada pendiente de revisión humana (#${existente.id}). No se ha realizado ningún cobro.`, {
-        reply_markup: { inline_keyboard: [[{ text: `👁️ Ver jugada #${existente.id}`, callback_data: `review_view_user_${existente.id}` }]] }
-      });
+      await ctx.reply(`⚠️ Ya tienes una jugada pendiente de revisión humana (#${existente.id}). No se ha realizado ningún cobro.`, { reply_markup: { inline_keyboard: [[{ text: `👁️ Ver jugada #${existente.id}`, callback_data: `review_view_user_${existente.id}` }]] } });
       return;
     }
     const { data: pref, error: prefError } = await supabase.from('user_preferences').select('loteria_id,sorteo_id,moneda').eq('telegram_id', ctx.from.id).maybeSingle();
@@ -133,15 +153,9 @@ async function registrarRevisionHumana(bot) {
       await ctx.reply('🎲 Primero selecciona una lotería y un sorteo con /start.');
       return;
     }
-    const { data: pending, error } = await supabase.from('pending_bets').insert([{
-      user_telegram_id: ctx.from.id, chat_id: ctx.chat.id, loteria_id: pref.loteria_id, sorteo_id: pref.sorteo_id,
-      moneda: pref.moneda || 'cup', original_input: texto, ambiguous_numbers: ambiguos, status: 'pending'
-    }]).select('*').single();
+    const { data: pending, error } = await supabase.from('pending_bets').insert([{ user_telegram_id: ctx.from.id, chat_id: ctx.chat.id, loteria_id: pref.loteria_id, sorteo_id: pref.sorteo_id, moneda: pref.moneda || 'cup', original_input: texto, ambiguous_numbers: ambiguos, status: 'pending' }]).select('*').single();
     if (error) throw error;
-    await ctx.reply(`⚠️ *Jugada requiere atención humana*\n\nSe detectó un número ambiguo de 4 cifras: *${ambiguos.join(', ')}*.\n\nEl bot no puede determinar de forma segura su interpretación.\n\n❌ *No se calculó ni se descontó saldo.*\n\nLa jugada quedó registrada como solicitud *#${pending.id}*.`, {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[{ text: `👁️ Ver jugada #${pending.id}`, callback_data: `review_view_user_${pending.id}` }]] }
-    });
+    await ctx.reply(`⚠️ *Jugada requiere atención humana*\n\nSe detectó un número ambiguo de 4 cifras: *${ambiguos.join(', ')}*.\n\nEl bot no puede determinar de forma segura su interpretación.\n\n❌ *No se calculó ni se descontó saldo.*\n\nLa jugada quedó registrada como solicitud *#${pending.id}*.`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: `👁️ Ver jugada #${pending.id}`, callback_data: `review_view_user_${pending.id}` }]] } });
     await avisarAdmins(pending);
   }
 
@@ -158,9 +172,7 @@ async function registrarRevisionHumana(bot) {
         const correccion = parsearCorreccion(texto, pending.ambiguous_numbers || [], pending.original_input);
         if (!correccion) {
           estados.set(ctx.from.id, state);
-          await ctx.reply(pending.ambiguous_numbers.length === 1
-            ? `❌ Corrección no válida. Escribe cómo interpretar *${pending.ambiguous_numbers[0]}*, por ejemplo: \`25 85\`, o pega la jugada completa ya corregida.`
-            : '❌ Corrección no válida. Usa `2585=25 85; 1234=12 34` o pega la jugada completa corregida.', { parse_mode: 'Markdown' });
+          await ctx.reply(pending.ambiguous_numbers.length === 1 ? `❌ Corrección no válida. Escribe cómo interpretar *${pending.ambiguous_numbers[0]}*, por ejemplo: \`25 85\`, o pega la jugada completa ya corregida.` : '❌ Corrección no válida. Usa `2585=25 85; 1234=12 34` o pega la jugada completa corregida.', { parse_mode: 'Markdown' });
           return;
         }
         const correctedInput = correccion.__fullInput ? correccion.__fullInput : reemplazarAmbiguos(pending.original_input, pending.ambiguous_numbers, correccion);
@@ -172,11 +184,7 @@ async function registrarRevisionHumana(bot) {
         const { error: updateError } = await supabase.from('pending_bets').update({ corrected_input: correctedInput, reviewed_by: ctx.from.id, reviewed_at: new Date(), status: 'approved', updated_at: new Date() }).eq('id', pending.id).eq('status', 'pending');
         if (updateError) throw updateError;
         await ctx.reply(`⏳ Procesando solicitud #${pending.id} con la corrección:\n\`${correctedInput}\``, { parse_mode: 'Markdown' });
-        await bot.handleUpdate({ update_id: nuevoUpdateId(), message: {
-          message_id: Math.floor(Date.now() / 1000), date: Math.floor(Date.now() / 1000),
-          chat: { id: pending.chat_id, type: 'private' },
-          from: { id: pending.user_telegram_id, is_bot: false, first_name: 'Usuario' }, text: correctedInput
-        }});
+        await bot.handleUpdate({ update_id: nuevoUpdateId(), message: { message_id: Math.floor(Date.now() / 1000), date: Math.floor(Date.now() / 1000), chat: { id: pending.chat_id, type: 'private' }, from: { id: pending.user_telegram_id, is_bot: false, first_name: 'Usuario' }, text: correctedInput } });
         const { data: bet, error: betError } = await supabase.from('bets').select('id,total_apuesta,saldo_antes,saldo_despues').eq('user_telegram_id', pending.user_telegram_id).eq('input_raw', correctedInput).order('id', { ascending: false }).limit(1).maybeSingle();
         if (betError) throw betError;
         if (!bet) {
@@ -198,8 +206,6 @@ async function registrarRevisionHumana(bot) {
     catch (err) { console.error('❌ Error creando revisión humana:', err && err.stack ? err.stack : err); await ctx.reply('❌ No se pudo registrar la jugada para revisión humana. No se descontó ningún saldo.'); }
   });
 
-  // El usuario puede consultar su propia solicitud pendiente desde el botón
-  // incluido en el aviso. Nunca se permite consultar la de otro usuario.
   bot.action(/^review_view_user_(\d+)$/, async ctx => {
     try { await ctx.answerCbQuery(); } catch (_) {}
     await expirarPendientesVencidas();
@@ -208,36 +214,21 @@ async function registrarRevisionHumana(bot) {
     if (error) return ctx.reply('❌ No se pudo cargar la jugada pendiente.');
     if (!pending) return ctx.reply('❌ La jugada pendiente no existe.');
     if (Number(pending.user_telegram_id) !== Number(ctx.from.id)) return ctx.reply('❌ No autorizado.');
-
     const { data: loteria } = await supabase.from('loterias').select('nombre').eq('id', pending.loteria_id).maybeSingle();
     const { data: sorteo } = await supabase.from('sorteos').select('nombre').eq('id', pending.sorteo_id).maybeSingle();
     const estadoTexto = pending.status === 'pending' ? '⏳ Pendiente de revisión humana' : `Estado: ${pending.status}`;
     const ambiguos = Array.isArray(pending.ambiguous_numbers) ? pending.ambiguous_numbers.join(', ') : String(pending.ambiguous_numbers || '');
-
-    await ctx.editMessageText(
-      `🔎 *Jugada pendiente #${pending.id}*\n\n` +
-      `🎰 ${loteria?.nombre || 'Lotería'} — ${sorteo?.nombre || 'Sorteo'}\n` +
-      `💵 Moneda: ${String(pending.moneda || 'cup').toUpperCase()}\n` +
-      `📝 *Jugada original:*\n\`${String(pending.original_input || '').replace(/`/g, "'")}\`\n` +
-      `🔢 Número(s) a revisar: ${ambiguos || 'N/D'}\n\n` +
-      `${estadoTexto}\n\n` +
-      (pending.status === 'expired' ? '⏰ *El sorteo ya cerró. Esta jugada no puede procesarse ni cobrarse.*' : '❌ *No se ha calculado ni cobrado.*'),
-      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '⬅️ Volver', callback_data: `review_view_user_back_${pending.id}` }]] } }
-    );
+    await ctx.editMessageText(`🔎 *Jugada pendiente #${pending.id}*\n\n` + `🎰 ${loteria?.nombre || 'Lotería'} — ${sorteo?.nombre || 'Sorteo'}\n` + `💵 Moneda: ${String(pending.moneda || 'cup').toUpperCase()}\n` + `📝 *Jugada original:*\n\`${String(pending.original_input || '').replace(/`/g, "'")}\`\n` + `🔢 Número(s) a revisar: ${ambiguos || 'N/D'}\n\n` + `${estadoTexto}\n\n` + (pending.status === 'expired' ? '⏰ *El sorteo ya cerró. Esta jugada no puede procesarse ni cobrarse.*' : '❌ *No se ha calculado ni cobrado.*'), { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '⬅️ Volver', callback_data: `review_view_user_back_${pending.id}` }]] } });
   });
 
   bot.action(/^review_view_user_back_(\d+)$/, async ctx => {
     try { await ctx.answerCbQuery(); } catch (_) {}
     await expirarPendientesVencidas();
     const pendingId = Number(ctx.match[1]);
-    const { data: pending, error } = await supabase.from('pending_bets').select('id,user_telegram_id,status').eq('id', pendingId).maybeSingle();
-    if (error) return ctx.reply('❌ No se pudo cargar la solicitud.');
+    const { data: pending } = await supabase.from('pending_bets').select('id,user_telegram_id,original_input,status,ambiguous_numbers').eq('id', pendingId).maybeSingle();
     if (!pending || Number(pending.user_telegram_id) !== Number(ctx.from.id)) return ctx.reply('❌ No autorizado.');
-    if (pending.status !== 'pending') return ctx.editMessageText(`ℹ️ La solicitud #${pendingId} ya no está pendiente. Estado: ${pending.status}`);
-    await ctx.editMessageText(`⚠️ *Jugada requiere atención humana*\n\nLa jugada quedó registrada como solicitud *#${pendingId}*.\n\n❌ *No se ha realizado ningún cobro.*`, {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[{ text: `👁️ Ver jugada #${pendingId}`, callback_data: `review_view_user_${pendingId}` }]] }
-    });
+    const estadoTexto = pending.status === 'pending' ? '⏳ Pendiente de revisión humana' : `Estado: ${pending.status}`;
+    await ctx.editMessageText(`🔎 *Solicitud #${pending.id}*\n\n📝 \`${String(pending.original_input || '').replace(/`/g, "'")}\`\n🔢 ${Array.isArray(pending.ambiguous_numbers) ? pending.ambiguous_numbers.join(', ') : ''}\n\n${estadoTexto}`, { parse_mode: 'Markdown' });
   });
 
   bot.action(/^review_edit_(\d+)$/, async ctx => {
@@ -245,36 +236,36 @@ async function registrarRevisionHumana(bot) {
     if (!adminIds.includes(ctx.from.id)) return ctx.reply('❌ No autorizado.');
     await expirarPendientesVencidas();
     const pendingId = Number(ctx.match[1]);
-    const { data: pending, error } = await supabase.from('pending_bets').select('id,original_input,ambiguous_numbers,status').eq('id', pendingId).maybeSingle();
+    const { data: pending, error } = await supabase.from('pending_bets').select('*').eq('id', pendingId).eq('status', 'pending').maybeSingle();
     if (error) return ctx.reply('❌ No se pudo cargar la solicitud.');
-    if (!pending || pending.status !== 'pending') return ctx.reply('❌ Esta solicitud ya no está pendiente.');
+    if (!pending) return ctx.reply('❌ La solicitud ya no está pendiente (puede haber sido procesada, rechazada o vencida).');
     estados.set(ctx.from.id, { pendingId });
-    const ejemplo = pending.ambiguous_numbers.length === 1 ? `Escribe cómo interpretar *${pending.ambiguous_numbers[0]}*. Ejemplo: \`25 85\`\n\nTambién puedes pegar la jugada completa ya corregida.` : 'Escribe cada corrección como `2585=25 85; 1234=12 34`, o pega la jugada completa corregida.';
-    await ctx.reply(`✏️ *Corrección de solicitud #${pending.id}*\n\nJugada original:\n\`${pending.original_input}\`\n\n${ejemplo}\n\nNo se cobrará nada hasta que la jugada corregida pase nuevamente por el motor y las validaciones.`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✏️ *Corregir jugada #${pending.id}*\n\nJugada original:\n\`${String(pending.original_input || '').replace(/`/g, "'")}\`\n\nNúmero(s) ambiguo(s): *${(pending.ambiguous_numbers || []).join(', ')}*\n\nEscribe la interpretación, por ejemplo:\n\`25 85\`\n\no pega la jugada completa corregida.`, { parse_mode: 'Markdown' });
   });
 
   bot.action(/^review_reject_(\d+)$/, async ctx => {
     try { await ctx.answerCbQuery(); } catch (_) {}
     if (!adminIds.includes(ctx.from.id)) return ctx.reply('❌ No autorizado.');
+    await expirarPendientesVencidas();
     const pendingId = Number(ctx.match[1]);
-    const { data: pending, error } = await supabase.from('pending_bets').select('user_telegram_id,status').eq('id', pendingId).maybeSingle();
-    if (error || !pending) return ctx.reply('❌ Solicitud no encontrada.');
-    if (pending.status !== 'pending') return ctx.reply('ℹ️ La solicitud ya fue atendida.');
-    await supabase.from('pending_bets').update({ status: 'rejected', reviewed_by: ctx.from.id, reviewed_at: new Date(), updated_at: new Date() }).eq('id', pendingId).eq('status', 'pending');
-    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-    await ctx.reply(`❌ Solicitud #${pendingId} rechazada. No se realizó ningún cobro.`);
-    try { await bot.telegram.sendMessage(pending.user_telegram_id, `❌ La jugada pendiente #${pendingId} fue rechazada por atención humana. No se descontó saldo.`); } catch (_) {}
+    const { data: pending, error } = await supabase.from('pending_bets').select('*').eq('id', pendingId).eq('status', 'pending').maybeSingle();
+    if (error) return ctx.reply('❌ No se pudo cargar la solicitud.');
+    if (!pending) return ctx.reply('❌ La solicitud ya no está pendiente.');
+    const { error: updateError } = await supabase.from('pending_bets').update({ status: 'rejected', reviewed_by: ctx.from.id, reviewed_at: new Date(), updated_at: new Date() }).eq('id', pending.id).eq('status', 'pending');
+    if (updateError) return ctx.reply('❌ No se pudo rechazar la solicitud.');
+    await ctx.reply(`❌ Solicitud #${pending.id} rechazada. No se realizó ningún cobro.`);
+    try { await bot.telegram.sendMessage(pending.user_telegram_id, `❌ Tu solicitud #${pending.id} fue rechazada por administración. No se realizó ningún cobro.`); } catch (_) {}
   });
 
   bot.command('revision', async ctx => {
-    if (!adminIds.includes(ctx.from.id)) return ctx.reply('❌ No autorizado.');
+    if (!adminIds.includes(ctx.from.id)) return;
     await expirarPendientesVencidas();
-    const { data: rows, error } = await supabase.from('pending_bets').select('id,user_telegram_id,original_input,ambiguous_numbers,created_at').eq('status', 'pending').order('created_at', { ascending: true }).limit(20);
-    if (error) return ctx.reply('❌ No se pudieron cargar las revisiones.');
-    if (!rows?.length) return ctx.reply('📋 No hay jugadas pendientes de revisión humana.');
-    for (const r of rows) {
-      const keyboard = { inline_keyboard: [[{ text: `✏️ Corregir #${r.id}`, callback_data: `review_edit_${r.id}` }], [{ text: `❌ Rechazar #${r.id}`, callback_data: `review_reject_${r.id}` }]] };
-      await ctx.reply(`📋 *Solicitud #${r.id}*\nUsuario: ${r.user_telegram_id}\nJugada: \`${r.original_input}\`\nAmbiguo(s): ${r.ambiguous_numbers.join(', ')}`, { parse_mode: 'Markdown', reply_markup: keyboard });
+    const { data, error } = await supabase.from('pending_bets').select('*').eq('status', 'pending').order('created_at', { ascending: true });
+    if (error) return ctx.reply('❌ No se pudo consultar la cola de revisión.');
+    if (!data?.length) return ctx.reply('✅ No hay jugadas pendientes de revisión.');
+    for (const p of data) {
+      const texto = [`⚠️ #${p.id}`, `Usuario: ${p.user_telegram_id}`, `Lotería: ${p.loteria_id}`, `Sorteo: ${p.sorteo_id}`, `Jugada: ${p.original_input}`, `Ambiguos: ${(p.ambiguous_numbers || []).join(', ')}`].join('\n');
+      await ctx.reply(texto, { reply_markup: { inline_keyboard: [[{ text: '✏️ Corregir jugada', callback_data: `review_edit_${p.id}` }, { text: '❌ Rechazar', callback_data: `review_reject_${p.id}` }]] } });
     }
   });
 }
