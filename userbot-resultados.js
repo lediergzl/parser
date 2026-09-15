@@ -180,6 +180,7 @@ async function iniciarUserbotResultados() {
     console.warn('    Corre generar-session.js una vez (localmente, con consola) y define esas 3 variables.');
     return; // nunca tumba el proceso principal por esto
   }
+  global.__USERBOT_CLIENT__ = client; // reutilizable por comandos manuales (ej. /probar_resultado)
   console.log('✅ Userbot conectado, escuchando resultados de', ORIGEN_ESPERADO);
 
   client.addEventHandler(async (event) => {
@@ -217,9 +218,52 @@ async function iniciarUserbotResultados() {
   }, new NewMessage({}));
 }
 
+// Reusa el cliente YA conectado por iniciarUserbotResultados (no abre una
+// segunda conexión con la misma sesión, eso puede provocar desconexiones).
+// Pensado para dispararse manualmente, ej. desde un comando /probar_resultado.
+async function buscarUltimoResultadoEnChat(chat) {
+  const client = global.__USERBOT_CLIENT__;
+  if (!client) {
+    return { ok: false, message: 'El userbot no está conectado (revisa TG_API_ID / TG_API_HASH / TG_SESSION).' };
+  }
+
+  let entity;
+  try {
+    entity = await client.getEntity(chat);
+  } catch (e) {
+    return { ok: false, message: `No se pudo acceder a "${chat}". ¿La cuenta del userbot está unida a ese grupo? (${e.message})` };
+  }
+
+  const mensajes = await client.getMessages(entity, { limit: 50 });
+  let encontrado = null;
+  for (const msg of mensajes) { // del más reciente al más viejo
+    if (!msg.message) continue;
+    const remitente = await msg.getSender();
+    const username = remitente?.username ? `@${remitente.username}` : null;
+    if (username === ORIGEN_ESPERADO) { encontrado = msg; break; }
+  }
+  if (!encontrado) {
+    return { ok: false, message: `No encontré ningún mensaje de ${ORIGEN_ESPERADO} en los últimos 50 mensajes de "${chat}".` };
+  }
+
+  const parsed = parsearMensajeResultado(encontrado.message);
+  if (!parsed) return { ok: false, message: 'No se pudo parsear ese mensaje con el formato esperado.', texto: encontrado.message };
+
+  const destino = await resolverLoteriaSorteo(parsed.clave);
+  if (!destino) return { ok: false, message: `No se pudo resolver lotería/sorteo para "${parsed.clave}".`, texto: encontrado.message, parsed };
+
+  await guardarResultado({
+    loteriaId: destino.loteriaId, sorteoId: destino.sorteoId,
+    fijo: parsed.fijo, corrido: parsed.corrido, centena: parsed.centena, fecha: parsed.fecha,
+  });
+
+  return { ok: true, texto: encontrado.message, parsed, destino };
+}
+
 module.exports = {
   iniciarUserbotResultados,
   crearClienteConectado,
+  buscarUltimoResultadoEnChat,
   parsearMensajeResultado,
   resolverLoteriaSorteo,
   guardarResultado,

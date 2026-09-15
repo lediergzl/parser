@@ -98,6 +98,39 @@ async function registrarModuloComercial(bot) {
     if (error) throw error;
   }
 
+  // ── COMANDO: probar el userbot con el último resultado ya publicado ──
+  // No espera al próximo sorteo: busca el último mensaje de @boliterostop_bot
+  // en el grupo indicado y lo procesa con el mismo pipeline de producción.
+  bot.command('probar_resultado', async (ctx) => {
+    if (!adminIds.includes(ctx.from.id)) return ctx.reply('⛔ Solo el admin puede hacer esto.');
+    const parts = ctx.message.text.trim().split(/\s+/);
+    const chat = parts[1] || '@MentesMillonariasbolitachat';
+
+    await ctx.reply(`🔎 Buscando el último resultado de @boliterostop_bot en ${chat}...`);
+    const { buscarUltimoResultadoEnChat } = require('./userbot-resultados');
+    let r;
+    try {
+      r = await buscarUltimoResultadoEnChat(chat);
+    } catch (e) {
+      console.error('probar_resultado error:', e);
+      return ctx.reply(`❌ Error inesperado: ${e.message}`);
+    }
+
+    if (!r.ok) {
+      let msg = `❌ ${r.message}`;
+      if (r.texto) msg += `\n\nTexto del mensaje:\n${r.texto}`;
+      return ctx.reply(msg);
+    }
+
+    await ctx.reply(
+      `✅ Resultado guardado desde ${chat}:\n\n` +
+      `${r.texto}\n\n` +
+      `Parseado: fijo ${r.parsed.fijo || '-'}, corrido ${r.parsed.corrido || '-'}, centena ${r.parsed.centena || '-'}\n` +
+      `Lotería/sorteo: loteria_id=${r.destino.loteriaId}, sorteo_id=${r.destino.sorteoId}\n\n` +
+      `Revisa /premios para ver si hubo ganadores.`
+    );
+  });
+
   // ── COMANDO: promover comercial (solo admin) ─────────────────────────
   bot.command('comercial_add', async (ctx) => {
     if (!adminIds.includes(ctx.from.id)) return ctx.reply('⛔ Solo el admin puede hacer esto.');
