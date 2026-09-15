@@ -164,15 +164,22 @@ async function guardarResultado({ loteriaId, sorteoId, fijo, corrido, centena, f
   }
 }
 
-async function iniciarUserbotResultados() {
+async function crearClienteConectado() {
   if (!apiId || !apiHash || !sessionString) {
-    console.warn('⚠️  Userbot de resultados desactivado: faltan TG_API_ID / TG_API_HASH / TG_SESSION.');
+    console.warn('⚠️  Faltan TG_API_ID / TG_API_HASH / TG_SESSION.');
+    return null;
+  }
+  const client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, { connectionRetries: 5 });
+  await client.connect();
+  return client;
+}
+
+async function iniciarUserbotResultados() {
+  const client = await crearClienteConectado();
+  if (!client) {
     console.warn('    Corre generar-session.js una vez (localmente, con consola) y define esas 3 variables.');
     return; // nunca tumba el proceso principal por esto
   }
-
-  const client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, { connectionRetries: 5 });
-  await client.connect();
   console.log('✅ Userbot conectado, escuchando resultados de', ORIGEN_ESPERADO);
 
   client.addEventHandler(async (event) => {
@@ -210,11 +217,18 @@ async function iniciarUserbotResultados() {
   }, new NewMessage({}));
 }
 
+module.exports = {
+  iniciarUserbotResultados,
+  crearClienteConectado,
+  parsearMensajeResultado,
+  resolverLoteriaSorteo,
+  guardarResultado,
+  ORIGEN_ESPERADO,
+};
+
 // Permite seguir usándolo como script independiente (`node userbot-resultados.js`)
-// además de requerirlo desde bet-bootstrap.js.
+// además de requerirlo desde bet-bootstrap.js o desde test-ultimo-resultado.js.
 if (require.main === module) {
   iniciarUserbotResultados().catch(e => { console.error('❌ Userbot no pudo iniciar:', e); });
-} else {
-  module.exports = { iniciarUserbotResultados };
 }
 
