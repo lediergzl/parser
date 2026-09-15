@@ -37,13 +37,22 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 // publica (si ahí es donde lo viste).
 const ORIGEN_ESPERADO = process.env.RESULTADOS_ORIGEN || '@boliterostop_bot';
 
-// Términos en inglés que usa @boliterostop_bot → nombre del sorteo en tu
-// catálogo (Día/Tarde/Noche). Georgia tiene 3 sorteos; Florida y New York, 2.
-// Las claves se comparan ya normalizadas (minúsculas, sin acentos).
-const TERMINO_A_SORTEO = {
-  'florida':  { midday: 'Día', day: 'Día', evening: 'Noche', night: 'Noche' },
-  'new york': { midday: 'Día', day: 'Día', evening: 'Noche', night: 'Noche' },
-  'georgia':  { midday: 'Día', day: 'Día', evening: 'Tarde', night: 'Noche' },
+// El bot mezcla inglés y español según la lotería ("Georgia - Night" vs
+// "New York - Medio Día"), así que primero se normaliza el término a un
+// concepto genérico (mediodia/tarde/noche) y luego cada lotería lo mapea a
+// su sorteo real. Georgia tiene 3 sorteos; Florida y New York, 2 (sin
+// "Tarde" — "evening"/"tarde" en esas dos cae en "Noche").
+const TERMINO_GENERICO = {
+  midday: 'mediodia', day: 'mediodia', noon: 'mediodia',
+  'medio dia': 'mediodia', mediodia: 'mediodia', dia: 'mediodia',
+  evening: 'tarde', tarde: 'tarde', atardecer: 'tarde',
+  night: 'noche', noche: 'noche',
+};
+
+const CONCEPTO_A_SORTEO = {
+  'florida':  { mediodia: 'Día', tarde: 'Noche', noche: 'Noche' },
+  'new york': { mediodia: 'Día', tarde: 'Noche', noche: 'Noche' },
+  'georgia':  { mediodia: 'Día', tarde: 'Tarde', noche: 'Noche' },
 };
 
 function normalizar(s) {
@@ -91,11 +100,13 @@ async function resolverLoteriaSorteo(claveLinea) {
   if (!loteriaNombre || !termino) return null;
 
   const loteriaKey = normalizar(loteriaNombre);
-  const dict = TERMINO_A_SORTEO[loteriaKey];
+  const dict = CONCEPTO_A_SORTEO[loteriaKey];
   if (!dict) return null; // lotería no está en el catálogo que conocemos
 
-  const nombreSorteo = dict[normalizar(termino)];
-  if (!nombreSorteo) return null; // término desconocido para esa lotería
+  const concepto = TERMINO_GENERICO[normalizar(termino)];
+  if (!concepto) return null; // término desconocido (ni inglés ni español)
+  const nombreSorteo = dict[concepto];
+  if (!nombreSorteo) return null; // esa lotería no tiene ese sorteo
 
   const loteriaId = await obtenerLoteriaId(loteriaNombre);
   if (!loteriaId) return null;
