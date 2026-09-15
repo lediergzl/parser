@@ -50,6 +50,17 @@ function fmtMoney(value) {
   return Number(value || 0).toFixed(2);
 }
 
+function fechaActualCuba() {
+  const partes = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Havana',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date());
+  const mapa = Object.fromEntries(partes.map(p => [p.type, p.value]));
+  return `${mapa.year}-${mapa.month}-${mapa.day}`;
+}
+
 async function registerMenuCallbacks(bot) {
   const { createClient } = require('@supabase/supabase-js');
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -166,11 +177,17 @@ async function registerMenuCallbacks(bot) {
       if (!sorteoIds.length) {
         return ctx.editMessageText('📋 *Mis Jugadas*\n\nLa lotería seleccionada no tiene sorteos configurados.', { parse_mode: 'Markdown', ...mainKeyboard });
       }
-      const { data: bets, error } = await supabase.from('bets').select('id,fecha_apuesta,total_apuesta,moneda,created_at,sorteos(nombre)').eq('user_telegram_id', ctx.from.id).in('sorteo_id', sorteoIds).order('created_at', { ascending: false }).limit(10);
+      const fechaHoy = fechaActualCuba();
+      const { data: bets, error } = await supabase.from('bets').select('id,fecha_apuesta,total_apuesta,moneda,created_at,sorteos(nombre)')
+        .eq('user_telegram_id', ctx.from.id)
+        .eq('fecha_apuesta', fechaHoy)
+        .in('sorteo_id', sorteoIds)
+        .order('created_at', { ascending: false })
+        .limit(10);
       if (error) throw error;
-      if (!bets?.length) return ctx.editMessageText('📋 *Mis Jugadas*\n\nNo tienes jugadas registradas para la lotería seleccionada.', { parse_mode: 'Markdown', ...mainKeyboard });
+      if (!bets?.length) return ctx.editMessageText(`📋 *Mis Jugadas*\n\nNo tienes jugadas registradas para hoy (${fechaHoy}).`, { parse_mode: 'Markdown', ...mainKeyboard });
       const lines = bets.map((b, i) => `${i + 1}. ${b.fecha_apuesta} — ${b.sorteos?.nombre || 'Sorteo'} — $${fmtMoney(b.total_apuesta)} ${String(b.moneda || 'cup').toUpperCase()}`);
-      await ctx.editMessageText(`📋 *Mis Jugadas*\n\n${lines.join('\n')}`, { parse_mode: 'Markdown', ...mainKeyboard });
+      await ctx.editMessageText(`📋 *Mis Jugadas — ${fechaHoy}*\n\n${lines.join('\n')}`, { parse_mode: 'Markdown', ...mainKeyboard });
     } catch (err) {
       console.error('mis jugadas:', err);
       await ctx.editMessageText('❌ No se pudieron cargar tus jugadas.', mainKeyboard);
@@ -241,12 +258,11 @@ async function registerMenuCallbacks(bot) {
     const state = depositStates.get(userId);
     if (!state) return next();
     const text = String(ctx.message?.text || '').trim();
-    if (!text || text.startsWith('/')) return next();
-
+    if (!text) return;
     if (state.step === 'amount') {
-      const amount = Number(text.replace(',', '.').replace(/[^0-9.]/g, ''));
+      const amount = Number(text.replace(',', '.'));
       if (!Number.isFinite(amount) || amount <= 0) {
-        await ctx.reply('❌ Monto inválido. Escribe solamente un monto positivo, por ejemplo: 1000');
+        await ctx.reply('❌ Escribe un monto válido.');
         return;
       }
       if (amount > 100000000) {
