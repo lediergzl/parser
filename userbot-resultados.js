@@ -55,8 +55,19 @@ const CONCEPTO_A_SORTEO = {
   'georgia':  { mediodia: 'Día', tarde: 'Tarde', noche: 'Noche' },
 };
 
-function normalizar(s) {
+// El bot a veces usa caracteres Unicode invisibles/anchos raros para
+// espaciar el texto (zero-width space, NBSP, etc.) que el .trim() normal de
+// JS NO elimina — mismo patrón que ya existe en lotopro-core.bundle.js
+// (normalizeSpaces). Sin esto, "New York" con un invisible pegado adelante
+// nunca hace match exacto contra la fila real de la tabla loterias.
+function limpiarInvisibles(s) {
   return String(s || '')
+    .replace(/[\u200B\u200C\u200D\uFEFF\u2060\u00AD]/g, '')
+    .replace(/[\u00A0\u2007\u2008\u2009\u200A\u202F\u205F\u3000]/g, ' ');
+}
+
+function normalizar(s) {
+  return limpiarInvisibles(s)
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ')
@@ -65,8 +76,9 @@ function normalizar(s) {
 
 // "Georgia - Night" -> { loteriaNombre: "Georgia", termino: "Night" }
 function separarLoteriaYTermino(claveLinea) {
-  const m = claveLinea.match(/^(.+?)\s*-\s*(.+)$/);
-  if (!m) return { loteriaNombre: claveLinea.trim(), termino: null };
+  const limpio = limpiarInvisibles(claveLinea).trim();
+  const m = limpio.match(/^(.+?)\s*-\s*(.+)$/);
+  if (!m) return { loteriaNombre: limpio, termino: null };
   return { loteriaNombre: m[1].trim(), termino: m[2].trim() };
 }
 
@@ -135,6 +147,7 @@ async function resolverLoteriaSorteo(claveLinea) {
 //   corrido = últimos 2 dígitos de Pick 4
 function parsearMensajeResultado(texto) {
   if (!texto) return null;
+  texto = limpiarInvisibles(texto);
   const lineas = texto.split('\n').map(l => l.trim()).filter(Boolean);
   if (!lineas.length) return null;
 
