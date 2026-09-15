@@ -38,8 +38,6 @@ function normalizar(s) {
     .trim();
 }
 
-// Acepta mensajes como "🎉 New York - Medio Día" eliminando cualquier
-// símbolo/emoji decorativo antes de la primera letra o número.
 function separarLoteriaYTermino(claveLinea) {
   let limpio = limpiarInvisibles(claveLinea).trim();
   limpio = limpio.replace(/^[^\p{L}\p{N}]*/u, '').trim();
@@ -62,7 +60,7 @@ async function obtenerLoteriaId(nombre) {
   if (cacheLoteriaId.has(key)) return { id: cacheLoteriaId.get(key) };
   const { data, error } = await supabase.from('loterias').select('id').ilike('nombre', nombre).maybeSingle();
   if (error) return { error: error.message };
-  if (!data) return { error: `no existe una lotería con nombre "${nombre}" [${dumpCodePoints(nombre)}] en la tabla loterias` };
+  if (!data) return { error: `no existe una lotería con nombre "${nombre}" [${dumpCodePoints(nombre)}] en la tabla loterias`, noExiste: true };
   cacheLoteriaId.set(key, data.id);
   return { id: data.id };
 }
@@ -81,16 +79,23 @@ async function obtenerSorteoId(loteriaId, nombreSorteo) {
 async function resolverLoteriaSorteo(claveLinea) {
   const { loteriaNombre, termino } = separarLoteriaYTermino(claveLinea);
   if (!loteriaNombre || !termino) return { error: `no se pudo separar lotería/término de "${claveLinea}"` };
+
+  // PRIMER FILTRO: la lotería debe existir en la BD. Si no existe,
+  // el resultado externo se ignora y no se parsea ni se guarda.
+  const loteria = await obtenerLoteriaId(loteriaNombre);
+  if (loteria.error) {
+    if (loteria.noExiste) return { ignorar: true };
+    return { error: `buscando lotería "${loteriaNombre}": ${loteria.error}` };
+  }
+
   const loteriaKey = normalizar(loteriaNombre);
   const dict = CONCEPTO_A_SORTEO[loteriaKey];
-  if (!dict) return { error: `lotería "${loteriaNombre}" (normalizada "${loteriaKey}") no está en CONCEPTO_A_SORTEO` };
+  if (!dict) return { error: `la lotería "${loteriaNombre}" existe en BD pero no tiene configuración de sorteos` };
   const conceptoKey = normalizar(termino);
   const concepto = TERMINO_GENERICO[conceptoKey];
   if (!concepto) return { error: `término "${termino}" (normalizado "${conceptoKey}") no está en TERMINO_GENERICO` };
   const nombreSorteo = dict[concepto];
   if (!nombreSorteo) return { error: `"${loteriaKey}" no tiene sorteo mapeado para el concepto "${concepto}"` };
-  const loteria = await obtenerLoteriaId(loteriaNombre);
-  if (loteria.error) return { error: `buscando lotería "${loteriaNombre}": ${loteria.error}` };
   const sorteo = await obtenerSorteoId(loteria.id, nombreSorteo);
   if (sorteo.error) return { error: `buscando sorteo "${nombreSorteo}": ${sorteo.error}` };
   return { loteriaId: loteria.id, sorteoId: sorteo.id };
@@ -165,15 +170,26 @@ async function iniciarUserbotResultados() {
       const remitente = await msg.getSender();
       const username = remitente?.username ? `@${remitente.username}` : null;
       if (username !== ORIGEN_ESPERADO) return;
-      console.log('📩 Mensaje de', username, ':\n', msg.message, '\n---');
-      const parsed = parsearMensajeResultado(msg.message);
-      if (!parsed) {
-        console.log('⚠️  No se pudo parsear (parser pendiente de completar). Texto crudo arriba ☝️');
+
+      // El primer renglón identifica la lotería. La consultamos en BD ANTES
+      // de hacer cualquier parseo del resultado. Las loterías no registradas
+      // se ignoran completamente.
+      const texto = limpiarInvisibles(msg.message);
+      const primeraLinea = texto.split('\n').map(l => l.trim()).find(Boolean) || '';
+      const destino = await resolverLoteriaSorteo(primeraLinea);
+      if (destino.ignorar) {
+        console.log(`⏭️ Resultado ignorado: la lotería de "${primeraLinea}" no existe en la BD.`);
         return;
       }
-      const destino = await resolverLoteriaSorteo(parsed.clave);
       if (destino.error) {
-        console.log(`⚠️  No se pudo resolver lotería/sorteo para "${parsed.clave}": ${destino.error}`);
+        console.log(`⚠️ No se pudo resolver lotería/sorteo para "${primeraLinea}": ${destino.error}`);
+        return;
+      }
+
+      console.log('📩 Resultado aceptado de', username, ':\n', msg.message, '\n---');
+      const parsed = parsearMensajeResultado(texto);
+      if (!parsed) {
+        console.log('⚠️ No se pudo parsear el resultado de una lotería registrada.');
         return;
       }
       await guardarResultado({ loteriaId: destino.loteriaId, sorteoId: destino.sorteoId, fijo: parsed.fijo, corrido: parsed.corrido, centena: parsed.centena, fecha: parsed.fecha });
@@ -200,10 +216,13 @@ async function buscarUltimoResultadoEnChat(chat) {
     if (username === ORIGEN_ESPERADO) { encontrado = msg; break; }
   }
   if (!encontrado) return { ok: false, message: `No encontré ningún mensaje de ${ORIGEN_ESPERADO} en los últimos 50 mensajes de "${chat}".` };
-  const parsed = parsearMensajeResultado(encontrado.message);
+  const texto = limpiarInvisibles(encontrado.message);
+  const primeraLinea = texto.split('\n').map(l => l.trim()).find(Boolean) || '';
+  const destino = await resolverLoteriaSorteo(primeraLinea);
+  if (destino.ignorar) return { ok: false, message: `La lotería de "${primeraLinea}" no existe en la BD; resultado ignorado.` };
+  if (destino.error) return { ok: false, message: `No se pudo resolver lotería/sorteo para "${primeraLinea}": ${destino.error}`, texto: encontrado.message };
+  const parsed = parsearMensajeResultado(texto);
   if (!parsed) return { ok: false, message: 'No se pudo parsear ese mensaje con el formato esperado.', texto: encontrado.message };
-  const destino = await resolverLoteriaSorteo(parsed.clave);
-  if (destino.error) return { ok: false, message: `No se pudo resolver lotería/sorteo para "${parsed.clave}": ${destino.error}`, texto: encontrado.message, parsed };
   await guardarResultado({ loteriaId: destino.loteriaId, sorteoId: destino.sorteoId, fijo: parsed.fijo, corrido: parsed.corrido, centena: parsed.centena, fecha: parsed.fecha });
   return { ok: true, texto: encontrado.message, parsed, destino };
 }
