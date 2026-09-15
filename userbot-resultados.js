@@ -181,7 +181,13 @@ async function iniciarUserbotResultados() {
     return; // nunca tumba el proceso principal por esto
   }
   global.__USERBOT_CLIENT__ = client; // reutilizable por comandos manuales (ej. /probar_resultado)
-  console.log('✅ Userbot conectado, escuchando resultados de', ORIGEN_ESPERADO);
+  try {
+    const me = await client.getMe();
+    console.log(`✅ Userbot conectado como ${me?.bot ? 'BOT ⚠️ (debería ser cuenta de usuario)' : 'usuario'}: @${me?.username || '?'} (id ${me?.id})`);
+  } catch (e) {
+    console.warn('⚠️ No se pudo verificar la identidad de la sesión del userbot:', e.message);
+  }
+  console.log('👂 Escuchando resultados de', ORIGEN_ESPERADO);
 
   client.addEventHandler(async (event) => {
     try {
@@ -227,6 +233,19 @@ async function buscarUltimoResultadoEnChat(chat) {
     return { ok: false, message: 'El userbot no está conectado (revisa TG_API_ID / TG_API_HASH / TG_SESSION).' };
   }
 
+  // Diagnóstico: confirmar que la sesión es una cuenta de USUARIO real, no
+  // un bot — BOT_METHOD_INVALID en getMessages casi siempre significa que
+  // la sesión terminó autenticada como bot en vez de como usuario.
+  let me;
+  try {
+    me = await client.getMe();
+  } catch (e) {
+    return { ok: false, message: `No se pudo verificar la cuenta del userbot: ${e.message}` };
+  }
+  if (me?.bot) {
+    return { ok: false, message: `⚠️ La sesión TG_SESSION está autenticada como BOT (@${me.username || '?'}), no como cuenta de usuario. Hay que regenerarla con generar-session.js usando el teléfono, no un token de bot.` };
+  }
+
   let entity;
   try {
     entity = await client.getEntity(chat);
@@ -234,8 +253,7 @@ async function buscarUltimoResultadoEnChat(chat) {
     return { ok: false, message: `No se pudo acceder a "${chat}". ¿La cuenta del userbot está unida a ese grupo? (${e.message})` };
   }
 
-  const mensajes = await client.getMessages(entity, { limit: 50 });
-  let encontrado = null;
+  const mensajes = await client.getMessages(entity, { limit: 50 });  let encontrado = null;
   for (const msg of mensajes) { // del más reciente al más viejo
     if (!msg.message) continue;
     const remitente = await msg.getSender();
