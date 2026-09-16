@@ -31,9 +31,6 @@ function registrarRutas(app, estaListo) {
     return;
   }
 
-  // Lo usa el pinger externo (cron-job.org / UptimeRobot) para que Render no
-  // duerma el servicio a los 15 min de inactividad en el plan free.
-  // /ping (index.js) se mantiene; /health añade el estado de WhatsApp.
   app.get('/health', (_req, res) => {
     res.json({
       ok: true,
@@ -42,8 +39,6 @@ function registrarRutas(app, estaListo) {
     });
   });
 
-  // Entrada opcional: si en el futuro el parser corre como proceso aparte,
-  // puede publicar la jugada aquí en vez de emitir el evento en memoria.
   app.post('/api/jugadas', (req, res) => {
     const jugada = req.body;
     if (!jugada?.betId && !jugada?.bet_id) {
@@ -71,12 +66,17 @@ async function iniciarIntegracionWhatsapp(app) {
     registrarRutas(app, estaListo);
 
     const supabase = crearClienteSupabase();
+
+    // Carga el destino persistido y registra los comandos administrativos de
+    // Telegram antes de conectar Baileys. Así WA_GROUP_ID queda disponible
+    // para el sender y no hay que editar Render cada vez que cambia el destino.
+    const { registrarControlDestino } = require('./lib/whatsapp-destino');
+    await registrarControlDestino(supabase);
+
     registrarEntregaDeJugadas(supabase);
     await sender.conectarWhatsapp(supabase);
     return { habilitado: true };
   } catch (err) {
-    // La integración es secundaria: si falla, el bot de Telegram sigue operando
-    // y la notificación por Cloud API (whatsapp.js) no se ve afectada.
     registrarRutas(app, estaListo);
     console.error('❌ No se pudo iniciar la integración de WhatsApp (Baileys):', err && err.stack ? err.stack : err);
     return { habilitado: false, error: err };
