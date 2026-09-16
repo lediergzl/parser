@@ -1,21 +1,12 @@
 // ============================================================================
-// premios.js — Detección, cálculo y notificación de jugadas ganadoras.
-// Compartido por banca.js (bot Telegraf) y userbot-resultados.js (proceso
-// que escucha a @boliterostop_bot), para no duplicar la lógica.
-//
-// Uso:
-//   const { detectarPremios, PAYOUT_MULTIPLIERS } = require('./premios.js');
-//   await detectarPremios(supabase, resultadoRow);
+// premios.js — Persistencia y notificación de premios.
+// La detección/cálculo de ganadores vive en ganadores.js.
 // ============================================================================
 
-const PAYOUT_MULTIPLIERS = {
-  fijo: 80,
-  corrido: 30,
-  centena: 500,
-  centena_global: 500,
-  parle: 1000,
-  parle_global: 1000,
-};
+const {
+  PAYOUT_MULTIPLIERS,
+  obtenerGanadoresDelResultado,
+} = require('./ganadores.js');
 
 function obtenerTelegramId(bet) {
   const candidatos = [
@@ -36,12 +27,14 @@ function obtenerTelegramId(bet) {
 function nombreTipo(tipo) {
   return ({
     fijo: 'Fijo',
+    rango: 'Fijo',
     corrido: 'Corrido',
     centena: 'Centena',
     centena_global: 'Centena global',
     parle: 'Parle',
     parle_global: 'Parle global',
     candado: 'Candado',
+    candado_combinaciones: 'Candado',
     candado_global: 'Candado global',
   })[tipo] || String(tipo || 'Jugada');
 }
@@ -73,11 +66,12 @@ async function notificarPremioTelegram(bet, premio, resultado) {
   const texto = [
     '🎉 *¡PREMIO DETECTADO!*',
     '',
-    `🎰 *Sorteo:* ${resultado.loteria_id} / ${resultado.sorteo_id}`,
+    `🎰 *Lotería:* ${resultado.loteria_id}`,
+    `🎟️ *Sorteo:* ${resultado.sorteo_id}`,
     `📅 *Fecha:* ${resultado.fecha}`,
     `🎯 *Tipo:* ${tipo}`,
-    `🔢 *Número ganador:* ${numero}`,
-    `💵 *Monto apostado:* $${fmtMoney(premio.monto_unitario)}`,
+    `🔢 *Ganador:* ${numero}`,
+    `💵 *Apostado:* $${fmtMoney(premio.monto_unitario)}`,
     `🏆 *Premio:* ${premioTexto}`,
     '',
     `🧾 *Apuesta:* #${bet.id}`,
@@ -97,84 +91,78 @@ async function notificarPremioTelegram(bet, premio, resultado) {
 }
 
 /**
- * Cruza el resultado de un sorteo contra las jugadas (bets) de esa
- * lotería/sorteo/fecha y registra en `premios` cada línea ganadora.
- * Después de insertar un premio nuevo, lo notifica al usuario por Telegram.
- * La comprobación previa de existencia evita volver a notificar el mismo
- * premio cuando el userbot recibe varias veces el mismo resultado.
+ * Obtiene los ganadores del resultado, registra cada combinación nueva en
+ * premios y notifica al usuario. No modifica la apuesta ni el saldo.
  *
- * @param {import('@supabase/supabase-js').SupabaseClient} supabase
- * @param {{ id:number, loteria_id:number, sorteo_id:number, fecha:string,
- *           numero_ganado: { fijo?:string, corrido?:string, centena?:string } }} resultado
+ * Esto sustituye la lógica acoplada que antes estaba dentro de este archivo.
  */
 async function detectarPremios(supabase, resultado) {
-  const { fijo, corrido, centena } = resultado.numero_ganado || {};
-  if (!fijo && !corrido && !centena) return;
+  const obtenido = await obtenerGanadoresDelResultado(supabase, resultado);
 
-  const centenaCorta = centena ? String(centena).slice(-2) : null;
-  const paresGanadores = new Set();
-  if (fijo && corrido) paresGanadores.add([fijo, corrido].sort().join('-'));
-  if (fijo && centenaCorta) paresGanadores.add([fijo, centenaCorta].sort().join('-'));
-  if (corrido && centenaCorta) paresGanadores.add([corrido, centenaCorta].sort().join('-'));
-
-  const { data: bets, error } = await supabase.from('bets').select('*')
-    .eq('loteria_id', resultado.loteria_id)
-    .eq('sorteo_id', resultado.sorteo_id)
-    .eq('fecha_apuesta', resultado.fecha);
-  if (error || !bets) return;
-
-  for (const bet of bets) {
-    let detalle;
-    try { detalle = JSON.parse(bet.detalle); } catch (e) { continue; }
-    if (!Array.isArray(detalle)) continue;
-
-    for (const d of detalle) {
-      const nums = (d.numeros || []).map(String);
-      let match = false;
-      let numerosGanadores = '';
-
-      if (['fijo', 'corrido'].includes(d.tipo)) {
-        if (fijo && nums.includes(fijo)) { match = true; numerosGanadores = fijo; }
-        else if (corrido && nums.includes(corrido)) { match = true; numerosGanadores = corrido; }
-      } else if (['centena', 'centena_global'].includes(d.tipo)) {
-        if (centena && nums.includes(centena)) { match = true; numerosGanadores = centena; }
-      } else if (['parle', 'parle_global', 'candado', 'candado_global'].includes(d.tipo)) {
-        for (const p of (d.pares || [])) {
-          const key = [String(p[0]).padStart(2, '0'), String(p[1]).padStart(2, '0')].sort().join('-');
-          if (paresGanadores.has(key)) { match = true; numerosGanadores = key; break; }
-        }
-      }
-
-      if (!match) continue;
-
-      const { data: existe } = await supabase.from('premios').select('id')
-        .eq('bet_id', bet.id).eq('numeros_ganadores', numerosGanadores).eq('tipo_jugada', d.tipo)
-        .maybeSingle();
-      if (existe) continue;
-
-      const montoUnitario = Number(d.monto_unitario) || 0;
-      const multiplicador = PAYOUT_MULTIPLIERS[d.tipo] || null;
-      const montoPremio = multiplicador != null ? +(montoUnitario * multiplicador).toFixed(2) : null;
-
-      const { data: premioInsertado, error: premioError } = await supabase.from('premios').insert([{
-        bet_id: bet.id,
-        resultado_id: resultado.id,
-        numeros_ganadores: numerosGanadores,
-        tipo_jugada: d.tipo,
-        monto_apostado: d.monto,
-        monto_unitario: montoUnitario,
-        monto_premio: montoPremio,
-        estado: montoPremio != null ? 'confirmado' : 'detectado',
-      }]).select('*').single();
-
-      if (premioError) {
-        console.error(`❌ Error registrando premio para bet #${bet.id}:`, premioError.message || premioError);
-        continue;
-      }
-
-      await notificarPremioTelegram(bet, premioInsertado, resultado);
-    }
+  if (!obtenido.ok) {
+    console.error('❌ No se pudieron obtener los ganadores:', obtenido.error);
+    return { ok: false, ganadores: [], registrados: [], error: obtenido.error };
   }
+
+  const registrados = [];
+
+  for (const ganador of obtenido.ganadores) {
+    const bet = ganador.bet;
+    const tipo = ganador.tipo_jugada;
+    const numero = ganador.numeros_ganadores;
+
+    // El resultado_id forma parte de la identidad lógica del premio.
+    // También mantenemos la búsqueda por bet/tipo/número para compatibilidad
+    // con registros creados por la versión anterior del módulo.
+    const { data: existe, error: existeError } = await supabase.from('premios')
+      .select('id')
+      .eq('bet_id', bet.id)
+      .eq('numeros_ganadores', numero)
+      .eq('tipo_jugada', tipo)
+      .maybeSingle();
+
+    if (existeError) {
+      console.error(`❌ Error comprobando premio para bet #${bet.id}:`, existeError.message || existeError);
+      continue;
+    }
+
+    if (existe) {
+      console.log(`↩️ Premio ya registrado: bet #${bet.id} ${tipo} ${numero}`);
+      continue;
+    }
+
+    const { data: premioInsertado, error: premioError } = await supabase.from('premios').insert([{
+      bet_id: bet.id,
+      resultado_id: resultado.id,
+      numeros_ganadores: numero,
+      tipo_jugada: tipo,
+      monto_apostado: ganador.monto_apostado,
+      monto_unitario: ganador.monto_unitario,
+      monto_premio: ganador.monto_premio,
+      estado: ganador.monto_premio != null ? 'confirmado' : 'detectado',
+    }]).select('*').single();
+
+    if (premioError) {
+      console.error(`❌ Error registrando premio para bet #${bet.id}:`, premioError.message || premioError);
+      continue;
+    }
+
+    registrados.push(premioInsertado);
+    await notificarPremioTelegram(bet, premioInsertado, resultado);
+  }
+
+  console.log(`🏆 Ganadores obtenidos: ${obtenido.ganadores.length}; premios nuevos registrados: ${registrados.length}.`);
+
+  return {
+    ok: true,
+    ganadores: obtenido.ganadores,
+    registrados,
+  };
 }
 
-module.exports = { detectarPremios, PAYOUT_MULTIPLIERS, notificarPremioTelegram };
+module.exports = {
+  detectarPremios,
+  PAYOUT_MULTIPLIERS,
+  notificarPremioTelegram,
+  obtenerGanadoresDelResultado,
+};
