@@ -37,8 +37,6 @@ alter table public.jugadas_eventos enable row level security;
 -- No se concede lectura pública. La aplicación deberá autenticarse y recibir
 -- una política específica cuando definamos su modelo de usuarios/permisos.
 
-authorization not needed;
-
 create or replace function public.crear_jugada_evento()
 returns trigger
 language plpgsql
