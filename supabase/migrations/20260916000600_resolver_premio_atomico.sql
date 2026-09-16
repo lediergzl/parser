@@ -17,25 +17,36 @@ declare
   v_monto numeric(14,2);
   v_saldo numeric(14,2);
 begin
-  select p.*, b.origen, b.cliente_banca_id, b.user_telegram_id
-    into v_premio, v_origen, v_cliente_banca_id, v_user_telegram_id
+  -- Bloqueamos exclusivamente la fila del premio. Esto impide que dos
+  -- clics concurrentes puedan resolver el mismo premio a la vez.
+  select p.*
+    into v_premio
   from public.premios p
-  left join public.bets b on b.id = p.bet_id
   where p.id = p_premio_id
-  for update of p;
+  for update;
 
   if not found then
     return jsonb_build_object('ok', false, 'message', 'Premio no encontrado.');
   end if;
 
   if v_premio.estado not in ('detectado', 'confirmado') then
-    return jsonb_build_object('ok', false, 'estado', v_premio.estado, 'message', 'El premio ya fue resuelto.');
+    return jsonb_build_object(
+      'ok', false,
+      'estado', v_premio.estado,
+      'message', 'El premio ya fue resuelto.'
+    );
   end if;
 
   v_monto := v_premio.monto_premio;
   if v_monto is null or v_monto <= 0 then
     return jsonb_build_object('ok', false, 'message', 'El monto del premio no es válido.');
   end if;
+
+  -- Los datos de destino se leen después de bloquear el premio.
+  select b.origen, b.cliente_banca_id, b.user_telegram_id
+    into v_origen, v_cliente_banca_id, v_user_telegram_id
+  from public.bets b
+  where b.id = v_premio.bet_id;
 
   if v_origen = 'comercial' and v_cliente_banca_id is not null then
     update public.clientes_banca
@@ -61,6 +72,7 @@ begin
     return jsonb_build_object('ok', false, 'message', 'El premio no tiene un saldo de destino válido.');
   end if;
 
+  -- El crédito y el cambio de estado están dentro de la misma transacción.
   update public.premios
      set estado = 'depositado',
          resuelto_por = p_resuelto_por,
