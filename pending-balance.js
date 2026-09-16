@@ -65,7 +65,7 @@ async function registrarPendientesPorSaldo(bot) {
     const { data: pending, error } = await supabase.from('pending_bets').select('id,original_input,status').eq('id', pendingId).eq('user_telegram_id', ctx.from.id).maybeSingle();
     if (error) return ctx.reply('❌ No se pudo cargar la jugada pendiente.');
     if (!pending || pending.status !== 'awaiting_balance') return ctx.reply('ℹ️ Esta jugada ya no está pendiente por saldo.');
-    await ctx.reply(`📋 *Jugada pendiente #${pending.id}*\n\n\`${pending.original_input}\`\n\nPuedes conservarla, bajar el monto o cancelarla.`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '💵 Bajar monto de la jugada', callback_data: `balance_adjust_${pending.id}` }],[{ text: '❌ Cancelar jugada pendiente', callback_data: `balance_cancel_${pending.id}` }]] } });
+    await ctx.reply(`📋 *Jugada pendiente #${pending.id}*\n\n\`${pending.original_input}\`\n\nPuedes conservarla, bajar el monto o cancelarla.`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: `✅ Procesar jugada #${pending.id}`, callback_data: `balance_process_${pending.id}` }],[{ text: '💵 Bajar monto de la jugada', callback_data: `balance_adjust_${pending.id}` }],[{ text: '❌ Cancelar jugada pendiente', callback_data: `balance_cancel_${pending.id}` }]] } });
   });
 
   bot.action(/^balance_adjust_(\d+)$/, async ctx => {
