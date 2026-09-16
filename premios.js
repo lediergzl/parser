@@ -28,7 +28,26 @@ async function obtenerNombreJugador(supabase, bet) {
   return data?.nombre ? String(data.nombre).trim() : null;
 }
 
-async function notificarPremioTelegram(bet, premio, resultado, supabase) {
+async function obtenerContextoResultado(supabase, resultado) {
+  const contexto = {
+    loteriaNombre: resultado?.loteriaNombre || resultado?.loteria_nombre || null,
+    nombreSorteo: resultado?.nombreSorteo || resultado?.sorteoNombre || resultado?.sorteo_nombre || null,
+  };
+
+  if (!contexto.loteriaNombre && resultado?.loteria_id != null) {
+    const { data } = await supabase.from('loterias').select('nombre').eq('id', resultado.loteria_id).maybeSingle();
+    contexto.loteriaNombre = data?.nombre ? String(data.nombre).trim() : null;
+  }
+
+  if (!contexto.nombreSorteo && resultado?.sorteo_id != null) {
+    const { data } = await supabase.from('sorteos').select('nombre').eq('id', resultado.sorteo_id).maybeSingle();
+    contexto.nombreSorteo = data?.nombre ? String(data.nombre).trim() : null;
+  }
+
+  return contexto;
+}
+
+async function notificarPremioTelegram(bet, premio, resultado, supabase, contextoResultado = {}) {
   const bot = global.__LOTO_BOT__;
   if (!bot?.telegram?.sendMessage) {
     console.warn('⚠️ Premio detectado pero el bot Telegram no está disponible en global.__LOTO_BOT__.');
@@ -48,10 +67,12 @@ async function notificarPremioTelegram(bet, premio, resultado, supabase) {
   const posicion = premio.tipo_jugada === 'corrido' && premio.posicion_resultado != null
     ? `\n📍 *Posición del corrido:* ${premio.posicion_resultado}`
     : '';
+  const loteria = contextoResultado.loteriaNombre || resultado?.loteriaNombre || resultado?.loteria_nombre || (resultado?.loteria_id != null ? `#${resultado.loteria_id}` : 'Lotería');
+  const sorteo = contextoResultado.nombreSorteo || resultado?.nombreSorteo || resultado?.sorteoNombre || resultado?.sorteo_nombre || (resultado?.sorteo_id != null ? `#${resultado.sorteo_id}` : 'Sorteo');
   const texto = [
     '🎉 *¡PREMIO DETECTADO!*','',
-    `🎰 *Lotería:* ${resultado.loteria_id}`,
-    `🎟️ *Sorteo:* ${resultado.sorteo_id}`,
+    `🎰 *Lotería:* ${loteria}`,
+    `🎟️ *Sorteo:* ${sorteo}`,
     `📅 *Fecha:* ${resultado.fecha}`,
     ...(jugador ? [`👤 *Jugador:* ${jugador}`] : []),
     `🎯 *Tipo:* ${tipo}`,
@@ -86,8 +107,6 @@ async function buscarPremioExistente(supabase, ganador) {
   return query.maybeSingle();
 }
 
-// Evita reenviar el mismo ganador varias veces cuando el origen publica
-// repetidamente el mismo resultado o cuando /probar_resultado lo recupera.
 const ganadoresNotificados = new Set();
 
 function claveGanador(resultado, ganador) {
@@ -100,7 +119,7 @@ function claveGanador(resultado, ganador) {
   ].join(':');
 }
 
-async function emitirPremioWhatsapp({ premio, resultado, bet, jugador }) {
+async function emitirPremioWhatsapp({ premio, resultado, bet, jugador, contextoResultado }) {
   const clave = claveGanador(resultado, { bet, tipo_jugada: premio?.tipo_jugada, numeros_ganadores: premio?.numeros_ganadores, posicion_resultado: premio?.posicion_resultado });
   if (ganadoresNotificados.has(clave)) return;
   ganadoresNotificados.add(clave);
@@ -110,10 +129,13 @@ async function emitirPremioWhatsapp({ premio, resultado, bet, jugador }) {
     resultado,
     bet,
     jugador,
+    loteriaNombre: contextoResultado?.loteriaNombre || resultado?.loteriaNombre,
+    nombreSorteo: contextoResultado?.nombreSorteo || resultado?.nombreSorteo,
   });
 }
 
 async function detectarPremios(supabase, resultado) {
+  const contextoResultado = await obtenerContextoResultado(supabase, resultado);
   const obtenido = await obtenerGanadoresDelResultado(supabase, resultado);
   if (!obtenido.ok) {
     console.error('❌ No se pudieron obtener los ganadores:', obtenido.error);
@@ -129,7 +151,7 @@ async function detectarPremios(supabase, resultado) {
       console.log(`↩️ Premio ya registrado: bet #${bet.id} ${tipo} ${numero}${tipo === 'corrido' ? ` posición ${ganador.posicion_resultado}` : ''}`);
       let jugador = null;
       try { jugador = await obtenerNombreJugador(supabase, bet); } catch (_) {}
-      await emitirPremioWhatsapp({ premio: existe, resultado, bet, jugador });
+      await emitirPremioWhatsapp({ premio: existe, resultado, bet, jugador, contextoResultado });
       continue;
     }
 
@@ -143,18 +165,10 @@ async function detectarPremios(supabase, resultado) {
     registrados.push(premioInsertado);
 
     let jugador = null;
-    try {
-      jugador = await obtenerNombreJugador(supabase, bet);
-    } catch (_) {}
+    try { jugador = await obtenerNombreJugador(supabase, bet); } catch (_) {}
 
-    await emitirPremioWhatsapp({
-      premio: premioInsertado,
-      resultado,
-      bet,
-      jugador,
-    });
-
-    await notificarPremioTelegram(bet,premioInsertado,resultado,supabase);
+    await emitirPremioWhatsapp({ premio: premioInsertado, resultado, bet, jugador, contextoResultado });
+    await notificarPremioTelegram(bet,premioInsertado,resultado,supabase,contextoResultado);
   }
   console.log(`🏆 Ganadores obtenidos: ${obtenido.ganadores.length}; premios nuevos registrados: ${registrados.length}.`);
   return { ok:true, ganadores:obtenido.ganadores, registrados };
