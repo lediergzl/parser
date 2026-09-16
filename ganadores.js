@@ -1,33 +1,29 @@
 // ============================================================================
 // ganadores.js — Obtención pura de jugadas ganadoras.
 //
-// Este módulo separa la lógica de cálculo de la persistencia/notificación.
-// Recibe un resultado oficial y devuelve las jugadas que ganan.
+// La BD recibe jugadas en formato CANÓNICO:
+//   fijo, corrido, centena, parle
+//
+// El parser/registro es quien transforma:
+//   candado / candado_global / candado_combinaciones -> parle
+//   parle_global -> parle
+//   centena_global -> centena
+//
+// Por eso este módulo NO interpreta candado ni global. Solo lee las
+// combinaciones que ya fueron normalizadas y almacenadas en bets.detalle.
 // No modifica bets, saldos ni resultados_sorteo.
 // ============================================================================
 
 const TIPOS_FIJO = new Set(['fijo', 'rango']);
-const TIPOS_CENTENA = new Set(['centena', 'centena_global']);
-const TIPOS_PARLE = new Set([
-  'parle',
-  'parle_global',
-  'candado',
-  'candado_combinaciones',
-  'candado_global',
-  'parle_global',
-]);
+const TIPOS_CENTENA = new Set(['centena']);
+const TIPOS_PARLE = new Set(['parle']);
 
 const PAYOUT_MULTIPLIERS = {
   fijo: 80,
   rango: 80,
   corrido: 30,
   centena: 500,
-  centena_global: 500,
   parle: 1000,
-  parle_global: 1000,
-  candado: 1000,
-  candado_combinaciones: 1000,
-  candado_global: 1000,
 };
 
 function normalizarNumero(numero, longitud = 2) {
@@ -98,7 +94,8 @@ function obtenerParesDetalle(detalle) {
     }
   }
 
-  // Algunas jugadas antiguas pueden no traer `pares`, pero sí `combinaciones`.
+  // Compatibilidad con registros que guardaron las parejas en
+  // `combinaciones` en vez de `pares`.
   if (!pares.length) {
     for (const valor of normalizarNumeros(detalle?.combinaciones)) {
       const m = valor.match(/^(\d{2})[-xX*](\d{2})$/);
@@ -123,9 +120,9 @@ function calcularPremio(montoUnitario, tipo) {
  * El resultado esperado tiene:
  *   numero_ganado: { fijo, corrido, centena }
  *
- * Devuelve una entrada por combinación ganadora, no solamente una entrada
- * por bet. Esto es importante cuando una misma apuesta contiene varios
- * números/parles ganadores.
+ * Las apuestas ya llegan normalizadas desde el registro. Una entrada
+ * `parle` puede contener varias parejas; cada pareja ganadora genera su
+ * propia entrada de premio.
  */
 function obtenerGanadores(bets, resultado) {
   const numeroGanado = resultado?.numero_ganado || {};
@@ -137,6 +134,7 @@ function obtenerGanadores(bets, resultado) {
 
   for (const bet of Array.isArray(bets) ? bets : []) {
     const detalles = parsearDetalle(bet);
+
     for (let indice = 0; indice < detalles.length; indice++) {
       const d = detalles[indice] || {};
       const tipo = String(d.tipo || '').trim().toLowerCase();
@@ -171,7 +169,7 @@ function obtenerGanadores(bets, resultado) {
         for (const par of paresJugados) {
           if (!paresGanadores.has(par) || vistos.has(par)) continue;
           vistos.add(par);
-          ganadores.push(crearGanador(bet, d, indice, tipo, par, montoUnitario));
+          ganadores.push(crearGanador(bet, d, indice, 'parle', par, montoUnitario));
         }
       }
     }
