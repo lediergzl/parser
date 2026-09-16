@@ -2,7 +2,7 @@
 // recuperación de jugadas por saldo + flujo de apuestas.
 require('./bootstrap.js');
 require('./decimal-amount-patch');
-require('./premio-diagnostico');
+const { registrarComandoVerificarPremio } = require('./premio-diagnostico');
 
 const { registrarRevisionHumana } = require('./human-review');
 const { registrarPendientesPorSaldo } = require('./pending-balance');
@@ -14,6 +14,14 @@ if (!bot) {
   console.error('❌ No se pudo obtener el bot de Telegram para registrar las jugadas.');
   process.exitCode = 1;
 } else {
+  // Registro determinista del diagnóstico: el bot ya existe en este punto.
+  registrarComandoVerificarPremio(bot)
+    .then(() => console.log('✅ /verificar_premio disponible'))
+    .catch(err => {
+      console.error('❌ Error registrando /verificar_premio:', err && err.stack ? err.stack : err);
+      process.exitCode = 1;
+    });
+
   bot.use(async (ctx, next) => {
     if (typeof ctx.message?.text !== 'string') return next();
 
