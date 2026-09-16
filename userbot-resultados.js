@@ -9,6 +9,7 @@ const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
 const { createClient } = require('@supabase/supabase-js');
 const { detectarPremios } = require('./premios.js');
+const bus = require('./lib/event-bus');
 
 const apiId = parseInt(process.env.TG_API_ID || '', 10);
 const apiHash = process.env.TG_API_HASH || '';
@@ -135,9 +136,6 @@ function parsearMensajeResultado(texto) {
   const nombreSorteo = CONCEPTO_A_SORTEO[loteriaKey][concepto];
   if (!nombreSorteo) return null;
 
-  // Acepta formatos como:
-  // Pick 3: 123 / PICK3 123 / Pick 3 - 123 / Pick3=123
-  // y lo mismo para Pick 4.
   const mPick3 = texto.match(/pick\s*3\s*(?:[:=\-]|=>)?\s*(\d{3})(?!\d)/i);
   const mPick4 = texto.match(/pick\s*4\s*(?:[:=\-]|=>)?\s*(\d{4})(?!\d)/i);
   if (!mPick3 && !mPick4) return null;
@@ -228,7 +226,8 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
 
   if (!resultadosAnunciados.has(resultado.id)) {
     resultadosAnunciados.add(resultado.id);
-    await anunciarResultadoAAdmins({
+    const payload = {
+      resultadoId: resultado.id,
       loteriaNombre,
       nombreSorteo,
       fecha: fechaFinal,
@@ -237,7 +236,11 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
       centena,
       ganadores,
       registrados,
-    });
+      loteriaId,
+      sorteoId,
+    };
+    await anunciarResultadoAAdmins(payload);
+    bus.emit('resultado:recibido', payload);
   }
 }
 
@@ -293,8 +296,6 @@ async function iniciarUserbotResultados() {
       const username = remitente?.username ? `@${remitente.username}` : null;
       const senderId = remitente?.id != null ? String(remitente.id) : null;
 
-      // Se acepta por ID cuando está disponible y por username como respaldo.
-      // Esto evita perder mensajes si Telegram no expone el username en el evento.
       const esOrigen = idOrigen
         ? senderId === idOrigen
         : username === ORIGEN_ESPERADO;
