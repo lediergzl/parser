@@ -111,14 +111,39 @@ function calcularPremio(montoUnitario, tipo) {
   return +(Number(montoUnitario || 0) * multiplicador).toFixed(2);
 }
 
+function claveGanador(bet, tipo, numeroGanador) {
+  const betId = bet?.id ?? bet?.bet_id ?? '';
+  return `${betId}|${tipo}|${numeroGanador}`;
+}
+
+function agregarGanador(agrupados, bet, detalle, indiceDetalle, tipo, numeroGanador, montoUnitario) {
+  const clave = claveGanador(bet, tipo, numeroGanador);
+  const monto = Number(montoUnitario) || 0;
+  const existente = agrupados.get(clave);
+
+  if (existente) {
+    // El mismo numero puede haberse jugado muchas veces dentro de UNA apuesta.
+    // Cada aparición es válida y su importe se acumula; el resultado final,
+    // sin embargo, debe ser un solo premio para ese bet + tipo + numero.
+    existente.monto_unitario += monto;
+    existente.monto_apostado += Number(detalle?.monto) || 0;
+    existente.monto_premio = calcularPremio(existente.monto_unitario, tipo);
+    return;
+  }
+
+  agrupados.set(clave, {
+    ...crearGanador(bet, detalle, indiceDetalle, tipo, numeroGanador, monto),
+    monto_apostado: Number(detalle?.monto) || Number(bet?.total_apuesta) || 0,
+  });
+}
+
 function obtenerGanadores(bets, resultado) {
   const numeroGanado = resultado?.numero_ganado || {};
   const fijo = normalizarNumero(numeroGanado.fijo);
   const corridos = normalizarNumeros(numeroGanado.corrido).map(v => normalizarNumero(v)).filter(Boolean);
-  const corridoSet = new Set(corridos);
   const centena = numeroGanado.centena ? String(numeroGanado.centena).padStart(3, '0') : null;
   const paresGanadores = obtenerParesGanadores(numeroGanado);
-  const ganadores = [];
+  const agrupados = new Map();
 
   for (const bet of Array.isArray(bets) ? bets : []) {
     const detalles = parsearDetalle(bet);
@@ -131,7 +156,7 @@ function obtenerGanadores(bets, resultado) {
 
       if (TIPOS_FIJO.has(tipo)) {
         if (fijo && nums.includes(fijo)) {
-          ganadores.push(crearGanador(bet, d, indice, tipo, fijo, montoUnitario));
+          agregarGanador(agrupados, bet, d, indice, tipo, fijo, montoUnitario);
         }
         continue;
       }
@@ -139,7 +164,7 @@ function obtenerGanadores(bets, resultado) {
       if (tipo === 'corrido') {
         for (const corrido of corridos) {
           if (nums.includes(corrido)) {
-            ganadores.push(crearGanador(bet, d, indice, tipo, corrido, montoUnitario));
+            agregarGanador(agrupados, bet, d, indice, tipo, corrido, montoUnitario);
           }
         }
         continue;
@@ -147,7 +172,7 @@ function obtenerGanadores(bets, resultado) {
 
       if (TIPOS_CENTENA.has(tipo)) {
         if (centena && nums.includes(centena)) {
-          ganadores.push(crearGanador(bet, d, indice, tipo, centena, montoUnitario));
+          agregarGanador(agrupados, bet, d, indice, tipo, centena, montoUnitario);
         }
         continue;
       }
@@ -159,13 +184,13 @@ function obtenerGanadores(bets, resultado) {
         for (const par of paresJugados) {
           if (!paresGanadores.has(par) || vistos.has(par)) continue;
           vistos.add(par);
-          ganadores.push(crearGanador(bet, d, indice, 'parle', par, montoUnitario));
+          agregarGanador(agrupados, bet, d, indice, 'parle', par, montoUnitario);
         }
       }
     }
   }
 
-  return ganadores;
+  return [...agrupados.values()];
 }
 
 function crearGanador(bet, detalle, indiceDetalle, tipo, numeroGanador, montoUnitario) {
@@ -176,7 +201,7 @@ function crearGanador(bet, detalle, indiceDetalle, tipo, numeroGanador, montoUni
     tipo_jugada: tipo,
     numeros_ganadores: numeroGanador,
     monto_apostado: Number(detalle?.monto) || Number(bet?.total_apuesta) || 0,
-    monto_unitario: montoUnitario,
+    monto_unitario: Number(montoUnitario) || 0,
     multiplicador: PAYOUT_MULTIPLIERS[tipo] ?? null,
     monto_premio: calcularPremio(montoUnitario, tipo),
   };
