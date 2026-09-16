@@ -7,7 +7,6 @@
 // El parser/registro es quien transforma:
 //   candado / candado_global / candado_combinaciones -> parle
 //   parle_global -> parle
-//   centena_global -> centena
 //
 // Por eso este módulo NO interpreta candado ni global. Solo lee las
 // combinaciones que ya fueron normalizadas y almacenadas en bets.detalle.
@@ -46,10 +45,10 @@ function clavePar(a, b) {
 
 function obtenerParesGanadores(numeroGanado = {}) {
   const fijo = normalizarNumero(numeroGanado.fijo);
-  const corrido = normalizarNumero(numeroGanado.corrido);
+  const corridos = normalizarNumeros(numeroGanado.corrido).map(v => normalizarNumero(v)).filter(Boolean);
   const centena = numeroGanado.centena ? String(numeroGanado.centena).padStart(3, '0') : null;
   const centenaCorta = centena ? centena.slice(-2) : null;
-  const valores = [fijo, corrido, centenaCorta].filter(Boolean);
+  const valores = [fijo, ...corridos, centenaCorta].filter(Boolean);
   const pares = new Set();
 
   for (let i = 0; i < valores.length; i++) {
@@ -94,8 +93,6 @@ function obtenerParesDetalle(detalle) {
     }
   }
 
-  // Compatibilidad con registros que guardaron las parejas en
-  // `combinaciones` en vez de `pares`.
   if (!pares.length) {
     for (const valor of normalizarNumeros(detalle?.combinaciones)) {
       const m = valor.match(/^(\d{2})[-xX*](\d{2})$/);
@@ -114,20 +111,11 @@ function calcularPremio(montoUnitario, tipo) {
   return +(Number(montoUnitario || 0) * multiplicador).toFixed(2);
 }
 
-/**
- * Obtiene todas las jugadas ganadoras para un resultado.
- *
- * El resultado esperado tiene:
- *   numero_ganado: { fijo, corrido, centena }
- *
- * Las apuestas ya llegan normalizadas desde el registro. Una entrada
- * `parle` puede contener varias parejas; cada pareja ganadora genera su
- * propia entrada de premio.
- */
 function obtenerGanadores(bets, resultado) {
   const numeroGanado = resultado?.numero_ganado || {};
   const fijo = normalizarNumero(numeroGanado.fijo);
-  const corrido = normalizarNumero(numeroGanado.corrido);
+  const corridos = normalizarNumeros(numeroGanado.corrido).map(v => normalizarNumero(v)).filter(Boolean);
+  const corridoSet = new Set(corridos);
   const centena = numeroGanado.centena ? String(numeroGanado.centena).padStart(3, '0') : null;
   const paresGanadores = obtenerParesGanadores(numeroGanado);
   const ganadores = [];
@@ -149,8 +137,10 @@ function obtenerGanadores(bets, resultado) {
       }
 
       if (tipo === 'corrido') {
-        if (corrido && nums.includes(corrido)) {
-          ganadores.push(crearGanador(bet, d, indice, tipo, corrido, montoUnitario));
+        for (const corrido of corridos) {
+          if (nums.includes(corrido)) {
+            ganadores.push(crearGanador(bet, d, indice, tipo, corrido, montoUnitario));
+          }
         }
         continue;
       }
@@ -192,9 +182,6 @@ function crearGanador(bet, detalle, indiceDetalle, tipo, numeroGanador, montoUni
   };
 }
 
-/**
- * Obtiene las apuestas del sorteo/fecha y devuelve directamente los ganadores.
- */
 async function obtenerGanadoresDelResultado(supabase, resultado) {
   if (!supabase || !resultado?.loteria_id || !resultado?.sorteo_id || !resultado?.fecha) {
     return { ok: false, ganadores: [], error: 'Faltan loteria_id, sorteo_id o fecha del resultado.' };
