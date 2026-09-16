@@ -258,8 +258,13 @@ function instalarDiagnosticoPremios() {
     });
   }, 100);
 
-  // Evita dejar un intervalo vivo indefinidamente si el bot no llega a crearse.
   setTimeout(() => clearInterval(timer), 30000);
 }
 
-instalarDiagnosticoPremios();
+// Exportación explícita para bet-bootstrap.js.
+// No ejecutamos instalarDiagnosticoPremios() automáticamente porque el arranque
+// principal ya registra el comando de forma determinista cuando el bot existe.
+module.exports = {
+  registrarComandoVerificarPremio,
+  instalarDiagnosticoPremios,
+};
