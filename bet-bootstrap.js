@@ -114,6 +114,10 @@ if (!bot) {
       process.exitCode = 1;
     });
 
+  require('./whatsapp-baileys')
+    .iniciarIntegracionWhatsapp(global.__LOTO_APP__)
+    .catch(err => console.error('❌ Integración de WhatsApp (Baileys) no pudo iniciar:', err && err.stack ? err.stack : err));
+
   try {
     require('./userbot-resultados').iniciarUserbotResultados()
       .catch(err => console.error('❌ Userbot de resultados no pudo iniciar:', err && err.stack ? err.stack : err));
