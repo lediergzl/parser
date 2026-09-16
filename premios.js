@@ -46,6 +46,9 @@ async function notificarPremioTelegram(bet, premio, resultado, supabase) {
   const tipo = nombreTipo(premio.tipo_jugada);
   const montoPremio = Number(premio.monto_premio);
   const premioTexto = Number.isFinite(montoPremio) && premio.monto_premio !== null ? `$${fmtMoney(montoPremio)}` : 'pendiente de confirmación';
+  const posicion = premio.tipo_jugada === 'corrido' && premio.posicion_resultado != null
+    ? `\n📍 *Posición del corrido:* ${premio.posicion_resultado}`
+    : '';
   const texto = [
     '🎉 *¡PREMIO DETECTADO!*','',
     `🎰 *Lotería:* ${resultado.loteria_id}`,
@@ -53,7 +56,7 @@ async function notificarPremioTelegram(bet, premio, resultado, supabase) {
     `📅 *Fecha:* ${resultado.fecha}`,
     ...(jugador ? [`👤 *Jugador:* ${jugador}`] : []),
     `🎯 *Tipo:* ${tipo}`,
-    `🔢 *Ganador:* ${numero}`,
+    `🔢 *Ganador:* ${numero}${posicion}`,
     `💵 *Apostado:* $${fmtMoney(premio.monto_unitario)}`,
     `🏆 *Premio:* ${premioTexto}`,'',
     `🧾 *Apuesta:* #${bet.id}`,
@@ -69,6 +72,23 @@ async function notificarPremioTelegram(bet, premio, resultado, supabase) {
   }
 }
 
+async function buscarPremioExistente(supabase, ganador) {
+  let query = supabase.from('premios').select('id')
+    .eq('bet_id', ganador.bet.id)
+    .eq('numeros_ganadores', ganador.numeros_ganadores)
+    .eq('tipo_jugada', ganador.tipo_jugada);
+
+  // Para corrido, dos posiciones pueden tener el mismo número (6868 -> 68,68),
+  // por lo que la posición forma parte de la identidad del premio.
+  if (ganador.tipo_jugada === 'corrido') {
+    query = query.eq('posicion_resultado', ganador.posicion_resultado);
+  } else {
+    query = query.is('posicion_resultado', null);
+  }
+
+  return query.maybeSingle();
+}
+
 async function detectarPremios(supabase, resultado) {
   const obtenido = await obtenerGanadoresDelResultado(supabase, resultado);
   if (!obtenido.ok) {
@@ -78,11 +98,15 @@ async function detectarPremios(supabase, resultado) {
   const registrados = [];
   for (const ganador of obtenido.ganadores) {
     const bet = ganador.bet, tipo = ganador.tipo_jugada, numero = ganador.numeros_ganadores;
-    const { data: existe, error: existeError } = await supabase.from('premios').select('id').eq('bet_id',bet.id).eq('numeros_ganadores',numero).eq('tipo_jugada',tipo).maybeSingle();
+    const { data: existe, error: existeError } = await buscarPremioExistente(supabase, ganador);
     if (existeError) { console.error(`❌ Error comprobando premio para bet #${bet.id}:`, existeError.message || existeError); continue; }
-    if (existe) { console.log(`↩️ Premio ya registrado: bet #${bet.id} ${tipo} ${numero}`); continue; }
+    if (existe) {
+      console.log(`↩️ Premio ya registrado: bet #${bet.id} ${tipo} ${numero}${tipo === 'corrido' ? ` posición ${ganador.posicion_resultado}` : ''}`);
+      continue;
+    }
     const { data: premioInsertado, error: premioError } = await supabase.from('premios').insert([{
       bet_id:bet.id, resultado_id:resultado.id, numeros_ganadores:numero, tipo_jugada:tipo,
+      posicion_resultado: ganador.tipo_jugada === 'corrido' ? ganador.posicion_resultado : null,
       monto_apostado:ganador.monto_apostado, monto_unitario:ganador.monto_unitario,
       monto_premio:ganador.monto_premio, estado:ganador.monto_premio != null ? 'confirmado' : 'detectado'
     }]).select('*').single();

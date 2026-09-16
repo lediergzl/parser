@@ -8,9 +8,9 @@
 //   candado / candado_global / candado_combinaciones -> parle
 //   parle_global -> parle
 //
-// Por eso este módulo NO interpreta candado ni global. Solo lee las
-// combinaciones que ya fueron normalizadas y almacenadas en bets.detalle.
-// No modifica bets, saldos ni resultados_sorteo.
+// Corrido es la única categoría donde la POSICIÓN del resultado importa:
+// Pick 4 = [primeros 2 dígitos, últimos 2 dígitos].
+// Ejemplo 6868 -> [68, 68]: son dos eventos ganadores distintos.
 // ============================================================================
 
 const TIPOS_FIJO = new Set(['fijo', 'rango']);
@@ -111,20 +111,22 @@ function calcularPremio(montoUnitario, tipo) {
   return +(Number(montoUnitario || 0) * multiplicador).toFixed(2);
 }
 
-function claveGanador(bet, tipo, numeroGanador) {
+function claveGanador(bet, tipo, numeroGanador, posicionResultado = null) {
   const betId = bet?.id ?? bet?.bet_id ?? '';
-  return `${betId}|${tipo}|${numeroGanador}`;
+  const posicion = tipo === 'corrido' ? `|pos:${posicionResultado}` : '';
+  return `${betId}|${tipo}|${numeroGanador}${posicion}`;
 }
 
-function agregarGanador(agrupados, bet, detalle, indiceDetalle, tipo, numeroGanador, montoUnitario) {
-  const clave = claveGanador(bet, tipo, numeroGanador);
+function agregarGanador(agrupados, bet, detalle, indiceDetalle, tipo, numeroGanador, montoUnitario, posicionResultado = null) {
+  const clave = claveGanador(bet, tipo, numeroGanador, posicionResultado);
   const monto = Number(montoUnitario) || 0;
   const existente = agrupados.get(clave);
 
   if (existente) {
     // El mismo numero puede haberse jugado muchas veces dentro de UNA apuesta.
-    // Cada aparición es válida y su importe se acumula; el resultado final,
-    // sin embargo, debe ser un solo premio para ese bet + tipo + numero.
+    // Para fijo/parle/centena se consolida en un solo premio.
+    // Para corrido, la posición del resultado forma parte de la identidad:
+    // 6868 => posición 1 y posición 2 siguen siendo dos premios distintos.
     existente.monto_unitario += monto;
     existente.monto_apostado += Number(detalle?.monto) || 0;
     existente.monto_premio = calcularPremio(existente.monto_unitario, tipo);
@@ -132,7 +134,7 @@ function agregarGanador(agrupados, bet, detalle, indiceDetalle, tipo, numeroGana
   }
 
   agrupados.set(clave, {
-    ...crearGanador(bet, detalle, indiceDetalle, tipo, numeroGanador, monto),
+    ...crearGanador(bet, detalle, indiceDetalle, tipo, numeroGanador, monto, posicionResultado),
     monto_apostado: Number(detalle?.monto) || Number(bet?.total_apuesta) || 0,
   });
 }
@@ -162,9 +164,20 @@ function obtenerGanadores(bets, resultado) {
       }
 
       if (tipo === 'corrido') {
-        for (const corrido of corridos) {
+        // No usar Set aquí. Dos posiciones pueden contener el mismo número.
+        for (let posicion = 0; posicion < corridos.length; posicion++) {
+          const corrido = corridos[posicion];
           if (nums.includes(corrido)) {
-            agregarGanador(agrupados, bet, d, indice, tipo, corrido, montoUnitario);
+            agregarGanador(
+              agrupados,
+              bet,
+              d,
+              indice,
+              tipo,
+              corrido,
+              montoUnitario,
+              posicion + 1
+            );
           }
         }
         continue;
@@ -193,13 +206,14 @@ function obtenerGanadores(bets, resultado) {
   return [...agrupados.values()];
 }
 
-function crearGanador(bet, detalle, indiceDetalle, tipo, numeroGanador, montoUnitario) {
+function crearGanador(bet, detalle, indiceDetalle, tipo, numeroGanador, montoUnitario, posicionResultado = null) {
   return {
     bet,
     detalle,
     indice_detalle: indiceDetalle,
     tipo_jugada: tipo,
     numeros_ganadores: numeroGanador,
+    posicion_resultado: tipo === 'corrido' ? posicionResultado : null,
     monto_apostado: Number(detalle?.monto) || Number(bet?.total_apuesta) || 0,
     monto_unitario: Number(montoUnitario) || 0,
     multiplicador: PAYOUT_MULTIPLIERS[tipo] ?? null,
