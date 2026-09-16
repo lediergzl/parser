@@ -8,6 +8,11 @@ async function registrarPendientesPorSaldo(bot) {
   const notificados = new Set();
   const ajustesEnCurso = new Map();
 
+  // El human-review-gate se carga como preload y puede interceptar los mensajes
+  // de texto antes de que este handler reciba el nuevo monto. Exponemos el estado
+  // del flujo para que un monto como 500 no sea interpretado como una jugada nueva.
+  global.__LOTO_PENDING_ADJUST_STATES__ = ajustesEnCurso;
+
   function fmtMoney(value) { return Number(value || 0).toFixed(2); }
 
   function normalizarConectorPegado(texto) {
