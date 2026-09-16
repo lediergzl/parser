@@ -57,13 +57,9 @@ async function registrarModuloComercial(bot) {
   async function updateClienteBancaSaldo(id, saldo) { await supabase.from('clientes_banca').update({ saldo, updated_at: new Date() }).eq('id', id); }
   async function saveBetComercial({ comercialId, clienteBancaId, loteriaId, sorteoId, fecha, inputRaw, totalApuesta, detalle, moneda }) {
     const { error } = await supabase.from('bets').insert([{
-      // IMPORTANTE: el Telegram del comercial NO es el Telegram del jugador.
-      // El jugador de banca queda identificado por cliente_banca_id.
-      user_telegram_id: null,
-      loteria_id: loteriaId, sorteo_id: sorteoId, fecha_apuesta: fecha,
-      input_raw: inputRaw, total_apuesta: totalApuesta, detalle,
-      saldo_antes: 0, saldo_despues: 0, moneda: moneda || 'cup',
-      origen: 'comercial', comercial_telegram_id: comercialId, cliente_banca_id: clienteBancaId,
+      user_telegram_id: null, loteria_id: loteriaId, sorteo_id: sorteoId, fecha_apuesta: fecha,
+      input_raw: inputRaw, total_apuesta: totalApuesta, detalle, saldo_antes: 0, saldo_despues: 0,
+      moneda: moneda || 'cup', origen: 'comercial', comercial_telegram_id: comercialId, cliente_banca_id: clienteBancaId,
     }]);
     if (error) throw error;
   }
@@ -133,13 +129,46 @@ async function registrarModuloComercial(bot) {
     const {data:premio,error}=await supabase.from('premios').select('*, bets(*)').eq('id',premioId).single();
     if(error||!premio)return ctx.reply('❌ Premio no encontrado.');
     if(premio.monto_premio==null)return ctx.reply('⚠️ Primero ingresa el monto del premio.');
-    const bet=premio.bets,monto=Number(premio.monto_premio),nuevoEstado=accion==='cobrar'?'cobrado':'depositado';
-    if(accion==='depositar'){
-      if(bet.origen==='comercial'&&bet.cliente_banca_id){const {data:cliente}=await supabase.from('clientes_banca').select('saldo').eq('id',bet.cliente_banca_id).single();await updateClienteBancaSaldo(bet.cliente_banca_id,(Number(cliente?.saldo)||0)+monto);}
-      else if(bet.user_telegram_id){const {data:user}=await supabase.from('users').select('saldo').eq('telegram_id',bet.user_telegram_id).single();await supabase.from('users').update({saldo:(Number(user?.saldo)||0)+monto,updated_at:new Date()}).eq('telegram_id',bet.user_telegram_id);}
+    if(!['detectado','confirmado'].includes(premio.estado)){
+      const estadoTexto={cobrado:'COBRADO',depositado:'DEPOSITADO'}[premio.estado]||String(premio.estado||'RESUELTO').toUpperCase();
+      return ctx.reply(`⚠️ Premio #${premioId} ya fue resuelto como ${estadoTexto}. No puede cambiarse a otro estado.`);
     }
-    await supabase.from('premios').update({estado:nuevoEstado,resuelto_por:ctx.from.id,fecha_resuelto:new Date()}).eq('id',premioId);
-    await ctx.reply(accion==='cobrar'?`✅ Premio #${premioId} marcado como COBRADO ($${monto.toFixed(2)}).`:`✅ Premio #${premioId} dejado como DEPÓSITO ($${monto.toFixed(2)} acreditado a saldo).`);
+    const monto=Number(premio.monto_premio);
+    if(!Number.isFinite(monto)||monto<=0)return ctx.reply('❌ El monto del premio no es válido.');
+
+    if(accion==='depositar'){
+      const { data:resultadoRpc, error:rpcError } = await supabase.rpc('resolver_premio_deposito', {
+        p_premio_id: premioId,
+        p_resuelto_por: ctx.from.id
+      });
+      if(rpcError){
+        console.error('resolver_premio_deposito error:', rpcError);
+        return ctx.reply(`❌ No se pudo dejar el premio #${premioId} como depósito: ${rpcError.message || 'error de base de datos'}`);
+      }
+      const r = Array.isArray(resultadoRpc) ? resultadoRpc[0] : resultadoRpc;
+      if(!r?.ok){
+        const estadoTexto={cobrado:'COBRADO',depositado:'DEPOSITADO'}[r?.estado]||String(r?.estado||'RESUELTO').toUpperCase();
+        return ctx.reply(r?.estado ? `⚠️ Premio #${premioId} ya fue resuelto como ${estadoTexto}.` : `❌ ${r?.message||'No se pudo resolver el premio.'}`);
+      }
+      return ctx.reply(`✅ Premio #${premioId} dejado como DEPÓSITO ($${monto.toFixed(2)} acreditado a saldo).`);
+    }
+
+    const { data:actualizado, error:updateError } = await supabase.from('premios')
+      .update({estado:'cobrado',resuelto_por:ctx.from.id,fecha_resuelto:new Date()})
+      .eq('id',premioId)
+      .in('estado',['detectado','confirmado'])
+      .select('id,estado')
+      .maybeSingle();
+    if(updateError){
+      console.error('resolverPremio cobrar error:',updateError);
+      return ctx.reply(`❌ No se pudo marcar el premio #${premioId} como COBRADO: ${updateError.message || 'error de base de datos'}`);
+    }
+    if(!actualizado){
+      const {data:estadoActual}=await supabase.from('premios').select('estado').eq('id',premioId).maybeSingle();
+      const estadoTexto={cobrado:'COBRADO',depositado:'DEPOSITADO'}[estadoActual?.estado]||String(estadoActual?.estado||'RESUELTO').toUpperCase();
+      return ctx.reply(`⚠️ Premio #${premioId} ya fue resuelto como ${estadoTexto}.`);
+    }
+    await ctx.reply(`✅ Premio #${premioId} marcado como COBRADO ($${monto.toFixed(2)}).`);
   }
   bot.action(/^banca_premio_cobrar_(\d+)$/,async ctx=>{try{await ctx.answerCbQuery();}catch(e){}await resolverPremio(ctx,parseInt(ctx.match[1],10),'cobrar');});
   bot.action(/^banca_premio_deposito_(\d+)$/,async ctx=>{try{await ctx.answerCbQuery();}catch(e){}await resolverPremio(ctx,parseInt(ctx.match[1],10),'depositar');});
