@@ -20,12 +20,16 @@ function flujoInteractivoActivo(ctx) {
   const userId = ctx?.from?.id;
   if (!userId) return false;
 
-  // Recarga de saldo: el usuario puede enviar cualquier monto (1000,
-  // 10000, etc.) y luego una referencia. El gate de revisión humana no
-  // debe bloquear esos mensajes solo porque no parecen una jugada.
   try {
     const depositStates = global.__LOTO_DEPOSIT_STATES__;
     if (depositStates?.has?.(userId)) return true;
+  } catch (_) {}
+
+  // Ajuste de una jugada pendiente: el siguiente texto es un monto libre
+  // (por ejemplo 500, 100, 0.50) y no debe pasar por revisión humana.
+  try {
+    const adjustStates = global.__LOTO_PENDING_ADJUST_STATES__;
+    if (adjustStates?.has?.(userId)) return true;
   } catch (_) {}
 
   return false;
@@ -50,8 +54,6 @@ function instalarFiltroRevisionHumana(bot) {
   return () => { bot.on = originalOn; };
 }
 
-// Cuando se carga como preload (-r), intercepta los handlers de texto de
-// Telegraf desde el prototipo. Esto evita depender del orden de registro.
 try {
   const { Telegraf } = require('telegraf');
   const proto = Telegraf && Telegraf.prototype;
@@ -73,15 +75,9 @@ try {
     proto.__LOTO_HUMAN_REVIEW_GATE__ = true;
   }
 } catch (err) {
-  // Si Telegraf todavía no está disponible, el módulo puede usarse mediante
-  // instalarFiltroRevisionHumana(bot) después de crear el bot.
+  // Telegraf puede no estar disponible si este archivo se importa fuera del arranque.
 }
 
-// La revisión humana se registra antes que el flujo de depósitos.
-// Cuando el usuario está en una recarga activa, su texto puede ser un número
-// de 4 cifras (por ejemplo, una referencia "1000"). En ese estado la revisión
-// humana debe ceder el turno al siguiente handler para que el depósito procese
-// el monto o la referencia.
 try {
   const humanReview = require('./human-review');
   if (humanReview && typeof humanReview.registrarRevisionHumana === 'function' && !humanReview.__LOTO_DEPOSIT_BYPASS__) {
