@@ -4,6 +4,7 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const { enviarJugadaAlComercial } = require('./whatsapp');
+const bus = require('./lib/event-bus');
 
 function fmtMoney(value) { return Number(value || 0).toFixed(2); }
 
@@ -299,6 +300,28 @@ async function registrarFlujoApuesta(bot) {
         });
       } catch (whatsappError) {
         console.error('❌ Error enviando la jugada al WhatsApp del comercial:', whatsappError && whatsappError.stack ? whatsappError.stack : whatsappError);
+      }
+
+      // Bus interno: publica la jugada para los módulos suscritos (envío por
+      // Baileys, marcado de entrega, futuros consumidores). Si no hay ningún
+      // listener registrado, la emisión no tiene efecto y no rompe el flujo.
+      try {
+        bus.emit('jugada:procesada', {
+          betId: fila?.bet_id,
+          cliente: nombreJugador,
+          telegramId: ctx.from.id,
+          loteriaNombre: contextoTexto.loteriaNombre,
+          sorteoNombre: contexto.sorteo.nombre,
+          fecha,
+          numeros: detalles,
+          monto: totalCobrado,
+          moneda: contextoTexto.moneda,
+          saldoDespues,
+          rawText: texto,
+          destino: { tipo: 'grupo', id: process.env.WA_GROUP_ID }
+        });
+      } catch (busError) {
+        console.error('❌ Error publicando la jugada en el bus de eventos:', busError && busError.stack ? busError.stack : busError);
       }
 
       await enviarRespaldoTelegram(bot, resultado, contextoTexto, datosMensaje);
