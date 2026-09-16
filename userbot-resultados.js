@@ -151,7 +151,51 @@ function parsearMensajeResultado(texto) {
   return { loteriaNombre: LOTERIA_DISPLAY[loteriaKey], nombreSorteo, fijo, corrido, centena, fecha };
 }
 
-async function guardarResultado({ loteriaId, sorteoId, fijo, corrido, centena, fecha }) {
+function getAdminIds() {
+  return (process.env.ADMIN_IDS || '').split(',').map(x => Number(x.trim())).filter(Number.isFinite);
+}
+
+// El resultado se anunciaba en el log de Render, pero nadie lo veía ahí: ni el
+// resultado (fijo/corrido/centena) ni el conteo de ganadores llegaban a
+// Telegram salvo que hubiera premio para un jugador puntual (notificarPremioTelegram
+// en premios.js), que es silencioso cuando el conteo es 0. Este aviso a los
+// admins cubre ambos casos: "salió el resultado" y "hubo/no hubo ganadores".
+async function anunciarResultadoAAdmins({ loteriaNombre, nombreSorteo, fecha, fijo, corrido, centena, ganadores, registrados }) {
+  const bot = global.__LOTO_BOT__;
+  const adminIds = getAdminIds();
+  if (!bot?.telegram?.sendMessage || adminIds.length === 0) {
+    console.warn('⚠️ No se pudo anunciar el resultado a los admins (bot o ADMIN_IDS no disponibles).');
+    return;
+  }
+  const corridoTexto = Array.isArray(corrido) ? corrido.join(', ') : String(corrido || '—');
+  const texto = [
+    '🎲 *Resultado recibido*', '',
+    `🎰 Lotería: *${loteriaNombre}*`,
+    `🕒 Sorteo: *${nombreSorteo}*`,
+    `📅 Fecha: *${fecha}*`, '',
+    `Fijo: *${fijo || '—'}*`,
+    `Corridos: *${corridoTexto}*`,
+    `Centena: *${centena || '—'}*`, '',
+    ganadores > 0
+      ? `🏆 Ganadores detectados: *${ganadores}* (premios nuevos: ${registrados})`
+      : '✅ Sin jugadas ganadoras en este sorteo.'
+  ].join('\n');
+
+  for (const adminId of adminIds) {
+    try {
+      await bot.telegram.sendMessage(adminId, texto, { parse_mode: 'Markdown' });
+    } catch (e) {
+      console.error(`❌ No se pudo anunciar el resultado al admin ${adminId}:`, e?.message || e);
+    }
+  }
+}
+
+// Los resultados llegan varias veces (el bot de origen reenvía/edita el mismo
+// mensaje); el upsert por (loteria_id, sorteo_id, fecha) conserva el mismo id
+// de fila, así que este set evita mandar el mismo aviso repetido a los admins.
+const resultadosAnunciados = new Set();
+
+async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteoId, fijo, corrido, centena, fecha }) {
   const fechaFinal = fecha || new Date().toISOString().slice(0, 10);
   const { data: resultado, error } = await supabase.from('resultados_sorteo')
     .upsert([{
@@ -163,11 +207,19 @@ async function guardarResultado({ loteriaId, sorteoId, fijo, corrido, centena, f
   if (error) { console.error('❌ Error guardando resultado:', error); return; }
   console.log(`✅ Resultado guardado: loteria=${loteriaId} sorteo=${sorteoId} fecha=${fechaFinal} fijo=${fijo} corrido=${corrido.join(', ')} centena=${centena}`);
 
+  let ganadores = 0, registrados = 0;
   try {
-    await detectarPremios(supabase, resultado);
+    const resumen = await detectarPremios(supabase, resultado);
+    ganadores = resumen?.ganadores?.length || 0;
+    registrados = resumen?.registrados?.length || 0;
     console.log('🔍 Detección de premios completada.');
   } catch (e) {
     console.error('⚠️ Error detectando premios:', e);
+  }
+
+  if (!resultadosAnunciados.has(resultado.id)) {
+    resultadosAnunciados.add(resultado.id);
+    await anunciarResultadoAAdmins({ loteriaNombre, nombreSorteo, fecha: fechaFinal, fijo, corrido, centena, ganadores, registrados });
   }
 }
 
@@ -220,6 +272,7 @@ async function iniciarUserbotResultados() {
       }
 
       await guardarResultado({
+        loteriaNombre: parsed.loteriaNombre, nombreSorteo: parsed.nombreSorteo,
         loteriaId: destino.loteriaId, sorteoId: destino.sorteoId,
         fijo: parsed.fijo, corrido: parsed.corrido, centena: parsed.centena,
         fecha: parsed.fecha,
@@ -276,6 +329,7 @@ async function buscarUltimoResultadoEnChat(chat) {
   if (destino.error) return { ok: false, message: `No se pudo resolver lotería/sorteo para "${parsed.loteriaNombre} - ${parsed.nombreSorteo}": ${destino.error}`, texto: encontrado.message, parsed };
 
   await guardarResultado({
+    loteriaNombre: parsed.loteriaNombre, nombreSorteo: parsed.nombreSorteo,
     loteriaId: destino.loteriaId, sorteoId: destino.sorteoId,
     fijo: parsed.fijo, corrido: parsed.corrido, centena: parsed.centena, fecha: parsed.fecha,
   });
