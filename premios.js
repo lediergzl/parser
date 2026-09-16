@@ -3,10 +3,9 @@
 // La detección/cálculo de ganadores vive en ganadores.js.
 // ============================================================================
 const { PAYOUT_MULTIPLIERS, obtenerGanadoresDelResultado } = require('./ganadores.js');
+const bus = require('./lib/event-bus');
 
 function obtenerTelegramId(bet) {
-  // Una apuesta comercial NO tiene Telegram del jugador.
-  // Para notificar, usamos únicamente el Telegram del comercial responsable.
   const candidatos = [bet?.comercial_telegram_id, bet?.telegram_id, bet?.user_telegram_id];
   for (const valor of candidatos) {
     if (valor !== null && valor !== undefined && String(valor).trim() !== '') return String(valor).trim();
@@ -78,8 +77,6 @@ async function buscarPremioExistente(supabase, ganador) {
     .eq('numeros_ganadores', ganador.numeros_ganadores)
     .eq('tipo_jugada', ganador.tipo_jugada);
 
-  // Para corrido, dos posiciones pueden tener el mismo número (6868 -> 68,68),
-  // por lo que la posición forma parte de la identidad del premio.
   if (ganador.tipo_jugada === 'corrido') {
     query = query.eq('posicion_resultado', ganador.posicion_resultado);
   } else {
@@ -112,6 +109,19 @@ async function detectarPremios(supabase, resultado) {
     }]).select('*').single();
     if (premioError) { console.error(`❌ Error registrando premio para bet #${bet.id}:`, premioError.message || premioError); continue; }
     registrados.push(premioInsertado);
+
+    let jugador = null;
+    try {
+      jugador = await obtenerNombreJugador(supabase, bet);
+    } catch (_) {}
+
+    bus.emit('premio:detectado', {
+      premio: premioInsertado,
+      resultado,
+      bet,
+      jugador,
+    });
+
     await notificarPremioTelegram(bet,premioInsertado,resultado,supabase);
   }
   console.log(`🏆 Ganadores obtenidos: ${obtenido.ganadores.length}; premios nuevos registrados: ${registrados.length}.`);
