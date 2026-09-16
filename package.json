@@ -16,5 +16,8 @@
     "qrcode-terminal": "^0.12.0"
   },
   "author": "Tu nombre",
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  }
 }
