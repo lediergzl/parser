@@ -42,7 +42,7 @@ const CHAT = process.env.CHAT_RESULTADOS || '@MentesMillonariasbolitachat';
   const mensajes = await client.getMessages(entity, { limit: 50 });
 
   let encontrado = null;
-  for (const msg of mensajes) {
+  for (const msg of mensajes) { // getMessages entrega del más reciente al más viejo
     if (!msg.message) continue;
     const remitente = await msg.getSender();
     const username = remitente?.username ? `@${remitente.username}` : null;
@@ -50,34 +50,24 @@ const CHAT = process.env.CHAT_RESULTADOS || '@MentesMillonariasbolitachat';
   }
 
   if (!encontrado) {
-    console.log(`⚠️ No encontré ningún mensaje de ${ORIGEN_ESPERADO} en los últimos 50 mensajes de ${CHAT}.`);
+    console.log(`⚠️  No encontré ningún mensaje de ${ORIGEN_ESPERADO} en los últimos 50 mensajes de ${CHAT}.`);
     process.exit(1);
   }
 
   console.log('📩 Último mensaje encontrado:\n', encontrado.message, '\n---');
 
-  // PRIMERO se identifica la lotería y se verifica contra la BD.
-  // Si no está registrada, no se parsea ni se guarda ningún resultado.
-  const texto = String(encontrado.message || '');
-  const primeraLinea = texto.split('\n').map(l => l.trim()).find(Boolean) || '';
-  const destino = await resolverLoteriaSorteo(primeraLinea);
-
-  if (destino.ignorar) {
-    console.log(`⏭️ Lotería no registrada: "${primeraLinea}". Resultado ignorado sin procesar.`);
-    process.exit(0);
-  }
-
-  if (destino.error) {
-    console.log(`❌ No se pudo resolver lotería/sorteo para "${primeraLinea}": ${destino.error}`);
-    process.exit(1);
-  }
-
-  const parsed = parsearMensajeResultado(texto);
+  const parsed = parsearMensajeResultado(encontrado.message);
   if (!parsed) {
     console.log('❌ No se pudo parsear ese mensaje con el formato esperado.');
     process.exit(1);
   }
   console.log('✅ Parseado:', parsed);
+
+  const destino = await resolverLoteriaSorteo(parsed.loteriaNombre, parsed.nombreSorteo);
+  if (destino.error) {
+    console.log(`❌ No se pudo resolver lotería/sorteo para "${parsed.loteriaNombre} - ${parsed.nombreSorteo}": ${destino.error}`);
+    process.exit(1);
+  }
   console.log('✅ Resuelto a:', destino);
 
   await guardarResultado({
