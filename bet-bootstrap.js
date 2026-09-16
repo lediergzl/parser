@@ -29,6 +29,41 @@ if (!bot) {
       ctx.state.totalDeclarado = Number(String(totalDeclaradoMatch[1]).replace(',', '.'));
     }
 
+    // ── EXPANSIÓN TEMPRANA DE RANGOS "01 AL 99" ────────────────────────────
+    // En esta sintaxis el primer texto es el nombre del jugador, los dos
+    // números son los límites del rango y el último número es el monto.
+    // Ejemplo:
+    //   juan 01 al 99 con 10
+    // se convierte en:
+    //   juan
+    //   01 02 03 ... 98 99 con 10
+    // De esta forma el core recibe números explícitos y no necesita conocer
+    // la sintaxis conversacional "al".
+    texto = texto.replace(
+      /^([^\d\r\n]+?)\s+(\d{1,2})\s+al\s+(\d{1,2})\s+con\s+\$?(\d+(?:[.,]\d+)?)\s*$/gim,
+      (_, nombre, inicio, fin, monto) => {
+        const desde = Number(inicio);
+        const hasta = Number(fin);
+        if (!Number.isInteger(desde) || !Number.isInteger(hasta) || desde > hasta || desde < 0 || hasta > 99) return _;
+        const numeros = [];
+        for (let n = desde; n <= hasta; n++) numeros.push(String(n).padStart(2, '0'));
+        return `${nombre.trim()}\n${numeros.join(' ')} con ${monto}`;
+      }
+    );
+
+    // Variante sin nombre, por ejemplo: "01 al 99 con 10".
+    texto = texto.replace(
+      /^(\d{1,2})\s+al\s+(\d{1,2})\s+con\s+\$?(\d+(?:[.,]\d+)?)\s*$/gim,
+      (_, inicio, fin, monto) => {
+        const desde = Number(inicio);
+        const hasta = Number(fin);
+        if (!Number.isInteger(desde) || !Number.isInteger(hasta) || desde > hasta || desde < 0 || hasta > 99) return _;
+        const numeros = [];
+        for (let n = desde; n <= hasta; n++) numeros.push(String(n).padStart(2, '0'));
+        return `${numeros.join(' ')} con ${monto}`;
+      }
+    );
+
     // ── NORMALIZACIÓN TEMPRANA DE "PAREJA + MODIFICADOR" ──────────────────
     // "pareja" significa las 10 parejas dobles: 00,11,...,99.
     // Cuando se combina con parle/candado, debemos conservar esa semántica
