@@ -102,8 +102,31 @@ async function validarLimites(supabase, loteriaId, sorteoId, fecha, detalles) {
   return null;
 }
 
+// La BD trabaja con una representación canónica. El parser puede producir
+// candado/parle global/centena global, pero una vez registrada la apuesta:
+//   candado -> parle
+//   candado_global -> parle
+//   candado_combinaciones -> parle
+//   parle_global -> parle
+//   centena_global -> centena
+// No se vuelve a interpretar la sintaxis original al detectar ganadores.
+function tipoCanonico(tipo) {
+  const t = String(tipo || '').trim().toLowerCase();
+  if (t === 'candado' || t === 'candado_global' || t === 'candado_combinaciones' || t === 'parle_global') return 'parle';
+  if (t === 'centena_global') return 'centena';
+  return t;
+}
+
 function normalizarDetalles(resultado) {
-  return (resultado.jugadas || []).flatMap(j => j.jugadas_detalle || []).map(d => ({ tipo: d.tipo, numeros: d.numeros || [], pares: d.pares || null, combinaciones: d.combinaciones || '', monto: Number(d.monto || 0), monto_unitario: Number(d.monto_unitario || 0), linea: d.linea || null }));
+  return (resultado.jugadas || []).flatMap(j => j.jugadas_detalle || []).map(d => ({
+    tipo: tipoCanonico(d.tipo),
+    numeros: d.numeros || [],
+    pares: d.pares || null,
+    combinaciones: d.combinaciones || '',
+    monto: Number(d.monto || 0),
+    monto_unitario: Number(d.monto_unitario || 0),
+    linea: d.linea || null
+  }));
 }
 
 function formatearDetalles(resultado) {
