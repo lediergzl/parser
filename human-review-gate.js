@@ -77,4 +77,40 @@ try {
   // instalarFiltroRevisionHumana(bot) después de crear el bot.
 }
 
+// La revisión humana se registra antes que el flujo de depósitos.
+// Cuando el usuario está en una recarga activa, su texto puede ser un número
+// de 4 cifras (por ejemplo, una referencia "1000"). En ese estado la revisión
+// humana debe ceder el turno al siguiente handler para que el depósito procese
+// el monto o la referencia.
+try {
+  const humanReview = require('./human-review');
+  if (humanReview && typeof humanReview.registrarRevisionHumana === 'function' && !humanReview.__LOTO_DEPOSIT_BYPASS__) {
+    const registrarOriginal = humanReview.registrarRevisionHumana;
+    humanReview.registrarRevisionHumana = async function(bot, ...args) {
+      const originalBotOn = bot.on;
+      bot.on = function(event, ...handlers) {
+        if (event === 'text') {
+          const indiceHandler = handlers.length - 1;
+          const handler = handlers[indiceHandler];
+          if (typeof handler === 'function') {
+            handlers[indiceHandler] = async function(ctx, next) {
+              if (flujoInteractivoActivo(ctx)) return next();
+              return handler(ctx, next);
+            };
+          }
+        }
+        return originalBotOn.call(this, event, ...handlers);
+      };
+      try {
+        return await registrarOriginal.call(this, bot, ...args);
+      } finally {
+        bot.on = originalBotOn;
+      }
+    };
+    humanReview.__LOTO_DEPOSIT_BYPASS__ = true;
+  }
+} catch (err) {
+  console.error('⚠️ No se pudo instalar bypass de depósitos para revisión humana:', err);
+}
+
 module.exports = { esCandidatoRevision, instalarFiltroRevisionHumana };
