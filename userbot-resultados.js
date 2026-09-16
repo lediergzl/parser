@@ -30,12 +30,14 @@ const TERMINO_GENERICO = {
   'medio dia': 'mediodia', mediodia: 'mediodia', dia: 'mediodia',
   evening: 'tarde', tarde: 'tarde', atardecer: 'tarde',
   night: 'noche', noche: 'noche',
+  morning: 'manana', manana: 'manana', morning: 'manana',
 };
 
 const CONCEPTO_A_SORTEO = {
   florida: { mediodia: 'Día', tarde: 'Noche', noche: 'Noche' },
   'new york': { mediodia: 'Día', tarde: 'Noche', noche: 'Noche' },
   georgia: { mediodia: 'Día', tarde: 'Tarde', noche: 'Noche' },
+  tennessee: { manana: 'Morning', mediodia: 'Day', tarde: 'Evening', noche: 'Night' },
 };
 
 function limpiarInvisibles(s) {
@@ -52,7 +54,12 @@ function normalizar(s) {
     .trim();
 }
 
-const LOTERIA_DISPLAY = { florida: 'Florida', 'new york': 'New York', georgia: 'Georgia' };
+const LOTERIA_DISPLAY = {
+  florida: 'Florida',
+  'new york': 'New York',
+  georgia: 'Georgia',
+  tennessee: 'Tennessee',
+};
 
 function contieneSecuencia(tokens, frase) {
   const partes = frase.split(' ');
@@ -119,17 +126,19 @@ function parsearMensajeResultado(texto) {
   const nombreSorteo = CONCEPTO_A_SORTEO[loteriaKey][concepto];
   if (!nombreSorteo) return null;
 
-  const mPick3 = texto.match(/pick\s*3\D*?(\d{1,3})/i);
-  const mPick4 = texto.match(/pick\s*4\D*?(\d{1,4})/i);
+  const mPick3 = texto.match(/pick\s*3\s*:\s*(\d{3})(?!\d)/i);
+  const mPick4 = texto.match(/pick\s*4\s*:\s*(\d{4})(?!\d)/i);
   if (!mPick3 && !mPick4) return null;
 
-  const pick3 = mPick3 ? mPick3[1].padStart(3, '0') : null;
-  const pick4 = mPick4 ? mPick4[1].padStart(4, '0') : null;
+  const pick3 = mPick3 ? mPick3[1] : null;
+  const pick4 = mPick4 ? mPick4[1] : null;
 
   const centena = pick3 || null;
   const fijo = pick3 ? pick3.slice(-2) : null;
   // Pick 4 genera exactamente DOS corridos: primeros 2 y últimos 2.
   // Ejemplo: 0964 -> 09 y 64. Nunca se genera 96.
+  // Si ambos valores son iguales (ej. 6868 -> 68, 68), se conservan
+  // como dos posiciones distintas porque pueden producir dos premios.
   const corrido = pick4 ? [pick4.slice(0, 2), pick4.slice(2, 4)] : [];
 
   let fecha = null;
@@ -196,13 +205,13 @@ async function iniciarUserbotResultados() {
       const username = remitente?.username ? `@${remitente.username}` : null;
       if (username !== ORIGEN_ESPERADO) return;
 
-      console.log('📩 Mensaje de', username, ':\n', msg.message, '\n---');
-
+      // Solo mostramos/intentamos procesar mensajes que realmente tienen
+      // estructura de resultado. Enlaces, avisos u otros mensajes del bot
+      // se ignoran silenciosamente.
       const parsed = parsearMensajeResultado(msg.message);
-      if (!parsed) {
-        console.log('⚠️  No se pudo parsear (parser pendiente de completar). Texto crudo arriba ☝️');
-        return;
-      }
+      if (!parsed) return;
+
+      console.log('📩 Mensaje de', username, ':\n', msg.message, '\n---');
 
       const destino = await resolverLoteriaSorteo(parsed.loteriaNombre, parsed.nombreSorteo);
       if (destino.error) {
@@ -250,11 +259,14 @@ async function buscarUltimoResultadoEnChat(chat) {
     if (!msg.message) continue;
     const remitente = await msg.getSender();
     const username = remitente?.username ? `@${remitente.username}` : null;
-    if (username === ORIGEN_ESPERADO) { encontrado = msg; break; }
+    if (username !== ORIGEN_ESPERADO) continue;
+    if (!parsearMensajeResultado(msg.message)) continue;
+    encontrado = msg;
+    break;
   }
 
   if (!encontrado) {
-    return { ok: false, message: `No encontré ningún mensaje de ${ORIGEN_ESPERADO} en los últimos 50 mensajes de "${chat}".` };
+    return { ok: false, message: `No encontré ningún mensaje de resultado válido de ${ORIGEN_ESPERADO} en los últimos 50 mensajes de "${chat}".` };
   }
 
   const parsed = parsearMensajeResultado(encontrado.message);
