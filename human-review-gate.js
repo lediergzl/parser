@@ -16,6 +16,21 @@ function esCandidatoRevision(texto) {
   });
 }
 
+function flujoInteractivoActivo(ctx) {
+  const userId = ctx?.from?.id;
+  if (!userId) return false;
+
+  // Recarga de saldo: el usuario puede enviar cualquier monto (1000,
+  // 10000, etc.) y luego una referencia. El gate de revisión humana no
+  // debe bloquear esos mensajes solo porque no parecen una jugada.
+  try {
+    const depositStates = global.__LOTO_DEPOSIT_STATES__;
+    if (depositStates?.has?.(userId)) return true;
+  } catch (_) {}
+
+  return false;
+}
+
 function instalarFiltroRevisionHumana(bot) {
   const originalOn = bot.on.bind(bot);
   bot.on = function(event, ...args) {
@@ -25,7 +40,7 @@ function instalarFiltroRevisionHumana(bot) {
       if (typeof handler === 'function') {
         args[indiceHandler] = async function(ctx, next) {
           const texto = ctx.message?.text;
-          if (!esCandidatoRevision(texto)) return next();
+          if (!esCandidatoRevision(texto) && !flujoInteractivoActivo(ctx)) return next();
           return handler(ctx, next);
         };
       }
@@ -48,7 +63,7 @@ try {
         const handler = args[indiceHandler];
         if (typeof handler === 'function') {
           args[indiceHandler] = async function(ctx, next) {
-            if (!esCandidatoRevision(ctx.message?.text)) return next();
+            if (!esCandidatoRevision(ctx.message?.text) && !flujoInteractivoActivo(ctx)) return next();
             return handler(ctx, next);
           };
         }
