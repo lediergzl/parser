@@ -2,6 +2,7 @@
 // recuperación de jugadas por saldo + flujo de apuestas.
 require('./bootstrap.js');
 require('./decimal-amount-patch');
+require('./premio-diagnostico');
 
 const { registrarRevisionHumana } = require('./human-review');
 const { registrarPendientesPorSaldo } = require('./pending-balance');
@@ -18,9 +19,6 @@ if (!bot) {
 
     let texto = ctx.message.text;
 
-    // Guardar el total declarado del comprobante antes de retirarlo del
-    // texto que recibe el motor. Acepta Total 400, Total: 400,
-    // Total-400 y Total de 400.
     const totalDeclaradoMatch = texto.match(
       /\btotal\s*(?:(?:[-:]\s*)|(?:de\s+))?\$?\s*(\d+(?:[.,]\d+)?)/i
     );
@@ -29,16 +27,6 @@ if (!bot) {
       ctx.state.totalDeclarado = Number(String(totalDeclaradoMatch[1]).replace(',', '.'));
     }
 
-    // ── EXPANSIÓN TEMPRANA DE RANGOS "01 AL 99" ────────────────────────────
-    // En esta sintaxis el primer texto es el nombre del jugador, los dos
-    // números son los límites del rango y el último número es el monto.
-    // Ejemplo:
-    //   juan 01 al 99 con 10
-    // se convierte en:
-    //   juan
-    //   01 02 03 ... 98 99 con 10
-    // De esta forma el core recibe números explícitos y no necesita conocer
-    // la sintaxis conversacional "al".
     texto = texto.replace(
       /^([^\d\r\n]+?)\s+(\d{1,2})\s+al\s+(\d{1,2})\s+con\s+\$?(\d+(?:[.,]\d+)?)\s*$/gim,
       (_, nombre, inicio, fin, monto) => {
@@ -51,7 +39,6 @@ if (!bot) {
       }
     );
 
-    // Variante sin nombre, por ejemplo: "01 al 99 con 10".
     texto = texto.replace(
       /^(\d{1,2})\s+al\s+(\d{1,2})\s+con\s+\$?(\d+(?:[.,]\d+)?)\s*$/gim,
       (_, inicio, fin, monto) => {
@@ -64,19 +51,6 @@ if (!bot) {
       }
     );
 
-    // ── NORMALIZACIÓN TEMPRANA DE "PAREJA + MODIFICADOR" ──────────────────
-    // "pareja" significa las 10 parejas dobles: 00,11,...,99.
-    // Cuando se combina con parle/candado, debemos conservar esa semántica
-    // antes de que el core elimine la palabra "pareja" como ruido DSL.
-    // Se acepta tanto "parle 10000" como "parle10000" y lo mismo para candado.
-    // Ejemplos:
-    //   polo pareja parle10000
-    //   polo pareja parle 10000
-    //   polo pareja candado10000
-    //   polo pareja candado 10000
-    // Se convierten en:
-    //   polo\n00 11 22 33 44 55 66 77 88 99 parle con 10000
-    //   polo\n00 11 22 33 44 55 66 77 88 99 candado con 10000
     const numerosPareja = '00 11 22 33 44 55 66 77 88 99';
     const patronParejaModificador =
       /^([^\d\r\n]+?)\s+(?:pareja|parejas|pares)\s+(parle|parlet|p|candado|c)\s*(\d+(?:[.,]\d+)?)\s*$/gim;
@@ -90,8 +64,6 @@ if (!bot) {
       }
     );
 
-    // Variante con el monto pegado al modificador cuando el nombre ya fue
-    // separado previamente o cuando la línea llega sin nombre.
     texto = texto.replace(
       /^(?:pareja|parejas|pares)\s+(parle|parlet|p|candado|c)\s*(\d+(?:[.,]\d+)?)\s*$/gim,
       (_, modificador, monto) => {
@@ -101,21 +73,11 @@ if (!bot) {
       }
     );
 
-    // FIX: cuando el nombre del jugador viene en la misma línea que
-    // "pareja candado 10000", el preprocesador del core puede interpretar
-    // el nombre como parte de la jugada y dejar una línea inválida.
-    // Separamos únicamente este patrón, conservando el nombre intacto.
-    // Ejemplo:
-    //   "polo pareja candado 10000"
-    // se convierte en:
-    //   "polo\npareja candado 10000"
-    // y el core aplica su normalización existente de pareja+candado.
     texto = texto.replace(
       /^([^\d\r\n]+?)\s+(?:pareja|parejas|pares)\s+(?:de\s+)?candado\s+(\d+(?:[.,]\d+)?)[ \t]*$/gim,
       (_, nombre, monto) => `${nombre.trim()}\npareja candado ${monto}`
     );
 
-    // También soportar el orden inverso: "polo candado pareja 10000".
     texto = texto.replace(
       /^([^\d\r\n]+?)\s+candado\s+(?:pareja|parejas|pares)\s+(\d+(?:[.,]\d+)?)[ \t]*$/gim,
       (_, nombre, monto) => `${nombre.trim()}\ncandado pareja ${monto}`
@@ -126,8 +88,6 @@ if (!bot) {
       (_, prefijo, numero) => `${prefijo}${numero}`
     );
 
-    // El total del comprobante es informativo, nunca una jugada.
-    // Se elimina también cuando está pegado en la misma línea.
     texto = texto.replace(
       /\btotal\s*(?:(?:[-:]\s*)|(?:\s+de\s+))?\$?\s*\d+(?:[.,]\d+)?/gi,
       ''
@@ -146,9 +106,6 @@ if (!bot) {
       process.exitCode = 1;
     });
 
-  // ── Userbot de resultados (@boliterostop_bot) — mismo proceso, opcional ──
-  // Si faltan TG_API_ID/TG_API_HASH/TG_SESSION, o el paquete 'telegram' no
-  // está instalado todavía, simplemente no arranca y el bot sigue normal.
   try {
     require('./userbot-resultados').iniciarUserbotResultados()
       .catch(err => console.error('❌ Userbot de resultados no pudo iniciar:', err && err.stack ? err.stack : err));
