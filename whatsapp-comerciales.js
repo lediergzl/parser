@@ -4,6 +4,7 @@ const { DisconnectReason } = require('@whiskeysockets/baileys');
 
 const sockets = new Map();
 const reconnectTimers = new Map();
+const activeBettingChats = new Set();
 
 function enabled() {
   return String(process.env.WA_BAILEYS_ENABLED || '').trim().toLowerCase() === 'true';
@@ -33,6 +34,14 @@ function textFromMessage(message) {
 
 function senderName(message) {
   return String(message?.pushName || message?.verifiedBizName || '').trim();
+}
+
+function bettingChatKey(comercialId, whatsappJid) {
+  return `${Number(comercialId)}:${String(whatsappJid || '').trim()}`;
+}
+
+function normalizeCommand(texto) {
+  return String(texto || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 function pngChunk(type, data) {
@@ -188,6 +197,23 @@ async function recibirMensaje(db, sock, comercialId, message) {
   if (!remoteJid || remoteJid === 'status@broadcast') return;
   const senderJid = String(message.key.participant || remoteJid).trim();
   const nombreSender = senderName(message);
+  const key = bettingChatKey(comercialId, senderJid || remoteJid);
+  const command = normalizeCommand(texto);
+
+  if (command === '/jugar') {
+    activeBettingChats.add(key);
+    await sock.sendMessage(remoteJid, { text: '🎰 Modo jugada activado. Puedes enviar tus jugadas ahora.\n\nPara salir del modo jugada escribe /salir.' });
+    return;
+  }
+
+  if (command === '/salir') {
+    activeBettingChats.delete(key);
+    await sock.sendMessage(remoteJid, { text: '✅ Modo jugada desactivado. Tus mensajes ya no se procesarán como apuestas.\n\nCuando quieras jugar de nuevo escribe /jugar.' });
+    return;
+  }
+
+  if (!activeBettingChats.has(key)) return;
+
   const { data: inserted, error } = await db.from('whatsapp_inbox').insert([{ comercial_telegram_id: comercialId, message_id: String(message.key.id), remote_jid: remoteJid, sender_jid: senderJid || null, sender_name: nombreSender || null, texto }]).select('id').single();
   if (error) {
     if (String(error.message || '').toLowerCase().includes('duplicate')) return;
@@ -245,6 +271,9 @@ async function conectarComercial(db, comercialId, force = false) {
 async function desconectarComercial(db, id) {
   const sock = sockets.get(Number(id));
   if (sock) { try { sock.logout(); } catch (_) { try { sock.end?.(); } catch (_) {} } sockets.delete(Number(id)); }
+  for (const key of activeBettingChats) {
+    if (key.startsWith(`${Number(id)}:`)) activeBettingChats.delete(key);
+  }
   await db.from('whatsapp_comercial_session').update({ estado: 'desconectado', creds: null, keys: null, ultimo_qr: null, updated_at: new Date().toISOString() }).eq('comercial_telegram_id', id);
 }
 
@@ -273,7 +302,7 @@ async function registrarWhatsappComerciales(bot) {
     const role = await commercialRole(db, ctx.from.id);
     if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Sin permiso.');
     const { data } = await db.from('whatsapp_comercial_session').select('estado,telefono,ultimo_error,ultimo_mensaje_at').eq('comercial_telegram_id', ctx.from.id).maybeSingle();
-    return ctx.reply(`📲 WhatsApp\n\nEstado: ${data?.estado || statusFor(ctx.from.id)}${data?.telefono ? `\nTeléfono: ${data.telefono}` : ''}${data?.ultimo_error ? `\nError: ${data.ultimo_error}` : ''}${data?.ultimo_mensaje_at ? `\nÚltimo mensaje: ${data.ultimo_mensaje_at}` : ''}`);
+    return ctx.reply(`📲 WhatsApp\nEstado: ${data?.estado || statusFor(ctx.from.id)}${data?.telefono ? `\nTeléfono: ${data.telefono}` : ''}${data?.ultimo_error ? `\nError: ${data.ultimo_error}` : ''}${data?.ultimo_mensaje_at ? `\nÚltimo mensaje: ${data.ultimo_mensaje_at}` : ''}`);
   });
   bot.command('wa_desconectar', async ctx => {
     const role = await commercialRole(db, ctx.from.id);
