@@ -1,7 +1,7 @@
 // Menú interactivo de WhatsApp para LotoPro.
-// Baileys 6.7.x: nativeFlow debe ir dentro de viewOnceMessage.
-const baileys = require('@whiskeysockets/baileys');
-const originalMakeWASocket = baileys.default;
+// Se instala a nivel de Module._load para que funcione aunque otros preloads
+// carguen Baileys antes/después y aunque Baileys exponga default como getter.
+const Module = require('module');
 
 console.log('[WA MENU] preload cargado');
 
@@ -26,11 +26,7 @@ function rowIdFromIncoming(message) {
     m?.buttonsResponseMessage?.selectedButtonId ||
     m?.listResponseMessage?.singleSelectReply?.selectedRowId ||
     m?.templateButtonReplyMessage?.selectedId ||
-    params?.id ||
-    params?.selectedId ||
-    params?.rowId ||
-    params?.selected_row_id ||
-    ''
+    params?.id || params?.selectedId || params?.rowId || params?.selected_row_id || ''
   );
 }
 
@@ -38,7 +34,6 @@ function adaptarRespuestaInteractiva(message) {
   const id = rowIdFromIncoming(message);
   if (!id) return false;
   console.log(`[WA MENU] respuesta interactiva: ${id}`);
-  // Conservamos el resto del mensaje para no romper metadatos de Baileys.
   message.message = { conversation: id };
   return true;
 }
@@ -61,15 +56,11 @@ function parseSorteos(text) {
   return rows;
 }
 
-async function sendNativeFlow(originalSend, sock, jid, bodyText, buttons, fallbackText) {
+async function sendNativeFlow(baileys, originalSend, sock, jid, bodyText, buttons, fallbackText) {
   try {
     const { proto, generateWAMessageFromContent } = baileys;
-    if (typeof generateWAMessageFromContent !== 'function') {
-      throw new Error('generateWAMessageFromContent no disponible');
-    }
-    if (!proto?.Message?.InteractiveMessage) {
-      throw new Error('InteractiveMessage no disponible en Baileys');
-    }
+    if (typeof generateWAMessageFromContent !== 'function') throw new Error('generateWAMessageFromContent no disponible');
+    if (!proto?.Message?.InteractiveMessage) throw new Error('InteractiveMessage no disponible en Baileys');
 
     const nativeButtons = buttons.map(button => ({
       name: button.name,
@@ -79,17 +70,11 @@ async function sendNativeFlow(originalSend, sock, jid, bodyText, buttons, fallba
     const content = {
       viewOnceMessage: {
         message: {
-          messageContextInfo: {
-            deviceListMetadata: {},
-            deviceListMetadataVersion: 2
-          },
+          messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
           interactiveMessage: {
             body: { text: bodyText },
             footer: { text: 'LotoPro' },
-            nativeFlowMessage: {
-              buttons: nativeButtons,
-              messageParamsJson: ''
-            }
+            nativeFlowMessage: { buttons: nativeButtons, messageParamsJson: '' }
           }
         }
       }
@@ -99,11 +84,7 @@ async function sendNativeFlow(originalSend, sock, jid, bodyText, buttons, fallba
       userJid: sock?.user?.id,
       upload: sock?.waUploadToServer
     });
-
-    if (!generated?.key?.id || !generated?.message) {
-      throw new Error('Baileys no generó el mensaje interactivo');
-    }
-
+    if (!generated?.key?.id || !generated?.message) throw new Error('Baileys no generó el mensaje interactivo');
     await sock.relayMessage(jid, generated.message, { messageId: generated.key.id });
     console.log(`[WA MENU] interactivo enviado a ${jid}`);
     return true;
@@ -113,76 +94,63 @@ async function sendNativeFlow(originalSend, sock, jid, bodyText, buttons, fallba
       await originalSend(jid, { text: fallbackText || bodyText });
       console.log(`[WA MENU] fallback texto enviado a ${jid}`);
     } catch (fallbackError) {
-      console.error('[WA MENU] fallback también falló:', fallbackError?.stack || fallbackError?.message || fallbackError);
+      console.error('[WA MENU] fallback también falló:', fallbackError?.stack || fallbackError);
     }
     return false;
   }
 }
 
-async function sendList(originalSend, sock, jid, title, description, rows) {
-  if (!rows.length) return false;
-  const sectionRows = rows.slice(0, 100).map(row => ({
-    title: row.title,
-    description: row.description,
-    id: row.id
-  }));
+function installMenuPatch(baileys) {
+  if (!baileys || baileys.__lotoProMenuPatched) return baileys;
 
-  return sendNativeFlow(
-    originalSend,
-    sock,
-    jid,
-    description,
-    [{
-      name: 'single_select',
-      params: {
-        title: 'Seleccionar',
-        sections: [{ title, rows: sectionRows }]
-      }
-    }],
-    `${description}\n\n${rows.map((r, i) => `${i + 1}. ${r.title} — escribe ${r.id}`).join('\n')}`
-  );
-}
+  const originalMake = baileys.default || baileys.makeWASocket;
+  if (typeof originalMake !== 'function') {
+    console.error('[WA MENU] Baileys cargó sin makeWASocket. keys:', Object.keys(baileys || {}).slice(0, 30).join(','));
+    return baileys;
+  }
 
-async function sendMainMenu(originalSend, sock, jid) {
-  return sendNativeFlow(
-    originalSend,
-    sock,
-    jid,
-    '🎰 LOTO PRO\n\n¿Qué deseas hacer?',
-    [
-      { name: 'quick_reply', params: { display_text: '🎲 Seleccionar lotería', id: '/loterias' } },
-      { name: 'quick_reply', params: { display_text: '🎯 Seleccionar sorteo', id: '/sorteos' } },
-      { name: 'quick_reply', params: { display_text: '💰 Mi saldo', id: '/saldo' } },
-      { name: 'quick_reply', params: { display_text: '💳 Recargar saldo', id: '/depositar' } },
-      { name: 'quick_reply', params: { display_text: '❌ Salir', id: '/salir' } }
-    ],
-    '🎰 LOTO PRO\n\n🎲 Seleccionar lotería: /loterias\n🎯 Seleccionar sorteo: /sorteos\n💰 Mi saldo: /saldo\n💳 Recargar: /depositar\n❌ Salir: /salir'
-  );
-}
-
-if (typeof originalMakeWASocket === 'function' && !originalMakeWASocket.__lotoProMenuPatch) {
-  const patchedMakeWASocket = function (...args) {
-    const sock = originalMakeWASocket(...args);
+  const patchedMake = function (...args) {
+    const sock = originalMake(...args);
     const originalSend = sock?.sendMessage?.bind(sock);
     const originalOn = sock?.ev?.on?.bind(sock.ev);
-    if (!originalSend || !originalOn) return sock;
+    if (!originalSend || !originalOn) {
+      console.error('[WA MENU] socket sin sendMessage/ev.on');
+      return sock;
+    }
 
     sock.sendMessage = async function (jid, content, options) {
       const text = norm(content?.text);
-
       if (text.startsWith('🎰 Modo jugada activado.')) {
         console.log(`[WA MENU] interceptando /jugar para ${jid}`);
-        return sendMainMenu(originalSend, sock, jid);
+        return sendNativeFlow(baileys, originalSend, sock, jid,
+          '🎰 LOTOPRO\n\n¿Qué deseas hacer?',
+          [
+            { name: 'quick_reply', params: { display_text: '🎲 Seleccionar lotería', id: '/loterias' } },
+            { name: 'quick_reply', params: { display_text: '🎯 Seleccionar sorteo', id: '/sorteos' } },
+            { name: 'quick_reply', params: { display_text: '💰 Mi saldo', id: '/saldo' } },
+            { name: 'quick_reply', params: { display_text: '💳 Recargar saldo', id: '/depositar' } },
+            { name: 'quick_reply', params: { display_text: '❌ Salir', id: '/salir' } }
+          ],
+          '🎰 LOTOPRO\n\n🎲 Seleccionar lotería: /loterias\n🎯 Seleccionar sorteo: /sorteos\n💰 Mi saldo: /saldo\n💳 Recargar saldo: /depositar\n❌ Salir: /salir'
+        );
       }
 
       if (text.includes('🎲 LOTERÍAS DISPONIBLES')) {
         const rows = parseLoterias(text);
-        if (rows.length) return sendList(originalSend, sock, jid, '🎲 Loterías disponibles', 'Selecciona la lotería con la que deseas jugar:', rows);
+        if (rows.length) return sendNativeFlow(baileys, originalSend, sock, jid,
+          'Selecciona la lotería con la que deseas jugar:',
+          [{ name: 'single_select', params: { title: 'Seleccionar lotería', sections: [{ title: 'Loterías disponibles', rows }] } }],
+          `${text}\n\nSelecciona escribiendo /loteria ID`
+        );
       }
 
       if (text.includes('Sorteos disponibles:')) {
         const rows = parseSorteos(text);
-        if (rows.length) return sendList(originalSend, sock, jid, '🎰 Sorteos disponibles', 'Selecciona el sorteo que deseas jugar:', rows);
+        if (rows.length) return sendNativeFlow(baileys, originalSend, sock, jid,
+          'Selecciona el sorteo que deseas jugar:',
+          [{ name: 'single_select', params: { title: 'Seleccionar sorteo', sections: [{ title: 'Sorteos disponibles', rows }] } }],
+          `${text}\n\nSelecciona escribiendo /sorteo ID`
+        );
       }
 
       return originalSend(jid, content, options);
@@ -190,21 +158,34 @@ if (typeof originalMakeWASocket === 'function' && !originalMakeWASocket.__lotoPr
 
     sock.ev.on = function (event, listener) {
       if (event !== 'messages.upsert' || typeof listener !== 'function') return originalOn(event, listener);
-      const wrapped = async payload => {
+      return originalOn(event, async payload => {
         for (const message of payload?.messages || []) {
-          if (message?.key?.fromMe) continue;
-          adaptarRespuestaInteractiva(message);
+          if (!message?.key?.fromMe) adaptarRespuestaInteractiva(message);
         }
         return listener(payload);
-      };
-      return originalOn(event, wrapped);
+      });
     };
 
     console.log('[WA MENU] parche interactivo instalado en socket');
     return sock;
   };
 
-  Object.assign(patchedMakeWASocket, originalMakeWASocket);
-  patchedMakeWASocket.__lotoProMenuPatch = true;
-  baileys.default = patchedMakeWASocket;
+  try { baileys.default = patchedMake; } catch (_) {}
+  try { if (typeof baileys.makeWASocket === 'function') baileys.makeWASocket = patchedMake; } catch (_) {}
+  try { Object.defineProperty(baileys, '__lotoProMenuPatched', { value: true, configurable: true }); } catch (_) { baileys.__lotoProMenuPatched = true; }
+  console.log('[WA MENU] makeWASocket parcheado');
+  return baileys;
 }
+
+const originalLoad = Module._load;
+if (!Module.__lotoProMenuLoadHook) {
+  Module.__lotoProMenuLoadHook = true;
+  Module._load = function(request, parent, isMain) {
+    const loaded = originalLoad.call(this, request, parent, isMain);
+    if (request === '@whiskeysockets/baileys') return installMenuPatch(loaded);
+    return loaded;
+  };
+}
+
+// Carga inmediata para verificar y parchear el módulo en este proceso.
+try { installMenuPatch(require('@whiskeysockets/baileys')); } catch (e) { console.error('[WA MENU] instalación inicial falló:', e?.stack || e); }
