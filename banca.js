@@ -54,14 +54,22 @@ async function registrarModuloComercial(bot) {
     if (error) throw error;
     return nuevo;
   }
-  async function updateClienteBancaSaldo(id, saldo) { await supabase.from('clientes_banca').update({ saldo, updated_at: new Date() }).eq('id', id); }
-  async function saveBetComercial({ comercialId, clienteBancaId, loteriaId, sorteoId, fecha, inputRaw, totalApuesta, detalle, moneda }) {
-    const { error } = await supabase.from('bets').insert([{
-      user_telegram_id: null, loteria_id: loteriaId, sorteo_id: sorteoId, fecha_apuesta: fecha,
-      input_raw: inputRaw, total_apuesta: totalApuesta, detalle, saldo_antes: 0, saldo_despues: 0,
-      moneda: moneda || 'cup', origen: 'comercial', comercial_telegram_id: comercialId, cliente_banca_id: clienteBancaId,
-    }]);
+  async function registrarBetAtomica({ comercialId, clienteBancaId, loteriaId, sorteoId, fecha, inputRaw, totalApuesta, detalle, moneda }) {
+    const { data, error } = await supabase.rpc('registrar_bet_comercial_atomica', {
+      p_comercial_telegram_id: comercialId,
+      p_cliente_banca_id: clienteBancaId,
+      p_loteria_id: loteriaId,
+      p_sorteo_id: sorteoId,
+      p_fecha_apuesta: fecha,
+      p_input_raw: inputRaw,
+      p_total_apuesta: totalApuesta,
+      p_detalle: detalle,
+      p_moneda: moneda || 'cup'
+    });
     if (error) throw error;
+    const r = Array.isArray(data) ? data[0] : data;
+    if (!r?.ok || !r.bet_id) throw new Error(r?.message || 'La base de datos no confirmó la apuesta.');
+    return { id: Number(r.bet_id), saldoAntes: Number(r.saldo_antes || 0), credito: Number(r.credito || 0), saldoDespues: Number(r.saldo_despues || 0) };
   }
 
   bot.command('probar_resultado', async (ctx) => {
@@ -185,7 +193,7 @@ async function registrarModuloComercial(bot) {
       await ctx.reply(`✅ Resultado guardado: fijo ${fijo}, corrido ${corrido}${centena?`, centena ${centena}`:''}.\nBuscando ganadores...`);try{await detectarPremios(supabase,resultado);await ctx.reply('🔍 Búsqueda de ganadores completada. Usa /premios para revisarlos.');}catch(e){console.error('detectarPremios error:',e);await ctx.reply('⚠️ El resultado se guardó pero hubo un error buscando ganadores.');}return;
     }
     const jState=bancaJugadaState.get(userId);if(jState){bancaJugadaState.delete(userId);const Engine=global.Engine,Preprocesador=global.Preprocesador,Utils=global.Utils,Expansion=global.Expansion;if(!Engine?.calcular||!Preprocesador?.preprocesarJugada||!Utils?.limpiarMonto||!Expansion)return ctx.reply('❌ Motor LotoPro no disponible en el proceso del bot.');let result;try{result=Engine.calcular({rawInput:texto,loteriaId:jState.loteriaId,sorteoId:jState.sorteoId},{Expansion,limpiarMonto:Utils.limpiarMonto,preprocesarJugada:Preprocesador.preprocesarJugada,obtenerTimestampLocal:()=>new Date().toISOString()});}catch(e){console.error('Engine.calcular error (comercial):',e);return ctx.reply('❌ Error interno procesando las jugadas.');}if(!result?.ok||!result.certified){const detalleErr=(result?.errors||[]).map(e=>`• ${e.message||e.reason}`).join('\n');return ctx.reply(`❌ ${result?.message||'No se pudo procesar.'}\n${detalleErr}`);}
-      let resumen='';const fecha=fechaCuba();try{for(const j of result.jugadas){const cliente=await findOrCreateClienteBanca(userId,j.jugador_nombre);const montoTotal=Number(j.monto_total)||0;const saldoDisponible=Number(cliente.saldo)||0;const usarCredito=Math.min(saldoDisponible,montoTotal);const saldoNuevo=saldoDisponible-usarCredito;if(usarCredito>0)await updateClienteBancaSaldo(cliente.id,saldoNuevo);await saveBetComercial({comercialId:userId,clienteBancaId:cliente.id,loteriaId:jState.loteriaId,sorteoId:jState.sorteoId,fecha,inputRaw:j.jugada_texto,totalApuesta:montoTotal,detalle:JSON.stringify(j.jugadas_detalle),moneda:jState.moneda});resumen+=`👤 ${j.jugador_nombre}: $${montoTotal.toFixed(2)}`;if(usarCredito>0)resumen+=` (💳 crédito aplicado $${usarCredito.toFixed(2)}, saldo resta $${saldoNuevo.toFixed(2)})`;resumen+='\n';}}catch(e){console.error('Error guardando jugadas de comercial:',e);return ctx.reply('❌ Ocurrió un error guardando algunas jugadas. Revisa e intenta de nuevo.');}
+      let resumen='';const fecha=fechaCuba();try{for(const j of result.jugadas){const cliente=await findOrCreateClienteBanca(userId,j.jugador_nombre);const montoTotal=Number(j.monto_total)||0;const registro=await registrarBetAtomica({comercialId:userId,clienteBancaId:cliente.id,loteriaId:jState.loteriaId,sorteoId:jState.sorteoId,fecha,inputRaw:j.jugada_texto,totalApuesta:montoTotal,detalle:JSON.stringify(j.jugadas_detalle),moneda:jState.moneda});resumen+=`👤 ${j.jugador_nombre}: $${montoTotal.toFixed(2)}`;if(registro.credito>0)resumen+=` (💳 crédito aplicado $${registro.credito.toFixed(2)}, saldo resta $${registro.saldoDespues.toFixed(2)})`;resumen+='\n';}}catch(e){console.error('Error guardando jugadas de comercial:',e);return ctx.reply('❌ Ocurrió un error guardando algunas jugadas. Revisa e intenta de nuevo.');}
       return ctx.reply(`✅ Jugadas registradas:\n\n${resumen}\nTotal general: $${Number(result.totalGeneral).toFixed(2)}`);
     }
     return next();
