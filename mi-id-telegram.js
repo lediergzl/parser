@@ -1,6 +1,6 @@
 // ============================================================================
 // mi-id-telegram.js — Identificación sencilla del usuario de Telegram.
-// Permite que cualquier usuario consulte su ID sin usar bots externos.
+// También registra el menú global de comandos del bot.
 // ============================================================================
 const { createClient } = require('@supabase/supabase-js');
 
@@ -62,15 +62,32 @@ async function registrarMiIdTelegram(bot) {
     }
   });
 
-  // Hace que el comando sea visible desde el menú de comandos de Telegram.
+  // IMPORTANTE: setMyCommands reemplaza la lista anterior completa.
+  // Antes este módulo registraba solamente start/mi_id/saldo y ocultaba
+  // accidentalmente todos los demás comandos ya implementados.
+  const commands = [
+    { command: 'start', description: 'Abrir menú principal' },
+    { command: 'mi_id', description: 'Ver mi ID de Telegram' },
+    { command: 'saldo', description: 'Consultar mi saldo' },
+    { command: 'jugar', description: 'Registrar una jugada' },
+    { command: 'jugada', description: 'Registrar jugadas como comercial' },
+    { command: 'resultado', description: 'Registrar resultado como comercial' },
+    { command: 'premios', description: 'Consultar premios pendientes' },
+    { command: 'wa_conectar', description: 'Conectar mi WhatsApp' },
+    { command: 'wa_qr', description: 'Mostrar el QR de WhatsApp' },
+    { command: 'wa_estado', description: 'Ver estado de WhatsApp' },
+    { command: 'wa_desconectar', description: 'Desconectar mi WhatsApp' },
+    { command: 'wa_comerciales', description: 'Ver WhatsApp de comerciales (admin)' },
+    { command: 'comercial_add', description: 'Registrar un comercial (admin)' },
+    { command: 'verificar_premio', description: 'Diagnosticar un premio' },
+    { command: 'probar_resultado', description: 'Probar lectura de resultado (admin)' }
+  ];
+
   try {
-    await bot.telegram.setMyCommands([
-      { command: 'start', description: 'Abrir menú principal' },
-      { command: 'mi_id', description: 'Ver mi ID de Telegram' },
-      { command: 'saldo', description: 'Consultar mi saldo' },
-    ]);
+    await bot.telegram.setMyCommands(commands);
+    console.log(`✅ Menú de comandos de Telegram registrado (${commands.length} comandos)`);
   } catch (err) {
-    console.error('No se pudo registrar /mi_id en el menú de Telegram:', err.message);
+    console.error('No se pudo registrar el menú de comandos de Telegram:', err.message);
   }
 
   console.log('✅ Comando /mi_id registrado');
