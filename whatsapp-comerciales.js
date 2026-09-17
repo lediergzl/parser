@@ -174,6 +174,29 @@ async function buscarClienteWhatsApp(db, comercialId, senderJid, nombreSender) {
   return nuevo;
 }
 
+async function registrarBetAtomica(db, { comercialId, clienteBancaId, loteriaId, sorteoId, fecha, inputRaw, totalApuesta, detalle, moneda }) {
+  const { data, error } = await db.rpc('registrar_bet_comercial_atomica', {
+    p_comercial_telegram_id: comercialId,
+    p_cliente_banca_id: clienteBancaId,
+    p_loteria_id: loteriaId,
+    p_sorteo_id: sorteoId,
+    p_fecha_apuesta: fecha,
+    p_input_raw: inputRaw,
+    p_total_apuesta: totalApuesta,
+    p_detalle: detalle,
+    p_moneda: moneda || 'cup'
+  });
+  if (error) throw error;
+  const r = Array.isArray(data) ? data[0] : data;
+  if (!r?.ok || !r.bet_id) throw new Error(r?.message || 'La base de datos no confirmó la apuesta.');
+  return {
+    id: Number(r.bet_id),
+    saldoAntes: Number(r.saldo_antes || 0),
+    credito: Number(r.credito || 0),
+    saldoDespues: Number(r.saldo_despues || 0)
+  };
+}
+
 async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, senderName: nombreSender }) {
   const db = supa();
   const { data: pref } = await db.from('user_preferences').select('loteria_id,sorteo_id,moneda').eq('telegram_id', comercialId).maybeSingle();
@@ -197,36 +220,24 @@ async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, senderNam
   for (const j of result.jugadas || []) {
     const nombre = String(cliente.nombre || nombreSender || senderJid || 'SIN NOMBRE').trim().slice(0, 120);
     const total = Number(j.monto_total || 0);
-    const saldoAntes = Number(cliente.saldo || 0);
-    const credito = Math.min(saldoAntes, total);
-    const saldoDespues = saldoAntes - credito;
+    if (!Number.isFinite(total) || total < 0) throw new Error('Monto de jugada inválido.');
 
-    if (credito > 0) {
-      const { error: balanceError } = await db
-        .from('clientes_banca')
-        .update({ saldo: saldoDespues, updated_at: new Date().toISOString() })
-        .eq('id', cliente.id);
-      if (balanceError) throw balanceError;
-      cliente.saldo = saldoDespues;
-    }
-
-    const { data: bet, error } = await db.from('bets').insert([{
-      user_telegram_id: null,
-      loteria_id: pref.loteria_id,
-      sorteo_id: pref.sorteo_id,
-      fecha_apuesta: fecha,
-      input_raw: j.jugada_texto || texto,
-      total_apuesta: total,
+    // Descuento de saldo + INSERT de bets ocurren en una sola transacción
+    // PostgreSQL mediante la función RPC. Un fallo no deja saldo descontado.
+    const registro = await registrarBetAtomica(db, {
+      comercialId,
+      clienteBancaId: cliente.id,
+      loteriaId: pref.loteria_id,
+      sorteoId: pref.sorteo_id,
+      fecha,
+      inputRaw: j.jugada_texto || texto,
+      totalApuesta: total,
       detalle: JSON.stringify(j.jugadas_detalle || []),
-      saldo_antes: saldoAntes,
-      saldo_despues: saldoDespues,
-      moneda: pref.moneda || 'cup',
-      origen: 'comercial',
-      comercial_telegram_id: comercialId,
-      cliente_banca_id: cliente.id
-    }]).select('id').single();
-    if (error) throw error;
-    bets.push({ id: bet.id, nombre, total, credito });
+      moneda: pref.moneda || 'cup'
+    });
+
+    cliente.saldo = registro.saldoDespues;
+    bets.push({ id: registro.id, nombre, total, credito: registro.credito, saldoAntes: registro.saldoAntes, saldoDespues: registro.saldoDespues });
   }
 
   return { bets, total: Number(result.totalGeneral || 0), sorteo: sorteo.nombre };
@@ -268,10 +279,13 @@ async function recibirMensaje(db, sock, comercialId, message) {
       senderJid,
       senderName: nombreSender
     });
-    await db.from('whatsapp_inbox').update({ procesado: true, bet_ids: r.bets.map(b => b.id) }).eq('id', inserted.id);
-    const resumen = r.bets.map(b => `👤 ${b.nombre}: $${b.total.toFixed(2)}`).join('\n');
-    await sock.sendMessage(remoteJid, { text: `✅ Jugada recibida y registrada.\n\n${resumen}\n\n💰 Total: $${r.total.toFixed(2)}\n🎰 ${r.sorteo}` });
-    await telegramText(comercialId, `📲 Jugada recibida por WhatsApp\n\n${resumen}\n\n💰 Total: $${r.total.toFixed(2)}\n🎰 ${r.sorteo}`);
+    await db.from('whatsapp_inbox').update({ procesado: true, bet_ids: r.bets.map(b => b.id), error: null }).eq('id', inserted.id);
+    const resumen = r.bets.map(b => {
+      const creditoTxt = b.credito > 0 ? `\n💳 Crédito aplicado: $${b.credito.toFixed(2)}\n💰 Saldo restante: $${b.saldoDespues.toFixed(2)}` : '';
+      return `👤 ${b.nombre}: $${b.total.toFixed(2)}${creditoTxt}`;
+    }).join('\n');
+    await sock.sendMessage(remoteJid, { text: `✅ Jugada recibida y registrada.\n\n${resumen}\n\n💵 Total: $${r.total.toFixed(2)}\n🎰 ${r.sorteo}` });
+    await telegramText(comercialId, `📲 Jugada recibida por WhatsApp\n\n${resumen}\n\n💵 Total: $${r.total.toFixed(2)}\n🎰 ${r.sorteo}`);
   } catch (err) {
     await db.from('whatsapp_inbox').update({ error: String(err?.message || err) }).eq('id', inserted.id);
     await sock.sendMessage(remoteJid, { text: `⚠️ Recibí la jugada pero NO fue registrada.\n\n${String(err?.message || err)}` });
