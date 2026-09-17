@@ -110,39 +110,120 @@ async function sendQr(id, qr) {
   if (!ok) await telegramText(id, '⚠️ No pude enviarte el QR. Usa /wa_qr para solicitar el más reciente.');
 }
 
-async function buscarClienteWhatsApp(db, comercialId, senderJid, nombreSender) {
+async function buscarClienteWhatsApp(db, comercialId, senderJid) {
   const jid = String(senderJid || '').trim();
-  const nombre = String(nombreSender || '').trim().slice(0, 120) || 'SIN NOMBRE';
-  if (jid) {
-    const { data: porJid, error } = await db.from('clientes_banca').select('*').eq('comercial_telegram_id', comercialId).eq('whatsapp_jid', jid).maybeSingle();
-    if (error) throw error;
-    if (porJid) return porJid;
+  if (!jid) throw new Error('No se pudo identificar el WhatsApp del cliente.');
+  const { data, error } = await db.from('clientes_banca')
+    .select('*')
+    .eq('comercial_telegram_id', comercialId)
+    .eq('whatsapp_jid', jid)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error('Este WhatsApp no está registrado con el comercial. Debes registrarte y realizar un depósito antes de jugar.');
+  return data;
+}
+
+async function obtenerPreferenciaWhatsApp(db, comercialId, whatsappJid) {
+  const { data, error } = await db.from('whatsapp_cliente_preferencias')
+    .select('comercial_telegram_id,whatsapp_jid,loteria_id,sorteo_id,moneda')
+    .eq('comercial_telegram_id', comercialId)
+    .eq('whatsapp_jid', whatsappJid)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+async function guardarPreferenciaWhatsApp(db, comercialId, whatsappJid, patch) {
+  const actual = await obtenerPreferenciaWhatsApp(db, comercialId, whatsappJid);
+  const payload = {
+    comercial_telegram_id: Number(comercialId),
+    whatsapp_jid: String(whatsappJid),
+    loteria_id: patch.loteria_id !== undefined ? patch.loteria_id : actual?.loteria_id || null,
+    sorteo_id: patch.sorteo_id !== undefined ? patch.sorteo_id : actual?.sorteo_id || null,
+    moneda: patch.moneda !== undefined ? patch.moneda : actual?.moneda || 'cup',
+    updated_at: new Date().toISOString()
+  };
+  const { data, error } = await db.from('whatsapp_cliente_preferencias')
+    .upsert(payload, { onConflict: 'comercial_telegram_id,whatsapp_jid' })
+    .select('*').single();
+  if (error) throw error;
+  return data;
+}
+
+async function listarLoteriasWhatsApp(db) {
+  const { data, error } = await db.from('loterias').select('id,nombre').eq('activo', true).order('id');
+  if (error) throw error;
+  return data || [];
+}
+
+async function listarSorteosWhatsApp(db, loteriaId) {
+  const { data, error } = await db.from('sorteos')
+    .select('id,nombre,hora_apertura,hora_cierre,activo,loteria_id')
+    .eq('loteria_id', loteriaId).eq('activo', true).order('hora_apertura');
+  if (error) throw error;
+  return data || [];
+}
+
+function formatoHora(valor) {
+  return valor ? String(valor).slice(0, 5) : '--:--';
+}
+
+async function enviarSeleccionLoterias(sock, remoteJid, db) {
+  const loterias = await listarLoteriasWhatsApp(db);
+  if (!loterias.length) return sock.sendMessage(remoteJid, { text: '⚠️ No hay loterías activas disponibles.' });
+  const texto = [
+    '🎲 LOTERÍAS DISPONIBLES',
+    '',
+    ...loterias.map(l => `${l.id}. ${l.nombre}`),
+    '',
+    'Para seleccionar escribe:',
+    '/loteria ID',
+    '',
+    'Ejemplo: /loteria 1'
+  ].join('\n');
+  return sock.sendMessage(remoteJid, { text: texto });
+}
+
+async function enviarSeleccionSorteos(sock, remoteJid, db, loteriaId) {
+  const { data: loteria } = await db.from('loterias').select('id,nombre').eq('id', loteriaId).eq('activo', true).maybeSingle();
+  if (!loteria) return sock.sendMessage(remoteJid, { text: '❌ La lotería seleccionada no existe o está inactiva. Usa /loterias.' });
+  const sorteos = await listarSorteosWhatsApp(db, loteriaId);
+  if (!sorteos.length) return sock.sendMessage(remoteJid, { text: `⚠️ ${loteria.nombre} no tiene sorteos activos.` });
+  const texto = [
+    `🎰 ${loteria.nombre}`,
+    'Sorteos disponibles:',
+    '',
+    ...sorteos.map(s => `${s.id}. ${s.nombre} — ${formatoHora(s.hora_apertura)}-${formatoHora(s.hora_cierre)}`),
+    '',
+    'Para seleccionar escribe:',
+    '/sorteo ID',
+    '',
+    'Ejemplo: /sorteo 3'
+  ].join('\n');
+  return sock.sendMessage(remoteJid, { text: texto });
+}
+
+async function enviarEstadoCliente(sock, remoteJid, db, comercialId, jid) {
+  const pref = await obtenerPreferenciaWhatsApp(db, comercialId, jid);
+  let texto = '⚙️ CONFIGURACIÓN DE JUEGO\n\n';
+  if (!pref?.loteria_id) texto += '🎲 Lotería: NO SELECCIONADA\n';
+  else {
+    const { data: loteria } = await db.from('loterias').select('nombre').eq('id', pref.loteria_id).maybeSingle();
+    texto += `🎲 Lotería: ${loteria?.nombre || pref.loteria_id}\n`;
   }
-  if (nombre !== 'SIN NOMBRE') {
-    const { data: porNombre, error } = await db.from('clientes_banca').select('*').eq('comercial_telegram_id', comercialId).eq('nombre', nombre);
-    if (error) throw error;
-    if (porNombre?.length === 1) {
-      const cliente = porNombre[0];
-      if (!cliente.whatsapp_jid || cliente.whatsapp_jid === jid) {
-        if (jid && !cliente.whatsapp_jid) {
-          const { data, error: updateError } = await db.from('clientes_banca').update({ whatsapp_jid: jid, updated_at: new Date().toISOString() }).eq('id', cliente.id).select('*').single();
-          if (updateError) throw updateError;
-          return data;
-        }
-        return cliente;
-      }
-    }
+  if (!pref?.sorteo_id) texto += '🎰 Sorteo: NO SELECCIONADO\n';
+  else {
+    const { data: sorteo } = await db.from('sorteos').select('nombre,hora_apertura,hora_cierre,activo').eq('id', pref.sorteo_id).maybeSingle();
+    texto += `🎰 Sorteo: ${sorteo?.nombre || pref.sorteo_id}\n`;
+    if (sorteo) texto += `⏰ Horario: ${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)}\n`;
   }
-  const { data: nuevo, error } = await db.from('clientes_banca').insert([{ comercial_telegram_id: comercialId, nombre, saldo: 0, whatsapp_jid: jid || null }]).select('*').single();
-  if (error) {
-    if (jid && String(error.code) === '23505') {
-      const { data: existente, error: retryError } = await db.from('clientes_banca').select('*').eq('comercial_telegram_id', comercialId).eq('whatsapp_jid', jid).maybeSingle();
-      if (retryError) throw retryError;
-      if (existente) return existente;
-    }
-    throw error;
+  try {
+    const cliente = await buscarClienteWhatsApp(db, comercialId, jid);
+    texto += `💰 Saldo: $${Number(cliente.saldo || 0).toFixed(2)}\n`;
+  } catch (_) {
+    texto += '👤 Cuenta: NO REGISTRADA\n';
   }
-  return nuevo;
+  return sock.sendMessage(remoteJid, { text: texto });
 }
 
 async function registrarBetAtomica(db, { comercialId, clienteBancaId, loteriaId, sorteoId, fecha, inputRaw, totalApuesta, detalle, moneda }) {
@@ -163,31 +244,118 @@ async function registrarBetAtomica(db, { comercialId, clienteBancaId, loteriaId,
   return { id: Number(r.bet_id), saldoAntes: Number(r.saldo_antes || 0), credito: Number(r.credito || 0), saldoDespues: Number(r.saldo_despues || 0) };
 }
 
-async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, senderName: nombreSender }) {
+async function validarSorteoAbierto(db, sorteoId, loteriaId) {
+  const { data: sorteo, error } = await db.from('sorteos')
+    .select('id,nombre,loteria_id,hora_apertura,hora_cierre,activo')
+    .eq('id', sorteoId).maybeSingle();
+  if (error) throw error;
+  if (!sorteo || !sorteo.activo) throw new Error('El sorteo seleccionado no está activo.');
+  if (Number(sorteo.loteria_id) !== Number(loteriaId)) throw new Error('El sorteo seleccionado no pertenece a la lotería elegida.');
+  if (sorteo.hora_apertura && sorteo.hora_cierre) {
+    const ahora = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Havana', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+    const [ah, am] = String(sorteo.hora_apertura).slice(0,5).split(':').map(Number);
+    const [ch, cm] = String(sorteo.hora_cierre).slice(0,5).split(':').map(Number);
+    const [xh, xm] = ahora.split(':').map(Number);
+    const actual = xh * 60 + xm;
+    if (actual < ah * 60 + am || actual >= ch * 60 + cm) {
+      throw new Error(`El sorteo ${sorteo.nombre} está cerrado. Horario: ${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)} (Cuba).`);
+    }
+  }
+  return sorteo;
+}
+
+async function procesarJugadaWhatsApp({ comercialId, texto, senderJid }) {
   const db = supa();
-  const { data: pref } = await db.from('user_preferences').select('loteria_id,sorteo_id,moneda').eq('telegram_id', comercialId).maybeSingle();
-  if (!pref?.loteria_id || !pref?.sorteo_id) throw new Error('El comercial debe seleccionar lotería y sorteo con /start antes de recibir jugadas por WhatsApp.');
-  const { data: sorteo } = await db.from('sorteos').select('id,nombre,hora_apertura,hora_cierre,activo').eq('id', pref.sorteo_id).maybeSingle();
-  if (!sorteo?.activo) throw new Error('El sorteo seleccionado no está activo.');
+  const cliente = await buscarClienteWhatsApp(db, comercialId, senderJid);
+  const saldo = Number(cliente.saldo || 0);
+  if (!Number.isFinite(saldo) || saldo <= 0) throw new Error('No tienes saldo disponible. Debes realizar un depósito antes de jugar.');
+
+  const pref = await obtenerPreferenciaWhatsApp(db, comercialId, senderJid);
+  if (!pref?.loteria_id || !pref?.sorteo_id) throw new Error('Primero debes seleccionar la lotería y el sorteo antes de enviar una jugada. Usa /loterias.');
+  const sorteo = await validarSorteoAbierto(db, pref.sorteo_id, pref.loteria_id);
+
   const Engine = global.Engine, Preprocesador = global.Preprocesador, Utils = global.Utils, Expansion = global.Expansion;
   if (!Engine?.calcular || !Preprocesador?.preprocesarJugada || !Utils?.limpiarMonto || !Expansion) throw new Error('Motor LotoPro no disponible.');
-  const result = Engine.calcular({ rawInput: texto, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id }, { Expansion, limpiarMonto: Utils.limpiarMonto, preprocesarJugada: Preprocesador.preprocesarJugada, obtenerTimestampLocal: () => new Date().toISOString() });
+  const result = Engine.calcular(
+    { rawInput: texto, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id },
+    { Expansion, limpiarMonto: Utils.limpiarMonto, preprocesarJugada: Preprocesador.preprocesarJugada, obtenerTimestampLocal: () => new Date().toISOString() }
+  );
   if (!result?.ok || !result.certified) {
     const detail = (result?.errors || []).map(e => e.message || e.reason).join('\n');
     throw new Error(`${result?.message || 'La jugada no pudo procesarse.'}${detail ? `\n${detail}` : ''}`);
   }
+
+  const total = Number(result.totalGeneral || 0);
+  if (!Number.isFinite(total) || total <= 0) throw new Error('La jugada no tiene un monto válido.');
+  if (saldo < total) throw new Error(`Saldo insuficiente. Disponible: $${saldo.toFixed(2)}, necesario: $${total.toFixed(2)}. Debes realizar un depósito antes de jugar.`);
+
   const fecha = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Havana' }).format(new Date());
-  const bets = [];
-  const cliente = await buscarClienteWhatsApp(db, comercialId, senderJid, nombreSender);
-  for (const j of result.jugadas || []) {
-    const nombre = String(cliente.nombre || nombreSender || senderJid || 'SIN NOMBRE').trim().slice(0, 120);
-    const total = Number(j.monto_total || 0);
-    if (!Number.isFinite(total) || total < 0) throw new Error('Monto de jugada inválido.');
-    const registro = await registrarBetAtomica(db, { comercialId, clienteBancaId: cliente.id, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id, fecha, inputRaw: j.jugada_texto || texto, totalApuesta: total, detalle: JSON.stringify(j.jugadas_detalle || []), moneda: pref.moneda || 'cup' });
-    cliente.saldo = registro.saldoDespues;
-    bets.push({ id: registro.id, nombre, total, credito: registro.credito, saldoAntes: registro.saldoAntes, saldoDespues: registro.saldoDespues });
+  const detalle = (result.jugadas || []).flatMap(j => j.jugadas_detalle || []);
+  const registro = await registrarBetAtomica(db, {
+    comercialId,
+    clienteBancaId: cliente.id,
+    loteriaId: pref.loteria_id,
+    sorteoId: pref.sorteo_id,
+    fecha,
+    inputRaw: texto,
+    totalApuesta: total,
+    detalle: JSON.stringify(detalle),
+    moneda: pref.moneda || 'cup'
+  });
+
+  return {
+    bets: [{ id: registro.id, nombre: cliente.nombre, total, credito: registro.credito, saldoAntes: registro.saldoAntes, saldoDespues: registro.saldoDespues }],
+    total,
+    sorteo: sorteo.nombre,
+    loteriaId: pref.loteria_id,
+    sorteoId: pref.sorteo_id,
+    loteriaNombre: (await db.from('loterias').select('nombre').eq('id', pref.loteria_id).maybeSingle()).data?.nombre || String(pref.loteria_id),
+    textoOriginal: texto
+  };
+}
+
+function fechaCuba() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Havana' }).format(new Date());
+}
+
+async function enviarListaJugadas(bot, db, ctx) {
+  const role = await commercialRole(db, ctx.from.id);
+  if (!['comercial', 'admin'].includes(role)) return ctx.reply('⛔ Solo un comercial puede usar este comando.');
+
+  const { data: pref } = await db.from('user_preferences').select('loteria_id,sorteo_id').eq('telegram_id', ctx.from.id).maybeSingle();
+  if (!pref?.loteria_id || !pref?.sorteo_id) return ctx.reply('🎲 Primero selecciona la lotería y el sorteo con /start.');
+
+  const { data: loteria } = await db.from('loterias').select('id,nombre').eq('id', pref.loteria_id).maybeSingle();
+  const { data: sorteo } = await db.from('sorteos').select('id,nombre,hora_apertura,hora_cierre').eq('id', pref.sorteo_id).maybeSingle();
+  if (!loteria || !sorteo) return ctx.reply('❌ La lotería o el sorteo seleccionado ya no existe. Usa /start.');
+
+  const { data: bets, error } = await db.from('bets')
+    .select('id,input_raw,total_apuesta,moneda,created_at,cliente_banca_id')
+    .eq('comercial_telegram_id', ctx.from.id)
+    .eq('loteria_id', pref.loteria_id)
+    .eq('sorteo_id', pref.sorteo_id)
+    .eq('fecha_apuesta', fechaCuba())
+    .order('created_at', { ascending: true });
+  if (error) { console.error('lista jugadas error:', error); return ctx.reply('❌ No se pudo consultar la lista de jugadas.'); }
+  if (!bets?.length) return ctx.reply(`📋 No hay jugadas para ${loteria.nombre} — ${sorteo.nombre} en la fecha de hoy.`);
+
+  const ids = [...new Set(bets.map(b => b.cliente_banca_id).filter(Boolean))];
+  const { data: clientes } = ids.length ? await db.from('clientes_banca').select('id,nombre,whatsapp_jid,saldo').in('id', ids) : { data: [] };
+  const mapa = new Map((clientes || []).map(c => [Number(c.id), c]));
+  const bloques = bets.map((b, i) => {
+    const c = mapa.get(Number(b.cliente_banca_id));
+    const fechaHora = b.created_at ? new Date(b.created_at).toLocaleTimeString('es-CU', { timeZone: 'America/Havana', hour: '2-digit', minute: '2-digit' }) : '--:--';
+    return `${i + 1}. 👤 ${c?.nombre || 'Cliente'}\n   🕒 ${fechaHora}\n   🧾 ${String(b.input_raw || '').slice(0, 700)}\n   💵 Total: $${Number(b.total_apuesta || 0).toFixed(2)} ${String(b.moneda || 'cup').toUpperCase()}\n   🆔 Apuesta #${b.id}`;
+  });
+  const encabezado = `📋 JUGADAS RECIBIDAS\n\n🎲 ${loteria.nombre}\n🎰 ${sorteo.nombre}\n⏰ ${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)}\n📅 ${fechaCuba()}\n\n`;
+  const chunks = [];
+  let actual = encabezado;
+  for (const bloque of bloques) {
+    if ((actual + '\n\n' + bloque).length > 3900) { chunks.push(actual); actual = bloque; }
+    else actual += (actual === encabezado ? '' : '\n\n') + bloque;
   }
-  return { bets, total: Number(result.totalGeneral || 0), sorteo: sorteo.nombre };
+  if (actual) chunks.push(actual);
+  for (const chunk of chunks) await ctx.reply(chunk);
 }
 
 async function recibirMensaje(db, sock, comercialId, message) {
@@ -196,13 +364,12 @@ async function recibirMensaje(db, sock, comercialId, message) {
   const remoteJid = String(message.key.remoteJid || '').trim();
   if (!remoteJid || remoteJid === 'status@broadcast') return;
   const senderJid = String(message.key.participant || remoteJid).trim();
-  const nombreSender = senderName(message);
   const key = bettingChatKey(comercialId, senderJid || remoteJid);
   const command = normalizeCommand(texto);
 
   if (command === '/jugar') {
     activeBettingChats.add(key);
-    await sock.sendMessage(remoteJid, { text: '🎰 Modo jugada activado. Puedes enviar tus jugadas ahora.\n\nPara salir del modo jugada escribe /salir.' });
+    await sock.sendMessage(remoteJid, { text: '🎰 Modo jugada activado.\n\nPrimero selecciona la lotería con /loterias y después el sorteo con /sorteos.\n\nCuando termines podrás enviar la jugada.\n\nPara salir escribe /salir.' });
     return;
   }
 
@@ -212,24 +379,67 @@ async function recibirMensaje(db, sock, comercialId, message) {
     return;
   }
 
+  if (command === '/loterias' || command === '/loteria') {
+    await enviarSeleccionLoterias(sock, remoteJid, db);
+    return;
+  }
+
+  const loteriaMatch = command.match(/^\/loteria\s+(\d+)$/);
+  if (loteriaMatch) {
+    const loteriaId = Number(loteriaMatch[1]);
+    const { data: loteria } = await db.from('loterias').select('id,nombre').eq('id', loteriaId).eq('activo', true).maybeSingle();
+    if (!loteria) return sock.sendMessage(remoteJid, { text: '❌ Lotería no encontrada o inactiva. Usa /loterias.' });
+    await guardarPreferenciaWhatsApp(db, comercialId, senderJid, { loteria_id: loteria.id, sorteo_id: null });
+    await sock.sendMessage(remoteJid, { text: `✅ Lotería seleccionada: ${loteria.nombre}\n\nAhora selecciona el sorteo con /sorteos.` });
+    await enviarSeleccionSorteos(sock, remoteJid, db, loteria.id);
+    return;
+  }
+
+  if (command === '/sorteos') {
+    const pref = await obtenerPreferenciaWhatsApp(db, comercialId, senderJid);
+    if (!pref?.loteria_id) return sock.sendMessage(remoteJid, { text: '🎲 Primero selecciona una lotería con /loterias.' });
+    await enviarSeleccionSorteos(sock, remoteJid, db, pref.loteria_id);
+    return;
+  }
+
+  const sorteoMatch = command.match(/^\/sorteo\s+(\d+)$/);
+  if (sorteoMatch) {
+    const pref = await obtenerPreferenciaWhatsApp(db, comercialId, senderJid);
+    if (!pref?.loteria_id) return sock.sendMessage(remoteJid, { text: '🎲 Primero selecciona una lotería con /loterias.' });
+    const sorteoId = Number(sorteoMatch[1]);
+    const { data: sorteo } = await db.from('sorteos').select('id,nombre,hora_apertura,hora_cierre,activo,loteria_id').eq('id', sorteoId).eq('loteria_id', pref.loteria_id).eq('activo', true).maybeSingle();
+    if (!sorteo) return sock.sendMessage(remoteJid, { text: '❌ Sorteo no encontrado para la lotería seleccionada. Usa /sorteos.' });
+    await guardarPreferenciaWhatsApp(db, comercialId, senderJid, { sorteo_id: sorteo.id });
+    await sock.sendMessage(remoteJid, { text: `✅ Sorteo seleccionado: ${sorteo.nombre}\n⏰ Horario: ${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)}\n\nYa puedes enviar tu jugada. Recuerda que necesitas saldo depositado.` });
+    return;
+  }
+
+  if (command === '/estado') {
+    await enviarEstadoCliente(sock, remoteJid, db, comercialId, senderJid);
+    return;
+  }
+
   if (!activeBettingChats.has(key)) return;
 
-  const { data: inserted, error } = await db.from('whatsapp_inbox').insert([{ comercial_telegram_id: comercialId, message_id: String(message.key.id), remote_jid: remoteJid, sender_jid: senderJid || null, sender_name: nombreSender || null, texto }]).select('id').single();
+  const { data: inserted, error } = await db.from('whatsapp_inbox').insert([{ comercial_telegram_id: comercialId, message_id: String(message.key.id), remote_jid: remoteJid, sender_jid: senderJid || null, sender_name: senderName(message) || null, texto }]).select('id').single();
   if (error) {
     if (String(error.message || '').toLowerCase().includes('duplicate')) return;
     console.error('WhatsApp inbox error:', error); return;
   }
   await db.from('whatsapp_comercial_session').update({ ultimo_mensaje_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('comercial_telegram_id', comercialId);
+
   try {
-    const r = await procesarJugadaWhatsApp({ comercialId, texto, senderJid, senderName: nombreSender });
+    const r = await procesarJugadaWhatsApp({ comercialId, texto, senderJid });
     await db.from('whatsapp_inbox').update({ procesado: true, bet_ids: r.bets.map(b => b.id), error: null }).eq('id', inserted.id);
-    const resumen = r.bets.map(b => { const creditoTxt = b.credito > 0 ? `\n💳 Crédito aplicado: $${b.credito.toFixed(2)}\n💰 Saldo restante: $${b.saldoDespues.toFixed(2)}` : ''; return `👤 ${b.nombre}: $${b.total.toFixed(2)}${creditoTxt}`; }).join('\n');
-    await sock.sendMessage(remoteJid, { text: `✅ Jugada recibida y registrada.\n\n${resumen}\n\n💵 Total: $${r.total.toFixed(2)}\n🎰 ${r.sorteo}` });
-    await telegramText(comercialId, `📲 Jugada recibida por WhatsApp\n\n${resumen}\n\n💵 Total: $${r.total.toFixed(2)}\n🎰 ${r.sorteo}`);
+    const b = r.bets[0];
+    const resumen = `👤 ${b.nombre}\n🧾 ${r.textoOriginal}\n\n💵 Total: $${r.total.toFixed(2)}\n💰 Saldo restante: $${b.saldoDespues.toFixed(2)}\n🎲 ${r.loteriaNombre}\n🎰 ${r.sorteo}`;
+    await sock.sendMessage(remoteJid, { text: `✅ Jugada recibida y registrada.\n\n${resumen}` });
+    await telegramText(comercialId, `📲 JUGADA RECIBIDA POR WHATSAPP\n\n${resumen}\n\n🆔 Apuesta #${b.id}`);
   } catch (err) {
-    await db.from('whatsapp_inbox').update({ error: String(err?.message || err) }).eq('id', inserted.id);
-    await sock.sendMessage(remoteJid, { text: `⚠️ Recibí la jugada pero NO fue registrada.\n\n${String(err?.message || err)}` });
-    await telegramText(comercialId, `⚠️ Jugada WhatsApp no registrada\n\n${String(err?.message || err)}`);
+    const errorTexto = String(err?.message || err);
+    await db.from('whatsapp_inbox').update({ error: errorTexto }).eq('id', inserted.id);
+    await sock.sendMessage(remoteJid, { text: `⚠️ La jugada NO fue registrada.\n\n${errorTexto}` });
+    await telegramText(comercialId, `⚠️ JUGADA WHATSAPP NO REGISTRADA\n\n👤 ${senderJid}\n🧾 ${texto}\n\n${errorTexto}`);
   }
 }
 
@@ -285,6 +495,10 @@ function statusFor(id) {
 async function registrarWhatsappComerciales(bot) {
   if (!enabled()) { console.log('ℹ️ WA_BAILEYS_ENABLED no está en true.'); return; }
   const db = supa();
+
+  bot.command('lista', async ctx => enviarListaJugadas(bot, db, ctx));
+  bot.command('jugadas', async ctx => enviarListaJugadas(bot, db, ctx));
+
   bot.command('wa_conectar', async ctx => {
     const role = await commercialRole(db, ctx.from.id);
     if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Solo un comercial puede conectar su WhatsApp.');
