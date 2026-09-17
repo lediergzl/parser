@@ -99,6 +99,81 @@ async function sendQr(id, qr) {
   if (!ok) await telegramText(id, '⚠️ No pude enviarte el QR. Usa /wa_qr para solicitar el más reciente.');
 }
 
+async function buscarClienteWhatsApp(db, comercialId, senderJid, nombreSender) {
+  const jid = String(senderJid || '').trim();
+  const nombre = String(nombreSender || '').trim().slice(0, 120) || 'SIN NOMBRE';
+
+  // La identidad estable de un cliente de WhatsApp es su JID.
+  // El nombre solo se usa como migración/fallback cuando todavía no existe JID.
+  if (jid) {
+    const { data: porJid, error } = await db
+      .from('clientes_banca')
+      .select('*')
+      .eq('comercial_telegram_id', comercialId)
+      .eq('whatsapp_jid', jid)
+      .maybeSingle();
+    if (error) throw error;
+    if (porJid) return porJid;
+  }
+
+  if (nombre !== 'SIN NOMBRE') {
+    const { data: porNombre, error } = await db
+      .from('clientes_banca')
+      .select('*')
+      .eq('comercial_telegram_id', comercialId)
+      .eq('nombre', nombre);
+    if (error) throw error;
+
+    // Solo vinculamos por nombre si hay exactamente un candidato y no
+    // pertenece ya a otro WhatsApp. Si existen varios, no adivinamos.
+    if (porNombre?.length === 1) {
+      const cliente = porNombre[0];
+      if (!cliente.whatsapp_jid || cliente.whatsapp_jid === jid) {
+        if (jid && !cliente.whatsapp_jid) {
+          const { data, error: updateError } = await db
+            .from('clientes_banca')
+            .update({ whatsapp_jid: jid, updated_at: new Date().toISOString() })
+            .eq('id', cliente.id)
+            .select('*')
+            .single();
+          if (updateError) throw updateError;
+          return data;
+        }
+        return cliente;
+      }
+    }
+  }
+
+  const { data: nuevo, error } = await db
+    .from('clientes_banca')
+    .insert([{
+      comercial_telegram_id: comercialId,
+      nombre,
+      saldo: 0,
+      whatsapp_jid: jid || null
+    }])
+    .select('*')
+    .single();
+
+  if (error) {
+    // Dos mensajes simultáneos del mismo cliente pueden competir por el
+    // índice único de JID. En ese caso recuperamos el registro ganador.
+    if (jid && String(error.code) === '23505') {
+      const { data: existente, error: retryError } = await db
+        .from('clientes_banca')
+        .select('*')
+        .eq('comercial_telegram_id', comercialId)
+        .eq('whatsapp_jid', jid)
+        .maybeSingle();
+      if (retryError) throw retryError;
+      if (existente) return existente;
+    }
+    throw error;
+  }
+
+  return nuevo;
+}
+
 async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, senderName: nombreSender }) {
   const db = supa();
   const { data: pref } = await db.from('user_preferences').select('loteria_id,sorteo_id,moneda').eq('telegram_id', comercialId).maybeSingle();
@@ -114,54 +189,92 @@ async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, senderNam
   }
   const fecha = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Havana' }).format(new Date());
   const bets = [];
+
+  // El remitente de WhatsApp es el cliente. Un nombre incluido dentro de la
+  // jugada no debe cambiar la identidad del remitente ni mezclar clientes.
+  const cliente = await buscarClienteWhatsApp(db, comercialId, senderJid, nombreSender);
+
   for (const j of result.jugadas || []) {
-    const nombre = String(j.jugador_nombre || nombreSender || senderJid || 'SIN NOMBRE').trim().slice(0, 120);
-    let cliente = null;
-    const { data: existing } = await db.from('clientes_banca').select('*').eq('comercial_telegram_id', comercialId).eq('nombre', nombre).maybeSingle();
-    if (existing) cliente = existing;
-    else {
-      const { data: nuevo, error } = await db.from('clientes_banca').insert([{ comercial_telegram_id: comercialId, nombre, saldo: 0, whatsapp_jid: senderJid || null }]).select('*').single();
-      if (error) throw error; cliente = nuevo;
+    const nombre = String(cliente.nombre || nombreSender || senderJid || 'SIN NOMBRE').trim().slice(0, 120);
+    const total = Number(j.monto_total || 0);
+    const saldoAntes = Number(cliente.saldo || 0);
+    const credito = Math.min(saldoAntes, total);
+    const saldoDespues = saldoAntes - credito;
+
+    if (credito > 0) {
+      const { error: balanceError } = await db
+        .from('clientes_banca')
+        .update({ saldo: saldoDespues, updated_at: new Date().toISOString() })
+        .eq('id', cliente.id);
+      if (balanceError) throw balanceError;
+      cliente.saldo = saldoDespues;
     }
-    if (senderJid && !cliente.whatsapp_jid) await db.from('clientes_banca').update({ whatsapp_jid: senderJid }).eq('id', cliente.id);
-    const total = Number(j.monto_total || 0); const saldo = Number(cliente.saldo || 0); const credito = Math.min(saldo, total);
-    if (credito > 0) await db.from('clientes_banca').update({ saldo: saldo - credito, updated_at: new Date().toISOString() }).eq('id', cliente.id);
+
     const { data: bet, error } = await db.from('bets').insert([{
-      user_telegram_id: null, loteria_id: pref.loteria_id, sorteo_id: pref.sorteo_id, fecha_apuesta: fecha,
-      input_raw: j.jugada_texto || texto, total_apuesta: total, detalle: JSON.stringify(j.jugadas_detalle || []), saldo_antes: 0, saldo_despues: 0,
-      moneda: pref.moneda || 'cup', origen: 'comercial', comercial_telegram_id: comercialId, cliente_banca_id: cliente.id
+      user_telegram_id: null,
+      loteria_id: pref.loteria_id,
+      sorteo_id: pref.sorteo_id,
+      fecha_apuesta: fecha,
+      input_raw: j.jugada_texto || texto,
+      total_apuesta: total,
+      detalle: JSON.stringify(j.jugadas_detalle || []),
+      saldo_antes: saldoAntes,
+      saldo_despues: saldoDespues,
+      moneda: pref.moneda || 'cup',
+      origen: 'comercial',
+      comercial_telegram_id: comercialId,
+      cliente_banca_id: cliente.id
     }]).select('id').single();
     if (error) throw error;
     bets.push({ id: bet.id, nombre, total, credito });
   }
+
   return { bets, total: Number(result.totalGeneral || 0), sorteo: sorteo.nombre };
 }
 
 async function recibirMensaje(db, sock, comercialId, message) {
   if (!message?.key?.id || message.key.fromMe) return;
   const texto = textFromMessage(message); if (!texto) return;
-  if (message.key.remoteJid === 'status@broadcast') return;
+  const remoteJid = String(message.key.remoteJid || '').trim();
+  if (!remoteJid || remoteJid === 'status@broadcast') return;
+
+  // En un privado remoteJid es el remitente. En un grupo, participant es el
+  // remitente y remoteJid es el grupo. Se conservan ambos por separado.
+  const senderJid = String(message.key.participant || remoteJid).trim();
+  const nombreSender = senderName(message);
+
   const { data: inserted, error } = await db.from('whatsapp_inbox').insert([{
     comercial_telegram_id: comercialId,
     message_id: String(message.key.id),
-    remote_jid: String(message.key.remoteJid || ''),
-    sender_jid: String(message.key.participant || message.key.remoteJid || ''),
-    sender_name: senderName(message) || null,
+    remote_jid: remoteJid,
+    sender_jid: senderJid || null,
+    sender_name: nombreSender || null,
     texto
   }]).select('id').single();
   if (error) {
     if (String(error.message || '').toLowerCase().includes('duplicate')) return;
     console.error('WhatsApp inbox error:', error); return;
   }
+
+  await db.from('whatsapp_comercial_session').update({
+    ultimo_mensaje_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  }).eq('comercial_telegram_id', comercialId);
+
   try {
-    const r = await procesarJugadaWhatsApp({ comercialId, texto, senderJid: String(message.key.participant || message.key.remoteJid || ''), senderName: senderName(message) });
+    const r = await procesarJugadaWhatsApp({
+      comercialId,
+      texto,
+      senderJid,
+      senderName: nombreSender
+    });
     await db.from('whatsapp_inbox').update({ procesado: true, bet_ids: r.bets.map(b => b.id) }).eq('id', inserted.id);
     const resumen = r.bets.map(b => `👤 ${b.nombre}: $${b.total.toFixed(2)}`).join('\n');
-    await sock.sendMessage(message.key.remoteJid, { text: `✅ Jugada recibida y registrada.\n\n${resumen}\n\n💰 Total: $${r.total.toFixed(2)}\n🎰 ${r.sorteo}` });
+    await sock.sendMessage(remoteJid, { text: `✅ Jugada recibida y registrada.\n\n${resumen}\n\n💰 Total: $${r.total.toFixed(2)}\n🎰 ${r.sorteo}` });
     await telegramText(comercialId, `📲 Jugada recibida por WhatsApp\n\n${resumen}\n\n💰 Total: $${r.total.toFixed(2)}\n🎰 ${r.sorteo}`);
   } catch (err) {
     await db.from('whatsapp_inbox').update({ error: String(err?.message || err) }).eq('id', inserted.id);
-    await sock.sendMessage(message.key.remoteJid, { text: `⚠️ Recibí la jugada pero NO fue registrada.\n\n${String(err?.message || err)}` });
+    await sock.sendMessage(remoteJid, { text: `⚠️ Recibí la jugada pero NO fue registrada.\n\n${String(err?.message || err)}` });
     await telegramText(comercialId, `⚠️ Jugada WhatsApp no registrada\n\n${String(err?.message || err)}`);
   }
 }
@@ -232,7 +345,7 @@ async function registrarWhatsappComerciales(bot) {
     const role = await commercialRole(db, ctx.from.id);
     if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Sin permiso.');
     const { data } = await db.from('whatsapp_comercial_session').select('estado,telefono,ultimo_error,ultimo_mensaje_at').eq('comercial_telegram_id', ctx.from.id).maybeSingle();
-    return ctx.reply(`📲 WhatsApp\n\nEstado: ${data?.estado || statusFor(ctx.from.id)}${data?.telefono ? `\nTeléfono: ${data.telefono}` : ''}${data?.ultimo_error ? `\nError: ${data.ultimo_error}` : ''}`);
+    return ctx.reply(`📲 WhatsApp\n\nEstado: ${data?.estado || statusFor(ctx.from.id)}${data?.telefono ? `\nTeléfono: ${data.telefono}` : ''}${data?.ultimo_error ? `\nError: ${data.ultimo_error}` : ''}${data?.ultimo_mensaje_at ? `\nÚltimo mensaje: ${data.ultimo_mensaje_at}` : ''}`);
   });
   bot.command('wa_desconectar', async ctx => {
     const role = await commercialRole(db, ctx.from.id);
