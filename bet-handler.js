@@ -307,6 +307,7 @@ async function registrarFlujoApuesta(bot) {
       // listener registrado, la emisión no tiene efecto y no rompe el flujo.
       try {
         bus.emit('jugada:procesada', {
+          origen: 'telegram',
           betId: fila?.bet_id,
           cliente: nombreJugador,
           telegramId: ctx.from.id,
