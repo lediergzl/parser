@@ -38,16 +38,71 @@ function normalizeCommand(texto) {
   return String(texto || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+function pngChunk(type, data) {
+  let crc = 0xffffffff;
+  const b = Buffer.from(type, 'ascii');
+  const all = Buffer.concat([b, data]);
+  for (const byte of all) { crc ^= byte; for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1)); }
+  crc = (crc ^ 0xffffffff) >>> 0;
+  const len = Buffer.alloc(4); len.writeUInt32BE(data.length, 0);
+  const c = Buffer.alloc(4); c.writeUInt32BE(crc, 0);
+  return Buffer.concat([len, b, data, c]);
+}
+
+function qrToPng(qrText, scale = 8) {
+  const QRCode = require('qrcode-terminal/vendor/QRCode');
+  const Level = require('qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel');
+  const qr = new QRCode(0, Level.M); qr.addData(qrText); qr.make();
+  const matrix = qr.modules; const width = matrix.length; const quiet = 4;
+  const modules = width + quiet * 2; const size = modules * scale; const rows = [];
+  for (let y = -quiet; y < width + quiet; y++) {
+    const row = Buffer.alloc(1 + size * 3); row[0] = 0;
+    for (let x = 0; x < size; x++) {
+      const mx = Math.floor(x / scale) - quiet;
+      const dark = y >= 0 && y < width && mx >= 0 && mx < width && matrix[y][mx] === true;
+      const v = dark ? 0 : 255; const p = 1 + x * 3; row[p] = v; row[p + 1] = v; row[p + 2] = v;
+    }
+    for (let sy = 0; sy < scale; sy++) rows.push(row);
+  }
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(size, 0); ihdr.writeUInt32BE(size, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), pngChunk('IHDR', ihdr), pngChunk('IDAT', require('zlib').deflateSync(Buffer.concat(rows), { level: 9 })), pngChunk('IEND', Buffer.alloc(0))]);
+}
+
+async function telegramPhoto(chatId, buffer, caption) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return false;
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  form.append('caption', caption);
+  form.append('photo', new Blob([buffer], { type: 'image/png' }), 'whatsapp-qr.png');
+  const r = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: form });
+  return r.ok;
+}
+
 async function telegramText(chatId, text) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) return;
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: String(chatId), text }) });
+  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ chat_id: String(chatId), text })
+  });
 }
 
 async function commercialRole(db, id) {
   if (admins().includes(Number(id))) return 'admin';
   const { data } = await db.from('users').select('role').eq('telegram_id', id).maybeSingle();
   return data?.role || 'cliente';
+}
+
+async function saveStatus(db, id, patch) {
+  await db.from('whatsapp_comercial_session').upsert({ comercial_telegram_id: id, ...patch, updated_at: new Date().toISOString() });
+}
+
+async function sendQr(id, qr) {
+  const db = supa();
+  await saveStatus(db, id, { estado: 'esperando_qr', ultimo_qr: qr, ultimo_error: null });
+  const ok = await telegramPhoto(id, qrToPng(qr), '📲 QR de tu WhatsApp\n\nEn WhatsApp: Ajustes → Dispositivos vinculados → Vincular dispositivo.\n\n⚠️ Este QR es temporal. Si aparece otro, usa siempre el más reciente.');
+  if (!ok) await telegramText(id, '⚠️ No pude enviarte el QR. Usa /wa_qr para solicitar el más reciente.');
 }
 
 async function buscarClienteWhatsApp(db, comercialId, senderJid) {
@@ -221,40 +276,56 @@ async function recibirMensaje(db, sock, comercialId, message) {
     return;
   }
 
-  if (command === '/salir') { activeBettingChats.delete(key); await reiniciarSesionWhatsApp(db, comercialId, senderJid).catch(() => {}); await sock.sendMessage(remoteJid, { text: '✅ Modo jugada desactivado y selección borrada.\n\nCuando quieras jugar de nuevo escribe /jugar.' }); return; }
+  if (command === '/salir') {
+    activeBettingChats.delete(key);
+    await reiniciarSesionWhatsApp(db, comercialId, senderJid).catch(() => {});
+    await sock.sendMessage(remoteJid, { text: '✅ Modo jugada desactivado y selección borrada.\n\nCuando quieras jugar de nuevo escribe /jugar.' });
+    return;
+  }
+
   if (command === '/loterias' || command === '/loteria') { await enviarSeleccionLoterias(sock, remoteJid, db); return; }
   const loteriaMatch = command.match(/^\/loteria\s+(\d+)$/);
   if (loteriaMatch) {
-    const loteriaId = Number(loteriaMatch[1]); const { data: loteria } = await db.from('loterias').select('id,nombre').eq('id', loteriaId).eq('activo', true).maybeSingle();
+    const loteriaId = Number(loteriaMatch[1]);
+    const { data: loteria } = await db.from('loterias').select('id,nombre').eq('id', loteriaId).eq('activo', true).maybeSingle();
     if (!loteria) return sock.sendMessage(remoteJid, { text: '❌ Lotería no encontrada o inactiva. Usa /loterias.' });
     await guardarPreferenciaWhatsApp(db, comercialId, senderJid, { loteria_id: loteria.id, sorteo_id: null });
     await sock.sendMessage(remoteJid, { text: `✅ Lotería seleccionada: ${loteria.nombre}\n\nAhora selecciona el sorteo con /sorteos.` });
-    await enviarSeleccionSorteos(sock, remoteJid, db, loteria.id); return;
+    await enviarSeleccionSorteos(sock, remoteJid, db, loteria.id);
+    return;
   }
+
   if (command === '/sorteos') {
     const pref = await obtenerPreferenciaWhatsApp(db, comercialId, senderJid);
     if (!pref?.loteria_id) return sock.sendMessage(remoteJid, { text: '🎲 Primero selecciona una lotería con /loterias.' });
-    await enviarSeleccionSorteos(sock, remoteJid, db, pref.loteria_id); return;
+    await enviarSeleccionSorteos(sock, remoteJid, db, pref.loteria_id);
+    return;
   }
+
   const sorteoMatch = command.match(/^\/sorteo\s+(\d+)$/);
   if (sorteoMatch) {
     const pref = await obtenerPreferenciaWhatsApp(db, comercialId, senderJid);
     if (!pref?.loteria_id) return sock.sendMessage(remoteJid, { text: '🎲 Primero selecciona una lotería con /loterias.' });
-    const sorteoId = Number(sorteoMatch[1]); const { data: sorteo } = await db.from('sorteos').select('id,nombre,hora_apertura,hora_cierre,activo,loteria_id').eq('id', sorteoId).eq('loteria_id', pref.loteria_id).eq('activo', true).maybeSingle();
+    const sorteoId = Number(sorteoMatch[1]);
+    const { data: sorteo } = await db.from('sorteos').select('id,nombre,hora_apertura,hora_cierre,activo,loteria_id').eq('id', sorteoId).eq('loteria_id', pref.loteria_id).eq('activo', true).maybeSingle();
     if (!sorteo) return sock.sendMessage(remoteJid, { text: '❌ Sorteo no encontrado para la lotería seleccionada. Usa /sorteos.' });
     await guardarPreferenciaWhatsApp(db, comercialId, senderJid, { sorteo_id: sorteo.id });
-    await sock.sendMessage(remoteJid, { text: `✅ Sorteo seleccionado: ${sorteo.nombre}\n⏰ Horario: ${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)}\n\nYa puedes enviar tu jugada. Recuerda que necesitas saldo depositado.\n\n⏳ La selección vence después de 30 minutos de inactividad.` }); return;
+    await sock.sendMessage(remoteJid, { text: `✅ Sorteo seleccionado: ${sorteo.nombre}\n⏰ Horario: ${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)}\n\nYa puedes enviar tu jugada. Recuerda que necesitas saldo depositado.\n\n⏳ La selección vence después de 30 minutos de inactividad.` });
+    return;
   }
+
   if (command === '/estado') { await enviarEstadoCliente(sock, remoteJid, db, comercialId, senderJid); return; }
   if (!activeBettingChats.has(key)) return;
 
   const { data: inserted, error } = await db.from('whatsapp_inbox').insert([{ comercial_telegram_id: comercialId, message_id: String(message.key.id), remote_jid: remoteJid, sender_jid: senderJid || null, sender_name: senderName(message) || null, texto }]).select('id').single();
   if (error) { if (String(error.message || '').toLowerCase().includes('duplicate')) return; console.error('WhatsApp inbox error:', error); return; }
   await db.from('whatsapp_comercial_session').update({ ultimo_mensaje_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('comercial_telegram_id', comercialId);
+
   try {
     const r = await procesarJugadaWhatsApp({ comercialId, texto, senderJid });
     await db.from('whatsapp_inbox').update({ procesado: true, bet_ids: r.bets.map(b => b.id), error: null }).eq('id', inserted.id);
-    const b = r.bets[0]; const resumen = `👤 ${b.nombre}\n🧾 ${r.textoOriginal}\n\n💵 Total: $${r.total.toFixed(2)}\n💰 Saldo restante: $${b.saldoDespues.toFixed(2)}\n🎲 ${r.loteriaNombre}\n🎰 ${r.sorteo}`;
+    const b = r.bets[0];
+    const resumen = `👤 ${b.nombre}\n🧾 ${r.textoOriginal}\n\n💵 Total: $${r.total.toFixed(2)}\n💰 Saldo restante: $${b.saldoDespues.toFixed(2)}\n🎲 ${r.loteriaNombre}\n🎰 ${r.sorteo}`;
     await sock.sendMessage(remoteJid, { text: `✅ Jugada recibida y registrada.\n\n${resumen}` });
     await telegramText(comercialId, `📲 JUGADA RECIBIDA POR WHATSAPP\n\n${resumen}\n\n🆔 Apuesta #${b.id}`);
   } catch (err) {
@@ -265,4 +336,105 @@ async function recibirMensaje(db, sock, comercialId, message) {
   }
 }
 
-// Resto del archivo conservado: conexión Baileys, QR, estados y comandos administrativos.
+async function conectarComercial(db, comercialId, force = false) {
+  const id = Number(comercialId);
+  if (!Number.isFinite(id)) throw new Error('comercialId inválido');
+  if (sockets.has(id) && !force) return sockets.get(id);
+  if (sockets.has(id)) { try { sockets.get(id).end?.(new Error('reconnect')); } catch (_) {} sockets.delete(id); }
+  const makeWASocket = require('@whiskeysockets/baileys').default;
+  const { state, saveCreds } = await useSupabaseAuthState(db, `commercial:${id}`);
+  const sock = makeWASocket({ auth: state, printQRInTerminal: false, markOnlineOnConnect: false, shouldSyncHistoryMessage: () => false });
+  sockets.set(id, sock);
+  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('connection.update', async update => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) await sendQr(id, qr).catch(e => console.error(`QR ${id}:`, e));
+    if (connection === 'open') {
+      const telefono = sock.user?.id || null;
+      await saveStatus(db, id, { estado: 'conectado', ultimo_qr: null, telefono, ultimo_error: null });
+      await telegramText(id, `✅ WhatsApp conectado${telefono ? `: ${telefono}` : ''}. Ya puedes recibir jugadas.`);
+    }
+    if (connection === 'close') {
+      const code = lastDisconnect?.error?.output?.statusCode;
+      const loggedOut = code === DisconnectReason.loggedOut;
+      await saveStatus(db, id, { estado: loggedOut ? 'desconectado' : 'conectando', ultimo_error: String(lastDisconnect?.error?.message || '') });
+      sockets.delete(id);
+      if (!loggedOut && !reconnectTimers.has(id)) {
+        const timer = setTimeout(() => { reconnectTimers.delete(id); conectarComercial(db, id).catch(e => console.error(`reconnect WA ${id}:`, e)); }, 3000);
+        reconnectTimers.set(id, timer);
+      }
+    }
+  });
+  sock.ev.on('messages.upsert', async event => {
+    if (event.type !== 'notify' || event.requestId) return;
+    for (const message of event.messages || []) await recibirMensaje(db, sock, id, message);
+  });
+  return sock;
+}
+
+async function desconectarComercial(db, id) {
+  const sock = sockets.get(Number(id));
+  if (sock) { try { sock.logout(); } catch (_) { try { sock.end?.(); } catch (_) {} } sockets.delete(Number(id)); }
+  for (const key of activeBettingChats) {
+    if (key.startsWith(`${Number(id)}:`)) activeBettingChats.delete(key);
+  }
+  await db.from('whatsapp_comercial_session').update({ estado: 'desconectado', creds: null, keys: null, ultimo_qr: null, updated_at: new Date().toISOString() }).eq('comercial_telegram_id', id);
+}
+
+function statusFor(id) {
+  const sock = sockets.get(Number(id));
+  return sock ? 'activo' : 'inactivo';
+}
+
+async function registrarWhatsappComerciales(bot) {
+  if (!enabled()) { console.log('ℹ️ WA_BAILEYS_ENABLED no está en true.'); return; }
+  const db = supa();
+
+  bot.command('lista', async ctx => enviarListaJugadas(bot, db, ctx));
+  bot.command('jugadas', async ctx => enviarListaJugadas(bot, db, ctx));
+
+  bot.command('wa_conectar', async ctx => {
+    const role = await commercialRole(db, ctx.from.id);
+    if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Solo un comercial puede conectar su WhatsApp.');
+    await ctx.reply('📲 Preparando tu conexión de WhatsApp. En unos segundos recibirás el QR aquí.');
+    try { await conectarComercial(db, ctx.from.id, true); } catch (e) { console.error(e); await ctx.reply(`❌ No se pudo iniciar WhatsApp: ${e.message}`); }
+  });
+
+  bot.command('wa_qr', async ctx => {
+    const role = await commercialRole(db, ctx.from.id);
+    if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Solo un comercial puede usar este comando.');
+    const { data } = await db.from('whatsapp_comercial_session').select('ultimo_qr,estado').eq('comercial_telegram_id', ctx.from.id).maybeSingle();
+    if (!data?.ultimo_qr) return ctx.reply('ℹ️ No hay un QR pendiente. Usa /wa_conectar.');
+    await sendQr(ctx.from.id, data.ultimo_qr);
+  });
+
+  bot.command('wa_estado', async ctx => {
+    const role = await commercialRole(db, ctx.from.id);
+    if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Sin permiso.');
+    const { data } = await db.from('whatsapp_comercial_session').select('estado,telefono,ultimo_error,ultimo_mensaje_at').eq('comercial_telegram_id', ctx.from.id).maybeSingle();
+    return ctx.reply(`📲 WhatsApp\nEstado: ${data?.estado || statusFor(ctx.from.id)}${data?.telefono ? `\nTeléfono: ${data.telefono}` : ''}${data?.ultimo_error ? `\nError: ${data.ultimo_error}` : ''}${data?.ultimo_mensaje_at ? `\nÚltimo mensaje: ${data.ultimo_mensaje_at}` : ''}`);
+  });
+
+  bot.command('wa_desconectar', async ctx => {
+    const role = await commercialRole(db, ctx.from.id);
+    if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Sin permiso.');
+    await desconectarComercial(db, ctx.from.id);
+    await ctx.reply('✅ WhatsApp desconectado.');
+  });
+
+  bot.command('wa_comerciales', async ctx => {
+    if (!admins().includes(Number(ctx.from.id))) return ctx.reply('⛔ Solo admin.');
+    const { data } = await db.from('users').select('telegram_id,username,first_name').eq('role','comercial').order('telegram_id');
+    if (!data?.length) return ctx.reply('No hay comerciales definidos.');
+    const ids = data.map(x => x.telegram_id);
+    const { data: sessions } = await db.from('whatsapp_comercial_session').select('comercial_telegram_id,estado,telefono').in('comercial_telegram_id', ids);
+    const map = new Map((sessions || []).map(x => [Number(x.comercial_telegram_id), x]));
+    return ctx.reply(data.map(x => { const s = map.get(Number(x.telegram_id)); return `👤 ${x.first_name || x.username || x.telegram_id}\nID: ${x.telegram_id}\nWhatsApp: ${s?.estado || 'sin configurar'}${s?.telefono ? `\n${s.telefono}` : ''}`; }).join('\n\n'));
+  });
+
+  const { data: comerciales } = await db.from('users').select('telegram_id').eq('role','comercial');
+  for (const c of comerciales || []) conectarComercial(db, c.telegram_id).catch(e => console.error(`No se pudo restaurar WhatsApp del comercial ${c.telegram_id}:`, e));
+  console.log(`✅ WhatsApp multi-comercial listo (${(comerciales || []).length} comerciales)`);
+}
+
+module.exports = { registrarWhatsappComerciales, conectarComercial, desconectarComercial, procesarJugadaWhatsApp };
