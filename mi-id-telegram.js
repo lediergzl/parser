@@ -11,6 +11,51 @@ function getAdminIds() {
     .filter(Number.isFinite);
 }
 
+const COMMANDS = [
+  { command: 'start', description: 'Abrir menú principal' },
+  { command: 'mi_id', description: 'Ver mi ID de Telegram' },
+  { command: 'saldo', description: 'Consultar mi saldo' },
+  { command: 'jugar', description: 'Registrar una jugada' },
+  { command: 'jugada', description: 'Registrar jugadas como comercial' },
+  { command: 'resultado', description: 'Registrar resultado como comercial' },
+  { command: 'premios', description: 'Consultar premios pendientes' },
+  { command: 'wa_conectar', description: 'Conectar mi WhatsApp' },
+  { command: 'wa_qr', description: 'Mostrar el QR de WhatsApp' },
+  { command: 'wa_estado', description: 'Ver estado de WhatsApp' },
+  { command: 'wa_desconectar', description: 'Desconectar mi WhatsApp' },
+  { command: 'wa_comerciales', description: 'Ver WhatsApp de comerciales' },
+  { command: 'comercial_add', description: 'Registrar un comercial' },
+  { command: 'verificar_premio', description: 'Diagnosticar un premio' },
+  { command: 'probar_resultado', description: 'Probar lectura de resultado' }
+];
+
+async function registrarMenuComandos(bot) {
+  // Usamos explícitamente el alcance de chats privados. Esto evita que
+  // Telegram/Web termine mostrando una lista vacía por una configuración de
+  // scope anterior.
+  const scope = { type: 'all_private_chats' };
+
+  try {
+    await bot.telegram.callApi('setMyCommands', {
+      commands: COMMANDS,
+      scope
+    });
+    console.log(`✅ Comandos Telegram registrados (${COMMANDS.length})`);
+  } catch (err) {
+    console.error('❌ No se pudo registrar setMyCommands:', err?.message || err);
+  }
+
+  try {
+    // Fuerza el botón de menú de Telegram a abrir la lista de comandos.
+    await bot.telegram.callApi('setChatMenuButton', {
+      menu_button: { type: 'commands' }
+    });
+    console.log('✅ Botón de menú Telegram configurado como comandos');
+  } catch (err) {
+    console.error('❌ No se pudo configurar el botón de comandos:', err?.message || err);
+  }
+}
+
 async function registrarMiIdTelegram(bot) {
   const supabase = createClient(
     process.env.SUPABASE_URL,
@@ -26,9 +71,7 @@ async function registrarMiIdTelegram(bot) {
       .join(' ') || 'Sin nombre';
     const username = ctx.from?.username ? `@${ctx.from.username}` : 'Sin usuario';
 
-    // IMPORTANTE: obtener el ID de Telegram nunca debe depender de Supabase.
-    // El usuario debe recibir sus datos aunque la BD falle, haya un timeout
-    // o todavía no exista su registro en users.
+    // Obtener el ID de Telegram nunca debe depender de Supabase.
     let role = 'cliente';
 
     if (adminIds.includes(id)) {
@@ -77,7 +120,6 @@ async function registrarMiIdTelegram(bot) {
     try {
       await ctx.reply(texto, { parse_mode: 'Markdown' });
     } catch (err) {
-      // Incluso si Markdown falla, entregar el dato esencial.
       console.error('mi_id: error enviando respuesta formateada:', err?.message || err);
       await ctx.reply(
         `👤 Mi cuenta\n\nNombre: ${nombre}\nUsuario: ${username}\n\n🆔 Tu ID de Telegram: ${id}\n\n💼 Rol: ${rolTexto}`
@@ -85,34 +127,8 @@ async function registrarMiIdTelegram(bot) {
     }
   });
 
-  // IMPORTANTE: setMyCommands reemplaza la lista anterior completa.
-  // Este catálogo contiene los comandos actualmente implementados.
-  const commands = [
-    { command: 'start', description: 'Abrir menú principal' },
-    { command: 'mi_id', description: 'Ver mi ID de Telegram' },
-    { command: 'saldo', description: 'Consultar mi saldo' },
-    { command: 'jugar', description: 'Registrar una jugada' },
-    { command: 'jugada', description: 'Registrar jugadas como comercial' },
-    { command: 'resultado', description: 'Registrar resultado como comercial' },
-    { command: 'premios', description: 'Consultar premios pendientes' },
-    { command: 'wa_conectar', description: 'Conectar mi WhatsApp' },
-    { command: 'wa_qr', description: 'Mostrar el QR de WhatsApp' },
-    { command: 'wa_estado', description: 'Ver estado de WhatsApp' },
-    { command: 'wa_desconectar', description: 'Desconectar mi WhatsApp' },
-    { command: 'wa_comerciales', description: 'Ver WhatsApp de comerciales (admin)' },
-    { command: 'comercial_add', description: 'Registrar un comercial (admin)' },
-    { command: 'verificar_premio', description: 'Diagnosticar un premio' },
-    { command: 'probar_resultado', description: 'Probar lectura de resultado (admin)' }
-  ];
-
-  try {
-    await bot.telegram.setMyCommands(commands);
-    console.log(`✅ Menú de comandos de Telegram registrado (${commands.length} comandos)`);
-  } catch (err) {
-    console.error('No se pudo registrar el menú de comandos de Telegram:', err?.message || err);
-  }
-
+  await registrarMenuComandos(bot);
   console.log('✅ Comando /mi_id registrado');
 }
 
-module.exports = { registrarMiIdTelegram };
+module.exports = { registrarMiIdTelegram, registrarMenuComandos, COMMANDS };
