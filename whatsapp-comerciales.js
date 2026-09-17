@@ -1,9 +1,12 @@
 const { createClient } = require('@supabase/supabase-js');
 const { useSupabaseAuthState } = require('./lib/wa-session-store');
 const { DisconnectReason } = require('@whiskeysockets/baileys');
+const { adaptIncomingInteractive, sendMainMenu, sendLotteryMenu, sendDrawMenu, sendConfirmationMenu } = require('./lib/wa-menu');
 
 const sockets = new Map();
 const reconnectTimers = new Map();
+const connecting = new Map();
+const socketGenerations = new Map();
 const activeBettingChats = new Set();
 
 function enabled() {
@@ -155,16 +158,14 @@ function formatoHora(valor) { return valor ? String(valor).slice(0, 5) : '--:--'
 
 async function enviarSeleccionLoterias(sock, remoteJid, db) {
   const loterias = await listarLoteriasWhatsApp(db);
-  if (!loterias.length) return sock.sendMessage(remoteJid, { text: '⚠️ No hay loterías activas disponibles.' });
-  return sock.sendMessage(remoteJid, { text: ['🎲 LOTERÍAS DISPONIBLES', '', ...loterias.map(l => `${l.id}. ${l.nombre}`), '', 'Para seleccionar escribe:', '/loteria ID', '', 'Ejemplo: /loteria 1'].join('\n') });
+  return sendLotteryMenu(sock, remoteJid, loterias);
 }
 
 async function enviarSeleccionSorteos(sock, remoteJid, db, loteriaId) {
   const { data: loteria } = await db.from('loterias').select('id,nombre').eq('id', loteriaId).eq('activo', true).maybeSingle();
   if (!loteria) return sock.sendMessage(remoteJid, { text: '❌ La lotería seleccionada no existe o está inactiva. Usa /loterias.' });
   const sorteos = await listarSorteosWhatsApp(db, loteriaId);
-  if (!sorteos.length) return sock.sendMessage(remoteJid, { text: `⚠️ ${loteria.nombre} no tiene sorteos activos.` });
-  return sock.sendMessage(remoteJid, { text: [`🎰 ${loteria.nombre}`, 'Sorteos disponibles:', '', ...sorteos.map(s => `${s.id}. ${s.nombre} — ${formatoHora(s.hora_apertura)}-${formatoHora(s.hora_cierre)}`), '', 'Para seleccionar escribe:', '/sorteo ID', '', 'Ejemplo: /sorteo 3'].join('\n') });
+  return sendDrawMenu(sock, remoteJid, loteria, sorteos);
 }
 
 async function enviarEstadoCliente(sock, remoteJid, db, comercialId, jid) {
@@ -263,7 +264,9 @@ async function enviarListaJugadas(bot, db, ctx) {
 
 async function recibirMensaje(db, sock, comercialId, message) {
   if (!message?.key?.id || message.key.fromMe) return;
-  const texto = textFromMessage(message); if (!texto) return;
+  const interactiveId = adaptIncomingInteractive(message);
+  const texto = interactiveId || textFromMessage(message);
+  if (!texto) return;
   const remoteJid = String(message.key.remoteJid || '').trim(); if (!remoteJid || remoteJid === 'status@broadcast') return;
   const senderJid = String(message.key.participant || remoteJid).trim();
   const key = bettingChatKey(comercialId, senderJid || remoteJid);
@@ -272,7 +275,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
   if (command === '/jugar') {
     activeBettingChats.add(key);
     try { await reiniciarSesionWhatsApp(db, comercialId, senderJid); } catch (e) { activeBettingChats.delete(key); console.error(`No se pudo reiniciar sesión WhatsApp ${comercialId}/${senderJid}:`, e); return sock.sendMessage(remoteJid, { text: '❌ No pude iniciar una sesión de juego segura. Inténtalo nuevamente.' }); }
-    await sock.sendMessage(remoteJid, { text: '🎰 Modo jugada activado.\n\n⚠️ Para evitar que una selección anterior se use por error, esta sesión empieza sin lotería ni sorteo.\n\n1️⃣ Usa /loterias\n2️⃣ Selecciona con /loteria ID\n3️⃣ Usa /sorteos\n4️⃣ Selecciona con /sorteo ID\n\nDespués podrás enviar la jugada.\n\n⏳ La sesión vence tras 30 minutos de inactividad.\n\nPara salir escribe /salir.' });
+    await sendMainMenu(sock, remoteJid);
     return;
   }
 
@@ -283,6 +286,9 @@ async function recibirMensaje(db, sock, comercialId, message) {
     return;
   }
 
+  if (command === '/saldo') { await enviarEstadoCliente(sock, remoteJid, db, comercialId, senderJid); return; }
+  if (command === '/depositar' || command === '/recargar') return;
+
   if (command === '/loterias' || command === '/loteria') { await enviarSeleccionLoterias(sock, remoteJid, db); return; }
   const loteriaMatch = command.match(/^\/loteria\s+(\d+)$/);
   if (loteriaMatch) {
@@ -290,7 +296,6 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const { data: loteria } = await db.from('loterias').select('id,nombre').eq('id', loteriaId).eq('activo', true).maybeSingle();
     if (!loteria) return sock.sendMessage(remoteJid, { text: '❌ Lotería no encontrada o inactiva. Usa /loterias.' });
     await guardarPreferenciaWhatsApp(db, comercialId, senderJid, { loteria_id: loteria.id, sorteo_id: null });
-    await sock.sendMessage(remoteJid, { text: `✅ Lotería seleccionada: ${loteria.nombre}\n\nAhora selecciona el sorteo con /sorteos.` });
     await enviarSeleccionSorteos(sock, remoteJid, db, loteria.id);
     return;
   }
@@ -310,7 +315,8 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const { data: sorteo } = await db.from('sorteos').select('id,nombre,hora_apertura,hora_cierre,activo,loteria_id').eq('id', sorteoId).eq('loteria_id', pref.loteria_id).eq('activo', true).maybeSingle();
     if (!sorteo) return sock.sendMessage(remoteJid, { text: '❌ Sorteo no encontrado para la lotería seleccionada. Usa /sorteos.' });
     await guardarPreferenciaWhatsApp(db, comercialId, senderJid, { sorteo_id: sorteo.id });
-    await sock.sendMessage(remoteJid, { text: `✅ Sorteo seleccionado: ${sorteo.nombre}\n⏰ Horario: ${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)}\n\nYa puedes enviar tu jugada. Recuerda que necesitas saldo depositado.\n\n⏳ La selección vence después de 30 minutos de inactividad.` });
+    const { data: loteria } = await db.from('loterias').select('nombre').eq('id', pref.loteria_id).maybeSingle();
+    await sendConfirmationMenu(sock, remoteJid, loteria?.nombre || String(pref.loteria_id), sorteo.nombre, `${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)}`);
     return;
   }
 
@@ -339,44 +345,87 @@ async function recibirMensaje(db, sock, comercialId, message) {
 async function conectarComercial(db, comercialId, force = false) {
   const id = Number(comercialId);
   if (!Number.isFinite(id)) throw new Error('comercialId inválido');
-  if (sockets.has(id) && !force) return sockets.get(id);
-  if (sockets.has(id)) { try { sockets.get(id).end?.(new Error('reconnect')); } catch (_) {} sockets.delete(id); }
-  const makeWASocket = require('@whiskeysockets/baileys').default;
-  const { state, saveCreds } = await useSupabaseAuthState(db, `commercial:${id}`);
-  const sock = makeWASocket({ auth: state, printQRInTerminal: false, markOnlineOnConnect: false, shouldSyncHistoryMessage: () => false });
-  sockets.set(id, sock);
-  sock.ev.on('creds.update', saveCreds);
-  sock.ev.on('connection.update', async update => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) await sendQr(id, qr).catch(e => console.error(`QR ${id}:`, e));
-    if (connection === 'open') {
-      const telefono = sock.user?.id || null;
-      await saveStatus(db, id, { estado: 'conectado', ultimo_qr: null, telefono, ultimo_error: null });
-      await telegramText(id, `✅ WhatsApp conectado${telefono ? `: ${telefono}` : ''}. Ya puedes recibir jugadas.`);
-    }
-    if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      const loggedOut = code === DisconnectReason.loggedOut;
-      await saveStatus(db, id, { estado: loggedOut ? 'desconectado' : 'conectando', ultimo_error: String(lastDisconnect?.error?.message || '') });
+
+  const existing = sockets.get(id);
+  if (existing && !force) return existing;
+  if (connecting.has(id)) return connecting.get(id);
+
+  if (force) {
+    const timer = reconnectTimers.get(id);
+    if (timer) { clearTimeout(timer); reconnectTimers.delete(id); }
+    if (existing) {
+      try { existing.end?.(new Error('reconnect')); } catch (_) {}
       sockets.delete(id);
-      if (!loggedOut && !reconnectTimers.has(id)) {
-        const timer = setTimeout(() => { reconnectTimers.delete(id); conectarComercial(db, id).catch(e => console.error(`reconnect WA ${id}:`, e)); }, 3000);
-        reconnectTimers.set(id, timer);
-      }
     }
-  });
-  sock.ev.on('messages.upsert', async event => {
-    if (event.type !== 'notify' || event.requestId) return;
-    for (const message of event.messages || []) await recibirMensaje(db, sock, id, message);
-  });
-  return sock;
+  }
+
+  const generation = (socketGenerations.get(id) || 0) + 1;
+  socketGenerations.set(id, generation);
+
+  const promise = (async () => {
+    const makeWASocket = require('@whiskeysockets/baileys').default;
+    const { state, saveCreds } = await useSupabaseAuthState(db, `commercial:${id}`);
+    if (socketGenerations.get(id) !== generation) return sockets.get(id) || null;
+
+    const sock = makeWASocket({ auth: state, printQRInTerminal: false, markOnlineOnConnect: false, shouldSyncHistoryMessage: () => false });
+    sockets.set(id, sock);
+
+    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('connection.update', async update => {
+      if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
+      const { connection, lastDisconnect, qr } = update;
+      if (qr) await sendQr(id, qr).catch(e => console.error(`QR ${id}:`, e));
+
+      if (connection === 'open') {
+        if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
+        const telefono = sock.user?.id || null;
+        await saveStatus(db, id, { estado: 'conectado', ultimo_qr: null, telefono, ultimo_error: null });
+        await telegramText(id, `✅ WhatsApp conectado${telefono ? `: ${telefono}` : ''}. Ya puedes recibir jugadas.`);
+      }
+
+      if (connection === 'close') {
+        if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
+        const code = lastDisconnect?.error?.output?.statusCode;
+        const loggedOut = code === DisconnectReason.loggedOut;
+        await saveStatus(db, id, { estado: loggedOut ? 'desconectado' : 'conectando', ultimo_error: String(lastDisconnect?.error?.message || '') });
+        sockets.delete(id);
+        if (!loggedOut && !reconnectTimers.has(id)) {
+          const timer = setTimeout(() => {
+            reconnectTimers.delete(id);
+            if (socketGenerations.get(id) !== generation) return;
+            conectarComercial(db, id).catch(e => console.error(`reconnect WA ${id}:`, e));
+          }, 3000);
+          reconnectTimers.set(id, timer);
+        }
+      }
+    });
+
+    sock.ev.on('messages.upsert', async event => {
+      if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
+      if (event.type !== 'notify' || event.requestId) return;
+      for (const message of event.messages || []) await recibirMensaje(db, sock, id, message);
+    });
+
+    return sock;
+  })();
+
+  connecting.set(id, promise);
+  try {
+    return await promise;
+  } finally {
+    if (connecting.get(id) === promise) connecting.delete(id);
+  }
 }
 
 async function desconectarComercial(db, id) {
-  const sock = sockets.get(Number(id));
-  if (sock) { try { sock.logout(); } catch (_) { try { sock.end?.(); } catch (_) {} } sockets.delete(Number(id)); }
+  const numericId = Number(id);
+  const timer = reconnectTimers.get(numericId);
+  if (timer) { clearTimeout(timer); reconnectTimers.delete(numericId); }
+  socketGenerations.set(numericId, (socketGenerations.get(numericId) || 0) + 1);
+  const sock = sockets.get(numericId);
+  if (sock) { try { sock.logout(); } catch (_) { try { sock.end?.(); } catch (_) {} } sockets.delete(numericId); }
   for (const key of activeBettingChats) {
-    if (key.startsWith(`${Number(id)}:`)) activeBettingChats.delete(key);
+    if (key.startsWith(`${numericId}:`)) activeBettingChats.delete(key);
   }
   await db.from('whatsapp_comercial_session').update({ estado: 'desconectado', creds: null, keys: null, ultimo_qr: null, updated_at: new Date().toISOString() }).eq('comercial_telegram_id', id);
 }
