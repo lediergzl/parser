@@ -1,6 +1,6 @@
 // Menú interactivo de WhatsApp para LotoPro.
-// Convierte las respuestas de botones/listas a los comandos que ya entiende
-// whatsapp-comerciales.js y reemplaza los mensajes de selección por UI interactiva.
+// Usa nativeFlowMessage (single_select / quick_reply) porque los botones/listas
+// legacy pueden ser ignorados por versiones actuales de WhatsApp.
 const baileys = require('@whiskeysockets/baileys');
 const originalMakeWASocket = baileys.default;
 
@@ -8,19 +8,28 @@ function norm(v) {
   return String(v || '').trim().replace(/\s+/g, ' ');
 }
 
+function parseNativeFlowParams(value) {
+  try {
+    const raw = typeof value === 'string' ? value : JSON.stringify(value || {});
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
 function rowIdFromIncoming(message) {
   const m = message?.message || {};
+  const native = m?.interactiveResponseMessage?.nativeFlowResponseMessage;
+  const params = parseNativeFlowParams(native?.paramsJson);
   return norm(
     m?.buttonsResponseMessage?.selectedButtonId ||
     m?.listResponseMessage?.singleSelectReply?.selectedRowId ||
     m?.templateButtonReplyMessage?.selectedId ||
+    params?.id ||
+    params?.selectedId ||
+    params?.rowId ||
     ''
   );
-}
-
-function textFromIncoming(message) {
-  const m = message?.message || {};
-  return norm(m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || '');
 }
 
 function adaptarRespuestaInteractiva(message) {
@@ -48,45 +57,81 @@ function parseSorteos(text) {
   return rows;
 }
 
-async function sendList(originalSend, jid, title, description, rows) {
-  if (!rows.length) return false;
-  const sections = [{ title, rows: rows.slice(0, 100) }];
+async function sendNativeFlow(originalSend, sock, jid, bodyText, buttons, fallbackText) {
   try {
-    await originalSend(jid, {
-      text: description,
-      title,
-      footer: 'LotoPro',
-      buttonText: 'Seleccionar',
-      sections
+    const { proto, generateWAMessageFromContent } = baileys;
+    if (typeof generateWAMessageFromContent !== 'function' || !proto?.Message?.InteractiveMessage) {
+      throw new Error('nativeFlow no disponible en esta versión de Baileys');
+    }
+
+    const nativeButtons = buttons.map(button => ({
+      name: button.name,
+      buttonParamsJson: JSON.stringify(button.params || {})
+    }));
+
+    const interactiveMessage = proto.Message.InteractiveMessage.create({
+      body: proto.Message.InteractiveMessage.Body.create({ text: bodyText }),
+      footer: proto.Message.InteractiveMessage.Footer.create({ text: 'LotoPro' }),
+      nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+        buttons: nativeButtons,
+        messageParamsJson: ''
+      })
     });
+
+    const generated = generateWAMessageFromContent(jid, { interactiveMessage }, {});
+    await sock.relayMessage(jid, generated.message, { messageId: generated.key.id });
     return true;
   } catch (error) {
-    console.warn('[WA MENU] No se pudo enviar lista interactiva:', error?.message || error);
-    return false;
+    console.warn('[WA MENU] nativeFlow no disponible/no enviado:', error?.message || error);
+    try {
+      await originalSend(jid, { text: fallbackText || bodyText });
+      return false;
+    } catch (fallbackError) {
+      console.error('[WA MENU] tampoco se pudo enviar fallback:', fallbackError?.message || fallbackError);
+      return false;
+    }
   }
 }
 
-async function sendMainMenu(originalSend, jid) {
+async function sendList(originalSend, sock, jid, title, description, rows) {
+  if (!rows.length) return false;
+  const sectionRows = rows.slice(0, 100).map(row => ({
+    title: row.title,
+    description: row.description,
+    id: row.id
+  }));
+
+  const params = {
+    title: 'Seleccionar',
+    sections: [{ title, rows: sectionRows }]
+  };
+
+  return sendNativeFlow(
+    originalSend,
+    sock,
+    jid,
+    description,
+    [{ name: 'single_select', params }],
+    `${description}\n\n${rows.map((r, i) => `${i + 1}. ${r.title} — escribe ${r.id}`).join('\n')}`
+  );
+}
+
+async function sendMainMenu(originalSend, sock, jid) {
   const buttons = [
-    { buttonId: '/loterias', buttonText: { displayText: '🎲 Seleccionar lotería' }, type: 1 },
-    { buttonId: '/saldo', buttonText: { displayText: '💰 Mi saldo' }, type: 1 },
-    { buttonId: '/depositar', buttonText: { displayText: '💳 Recargar saldo' }, type: 1 }
+    { name: 'quick_reply', params: { display_text: '🎲 Seleccionar lotería', id: '/loterias' } },
+    { name: 'quick_reply', params: { display_text: '💰 Mi saldo', id: '/saldo' } },
+    { name: 'quick_reply', params: { display_text: '💳 Recargar saldo', id: '/depositar' } },
+    { name: 'quick_reply', params: { display_text: '❌ Salir', id: '/salir' } }
   ];
-  try {
-    await originalSend(jid, {
-      text: '🎰 *LOTO PRO*\n\nSelecciona una opción para continuar.\n\nLa selección de lotería y sorteo se reinicia al comenzar una nueva sesión.',
-      footer: 'Sesión de juego: 30 minutos',
-      buttons,
-      headerType: 1
-    });
-    return true;
-  } catch (error) {
-    console.warn('[WA MENU] No se pudo enviar menú de botones:', error?.message || error);
-    try {
-      await originalSend(jid, { text: '🎰 LOTO PRO\n\n🎲 Seleccionar lotería: /loterias\n💰 Mi saldo: /saldo\n💳 Recargar: /depositar\n\nEscribe /salir para terminar la sesión.' });
-    } catch (_) {}
-    return false;
-  }
+
+  return sendNativeFlow(
+    originalSend,
+    sock,
+    jid,
+    '🎰 LOTO PRO\n\nSelecciona una opción para continuar.',
+    buttons,
+    '🎰 LOTO PRO\n\n🎲 Seleccionar lotería: /loterias\n💰 Mi saldo: /saldo\n💳 Recargar: /depositar\n❌ Salir: /salir'
+  );
 }
 
 if (typeof originalMakeWASocket === 'function' && !originalMakeWASocket.__lotoProMenuPatch) {
@@ -100,17 +145,19 @@ if (typeof originalMakeWASocket === 'function' && !originalMakeWASocket.__lotoPr
       const text = norm(content?.text);
 
       if (text.startsWith('🎰 Modo jugada activado.')) {
-        return sendMainMenu(originalSend, jid);
+        return sendMainMenu(originalSend, sock, jid);
       }
 
       if (text.includes('🎲 LOTERÍAS DISPONIBLES')) {
         const rows = parseLoterias(text);
-        if (await sendList(originalSend, jid, '🎲 Loterías disponibles', 'Selecciona la lotería con la que deseas jugar:', rows)) return;
+        if (await sendList(originalSend, sock, jid, '🎲 Loterías disponibles', 'Selecciona la lotería con la que deseas jugar:', rows)) return;
+        return;
       }
 
       if (text.includes('Sorteos disponibles:')) {
         const rows = parseSorteos(text);
-        if (await sendList(originalSend, jid, '🎰 Sorteos disponibles', 'Selecciona el sorteo que deseas jugar:', rows)) return;
+        if (await sendList(originalSend, sock, jid, '🎰 Sorteos disponibles', 'Selecciona el sorteo que deseas jugar:', rows)) return;
+        return;
       }
 
       return originalSend(jid, content, options);
@@ -128,6 +175,7 @@ if (typeof originalMakeWASocket === 'function' && !originalMakeWASocket.__lotoPr
       return originalOn(event, wrapped);
     };
 
+    console.log('[WA MENU] parche interactivo instalado');
     return sock;
   };
 
