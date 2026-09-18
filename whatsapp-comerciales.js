@@ -13,6 +13,24 @@ function enabled() {
   return String(process.env.WA_BAILEYS_ENABLED || '').trim().toLowerCase() === 'true';
 }
 
+// Sin esto, un redeploy/reinicio en Render mata el proceso sin avisarle a
+// WhatsApp que cierre la sesión. El socket viejo queda "vivo" del lado de
+// WhatsApp por unos segundos y, cuando el proceso nuevo reconecta con las
+// mismas credenciales, WhatsApp expulsa una de las dos conexiones con un
+// error de tipo conflict/replaced.
+let shuttingDown = false;
+function cerrarTodo(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`🛑 ${signal} recibido, cerrando ${sockets.size} conexión(es) de WhatsApp...`);
+  for (const sock of sockets.values()) {
+    try { sock.end(new Error('shutdown')); } catch (_) {}
+  }
+  setTimeout(() => process.exit(0), 800);
+}
+process.on('SIGTERM', () => cerrarTodo('SIGTERM'));
+process.on('SIGINT', () => cerrarTodo('SIGINT'));
+
 function admins() {
   return String(process.env.ADMIN_IDS || '').split(',').map(v => Number(v.trim())).filter(Number.isFinite);
 }
