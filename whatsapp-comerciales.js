@@ -174,16 +174,16 @@ async function listarSorteosWhatsApp(db, loteriaId) {
 
 function formatoHora(valor) { return valor ? String(valor).slice(0, 5) : '--:--'; }
 
-async function enviarSeleccionLoterias(sock, remoteJid, db) {
+async function enviarSeleccionLoterias(sock, remoteJid, db, interactiveJid = null) {
   const loterias = await listarLoteriasWhatsApp(db);
-  return sendLotteryMenu(sock, remoteJid, loterias);
+  return sendLotteryMenu(sock, remoteJid, loterias, interactiveJid);
 }
 
-async function enviarSeleccionSorteos(sock, remoteJid, db, loteriaId) {
+async function enviarSeleccionSorteos(sock, remoteJid, db, loteriaId, interactiveJid = null) {
   const { data: loteria } = await db.from('loterias').select('id,nombre').eq('id', loteriaId).eq('activo', true).maybeSingle();
   if (!loteria) return sock.sendMessage(remoteJid, { text: '❌ La lotería seleccionada no existe o está inactiva. Usa /loterias.' });
   const sorteos = await listarSorteosWhatsApp(db, loteriaId);
-  return sendDrawMenu(sock, remoteJid, loteria, sorteos);
+  return sendDrawMenu(sock, remoteJid, loteria, sorteos, interactiveJid);
 }
 
 async function enviarEstadoCliente(sock, remoteJid, db, comercialId, jid) {
@@ -287,13 +287,14 @@ async function recibirMensaje(db, sock, comercialId, message) {
   if (!texto) return;
   const remoteJid = String(message.key.remoteJid || '').trim(); if (!remoteJid || remoteJid === 'status@broadcast') return;
   const senderJid = String(message.key.participant || remoteJid).trim();
+  const interactiveJid = String(message.key.senderPn || '').trim() || null;
   const key = bettingChatKey(comercialId, senderJid || remoteJid);
   const command = normalizeCommand(texto);
 
   if (command === '/jugar') {
     activeBettingChats.add(key);
     try { await reiniciarSesionWhatsApp(db, comercialId, senderJid); } catch (e) { activeBettingChats.delete(key); console.error(`No se pudo reiniciar sesión WhatsApp ${comercialId}/${senderJid}:`, e); return sock.sendMessage(remoteJid, { text: '❌ No pude iniciar una sesión de juego segura. Inténtalo nuevamente.' }); }
-    await sendMainMenu(sock, remoteJid);
+    await sendMainMenu(sock, remoteJid, interactiveJid);
     return;
   }
 
@@ -307,21 +308,21 @@ async function recibirMensaje(db, sock, comercialId, message) {
   if (command === '/saldo') { await enviarEstadoCliente(sock, remoteJid, db, comercialId, senderJid); return; }
   if (command === '/depositar' || command === '/recargar') return;
 
-  if (command === '/loterias' || command === '/loteria') { await enviarSeleccionLoterias(sock, remoteJid, db); return; }
+  if (command === '/loterias' || command === '/loteria') { await enviarSeleccionLoterias(sock, remoteJid, db, interactiveJid); return; }
   const loteriaMatch = command.match(/^\/loteria\s+(\d+)$/);
   if (loteriaMatch) {
     const loteriaId = Number(loteriaMatch[1]);
     const { data: loteria } = await db.from('loterias').select('id,nombre').eq('id', loteriaId).eq('activo', true).maybeSingle();
     if (!loteria) return sock.sendMessage(remoteJid, { text: '❌ Lotería no encontrada o inactiva. Usa /loterias.' });
     await guardarPreferenciaWhatsApp(db, comercialId, senderJid, { loteria_id: loteria.id, sorteo_id: null });
-    await enviarSeleccionSorteos(sock, remoteJid, db, loteria.id);
+    await enviarSeleccionSorteos(sock, remoteJid, db, loteria.id, interactiveJid);
     return;
   }
 
   if (command === '/sorteos') {
     const pref = await obtenerPreferenciaWhatsApp(db, comercialId, senderJid);
     if (!pref?.loteria_id) return sock.sendMessage(remoteJid, { text: '🎲 Primero selecciona una lotería con /loterias.' });
-    await enviarSeleccionSorteos(sock, remoteJid, db, pref.loteria_id);
+    await enviarSeleccionSorteos(sock, remoteJid, db, pref.loteria_id, interactiveJid);
     return;
   }
 
@@ -334,7 +335,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
     if (!sorteo) return sock.sendMessage(remoteJid, { text: '❌ Sorteo no encontrado para la lotería seleccionada. Usa /sorteos.' });
     await guardarPreferenciaWhatsApp(db, comercialId, senderJid, { sorteo_id: sorteo.id });
     const { data: loteria } = await db.from('loterias').select('nombre').eq('id', pref.loteria_id).maybeSingle();
-    await sendConfirmationMenu(sock, remoteJid, loteria?.nombre || String(pref.loteria_id), sorteo.nombre, `${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)}`);
+    await sendConfirmationMenu(sock, remoteJid, loteria?.nombre || String(pref.loteria_id), sorteo.nombre, `${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)}`, interactiveJid);
     return;
   }
 
