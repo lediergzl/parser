@@ -135,7 +135,8 @@ async function clienteWhatsApp(db, comercialId, jid, alternateJid = null) {
 }
 
 async function notificarComercialWhatsApp(sock, request, cliente) {
-  const target = String(sock?.user?.id || '').trim();
+  const rawTarget = String(sock?.user?.id || '').trim();
+  const target = rawTarget.replace(/:\d+(?=@s\.whatsapp\.net$)/, '');
   if (!target) {
     console.warn('[WA DEPOSITO] No se pudo obtener el JID del comercial para notificar por WhatsApp.');
     return false;
@@ -155,10 +156,22 @@ async function notificarComercialWhatsApp(sock, request, cliente) {
 
   const fallback = texto + '\\n\\n✅ Aprobar: /aprobar_recarga ' + request.id + '\\n❌ Rechazar: /rechazar_recarga ' + request.id;
 
-  return sendNative(sock, target, texto, [
-    { name: 'quick_reply', params: { display_text: '✅ Aprobar recarga', id: `/aprobar_recarga ${request.id}` } },
-    { name: 'quick_reply', params: { display_text: '❌ Rechazar', id: `/rechazar_recarga ${request.id}` } }
-  ], fallback);
+  let nativeOk = false;
+  try {
+    nativeOk = Boolean(await sendNative(sock, target, texto, [
+      { name: 'quick_reply', params: { display_text: '✅ Aprobar recarga', id: `/aprobar_recarga ${request.id}` } },
+      { name: 'quick_reply', params: { display_text: '❌ Rechazar', id: `/rechazar_recarga ${request.id}` } }
+    ], fallback));
+  } catch (e) {
+    console.warn('[WA DEPOSITO] menú nativo al comercial falló:', e?.message || e);
+  }
+
+  // El texto normal garantiza que la solicitud llegue aunque WhatsApp no
+  // renderice el mensaje interactivo.
+  await sock.sendMessage(target, { text: fallback }).catch(e => {
+    console.warn('[WA DEPOSITO] mensaje normal al comercial falló:', e?.message || e);
+  });
+  return nativeOk;
 }
 
 async function resolverSolicitudWhatsApp(sock, comercialId, requestId, accion) {
@@ -182,7 +195,8 @@ async function resolverSolicitudWhatsApp(sock, comercialId, requestId, accion) {
     const result = Array.isArray(data) ? data[0] : data;
     if (!result?.ok) throw new Error('La base de datos no confirmó la acreditación.');
 
-    await sock.sendMessage(req.whatsapp_jid, {
+    const clientTarget = String(req.whatsapp_jid || '').trim().replace(/:\d+(?=@s\.whatsapp\.net$)/, '');
+    await sock.sendMessage(clientTarget, {
       text: [
         '🎉 RECARGA APROBADA',
         '',
