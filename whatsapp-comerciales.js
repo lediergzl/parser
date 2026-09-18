@@ -403,7 +403,42 @@ async function conectarComercial(db, comercialId, force = false) {
     sock.ev.on('messages.upsert', async event => {
       if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
       if (event.type !== 'notify' || event.requestId) return;
-      for (const message of event.messages || []) await recibirMensaje(db, sock, id, message);
+
+      for (const message of event.messages || []) {
+        try {
+          // Diagnóstico mínimo: confirma que Baileys está entregando el mensaje
+          // antes de entrar al parser/comandos.
+          const jid = String(message?.key?.remoteJid || '').trim();
+          const fromMe = Boolean(message?.key?.fromMe);
+          const preview = textFromMessage(message).slice(0, 120);
+          console.log(
+            `📩 WA ${id}: message received jid=${jid || 'N/A'} fromMe=${fromMe} text=${JSON.stringify(preview)}`
+          );
+
+          await recibirMensaje(db, sock, id, message);
+        } catch (error) {
+          console.error(
+            `❌ Error procesando mensaje WhatsApp del comercial ${id}:`,
+            error
+          );
+
+          // No dejamos que una excepción de un mensaje rompa el procesamiento
+          // de los siguientes eventos messages.upsert.
+          try {
+            const remoteJid = String(message?.key?.remoteJid || '').trim();
+            if (remoteJid && remoteJid !== 'status@broadcast') {
+              await sock.sendMessage(remoteJid, {
+                text: '⚠️ No pude procesar este mensaje. Inténtalo nuevamente.'
+              });
+            }
+          } catch (sendError) {
+            console.error(
+              `❌ Tampoco se pudo enviar el error al WhatsApp ${id}:`,
+              sendError
+            );
+          }
+        }
+      }
     });
 
     return sock;
