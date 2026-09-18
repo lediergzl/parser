@@ -411,9 +411,33 @@ async function conectarComercial(db, comercialId, force = false) {
           const jid = String(message?.key?.remoteJid || '').trim();
           const fromMe = Boolean(message?.key?.fromMe);
           const preview = textFromMessage(message).slice(0, 120);
+          const key = message?.key || {};
+          const identity = {
+            remoteJid: key.remoteJid || null,
+            remoteJidAlt: key.remoteJidAlt || null,
+            participant: key.participant || null,
+            participantAlt: key.participantAlt || null,
+            senderPn: key.senderPn || null,
+            participantPn: key.participantPn || null,
+            senderAlt: key.senderAlt || null,
+            recipientAlt: key.recipientAlt || null,
+            addressingMode: key.addressingMode || null
+          };
           console.log(
             `📩 WA ${id}: message received jid=${jid || 'N/A'} fromMe=${fromMe} text=${JSON.stringify(preview)}`
           );
+          if (jid.endsWith('@lid') || Object.values(identity).some(v => String(v || '').endsWith('@lid'))) {
+            console.log(`🔎 WA LID identity ${id}: ${JSON.stringify(identity)}`);
+            try {
+              const mapping = sock?.signalRepository?.lidMapping;
+              if (jid.endsWith('@lid') && mapping?.getPNForLID) {
+                const pn = await mapping.getPNForLID(jid);
+                console.log(`🔎 WA LID mapping ${id}: ${jid} -> ${pn || 'NO_MAPPING'}`);
+              }
+            } catch (mappingError) {
+              console.warn(`⚠️ WA LID mapping lookup ${id} failed:`, mappingError?.message || mappingError);
+            }
+          }
 
           await recibirMensaje(db, sock, id, message);
         } catch (error) {
