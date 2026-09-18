@@ -256,7 +256,15 @@ async function crearSolicitud(sock, comercialId, message, state, referenceText) 
   ].join('\n');
   await notificarComercialWhatsApp(sock, request, cliente);
   const proof = await downloadProof(sock, message);
-  if (proof) console.log(`[WA DEPOSITO] Comprobante recibido para solicitud #${request.id}`);
+  if (proof) {
+    const target = String(sock?.user?.id || '').trim();
+    if (target) {
+      await sock.sendMessage(target, {
+        image: proof,
+        caption: `🧾 Comprobante de la solicitud #${request.id}\\n👤 ${cliente.nombre || 'Sin nombre'}\\n💵 ${money(request.amount)}\\n💳 ${request.payment_method}\\n\\nVerifica el comprobante y aprueba o rechaza desde este chat.`
+      }).catch(e => console.warn('[WA DEPOSITO] no se pudo enviar comprobante al comercial:', e?.message || e));
+    }
+  }
   await sock.sendMessage(remoteJid(message), { text: `✅ Solicitud de recarga enviada.\n\n🧾 Solicitud #${request.id}\n💵 Monto: $${money(request.amount)}\n💳 Método: ${request.payment_method}\n\n⏳ El comercial debe verificar y aprobar el pago. Te avisaremos cuando el saldo quede acreditado.` });
 }
 
