@@ -327,8 +327,8 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const interactiveId = adaptIncomingInteractive(message);
     const textoSelf = interactiveId || textFromMessage(message);
     const commandSelf = normalizeCommand(textoSelf);
-    const aprobarSelf = commandSelf.match(/^\\/aprobar_recarga\\s+(\\d+)$/);
-    const rechazarSelf = commandSelf.match(/^\\/rechazar_recarga\\s+(\\d+)$/);
+    const aprobarSelf = commandSelf.match(/^\/aprobar_recarga\s+(\d+)$/);
+    const rechazarSelf = commandSelf.match(/^\/rechazar_recarga\s+(\d+)$/);
     if (!aprobarSelf && !rechazarSelf) return;
 
     const requestId = Number((aprobarSelf || rechazarSelf)[1]);
@@ -341,7 +341,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
       );
       await sock.sendMessage(String(message.key.remoteJid || sock.user?.id || '').trim(), {
         text: aprobarSelf
-          ? `✅ Recarga #${requestId} aprobada.\\n💰 Acreditado: ${result.request.amount}\n💵 Nuevo saldo: ${result.saldoDespues.toFixed(2)}`
+          ? `✅ Recarga #${requestId} aprobada.\n💰 Acreditado: ${result.request.amount}\n💵 Nuevo saldo: ${result.saldoDespues.toFixed(2)}`
           : `❌ Recarga #${requestId} rechazada.`
       }).catch(() => {});
     } catch (e) {
