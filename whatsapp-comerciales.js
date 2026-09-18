@@ -178,16 +178,19 @@ async function obtenerPreferenciaWhatsApp(db, comercialId, whatsappJid) {
 }
 
 async function guardarPreferenciaWhatsApp(db, comercialId, whatsappJid, patch) {
-  const actual = await obtenerPreferenciaWhatsApp(db, comercialId, whatsappJid);
   const payload = {
     comercial_telegram_id: Number(comercialId),
     whatsapp_jid: String(whatsappJid),
-    loteria_id: patch.loteria_id !== undefined ? patch.loteria_id : actual?.loteria_id || null,
-    sorteo_id: patch.sorteo_id !== undefined ? patch.sorteo_id : actual?.sorteo_id || null,
-    moneda: patch.moneda !== undefined ? patch.moneda : actual?.moneda || 'cup',
+    loteria_id: patch.loteria_id !== undefined ? patch.loteria_id : null,
+    sorteo_id: patch.sorteo_id !== undefined ? patch.sorteo_id : null,
+    moneda: patch.moneda !== undefined ? patch.moneda : 'cup',
     updated_at: new Date().toISOString()
   };
-  const { data, error } = await db.from('whatsapp_cliente_preferencias').upsert(payload, { onConflict: 'comercial_telegram_id,whatsapp_jid' }).select('*').single();
+  const { data, error } = await db
+    .from('whatsapp_cliente_preferencias')
+    .upsert(payload, { onConflict: 'comercial_telegram_id,whatsapp_jid' })
+    .select('*')
+    .single();
   if (error) throw error;
   return data;
 }
@@ -215,8 +218,8 @@ async function enviarSeleccionLoterias(sock, remoteJid, db, interactiveJid = nul
   return sendLotteryMenu(sock, remoteJid, loterias, interactiveJid);
 }
 
-async function enviarSeleccionSorteos(sock, remoteJid, db, loteriaId, interactiveJid = null) {
-  const { data: loteria } = await db.from('loterias').select('id,nombre').eq('id', loteriaId).eq('activo', true).maybeSingle();
+async function enviarSeleccionSorteos(sock, remoteJid, db, loteriaId, interactiveJid = null, loteriaConocida = null) {
+  const loteria = loteriaConocida || (await db.from('loterias').select('id,nombre').eq('id', loteriaId).eq('activo', true).maybeSingle()).data;
   if (!loteria) return sock.sendMessage(remoteJid, { text: '❌ La lotería seleccionada no existe o está inactiva. Usa /loterias.' });
   const sorteos = await listarSorteosWhatsApp(db, loteriaId);
   return sendDrawMenu(sock, remoteJid, loteria, sorteos, interactiveJid);
@@ -596,7 +599,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const { data: loteria } = await db.from('loterias').select('id,nombre').eq('id', loteriaId).eq('activo', true).maybeSingle();
     if (!loteria) return sock.sendMessage(remoteJid, { text: '❌ Lotería no encontrada o inactiva. Usa /loterias.' });
     await guardarPreferenciaWhatsApp(db, comercialId, senderJid, { loteria_id: loteria.id, sorteo_id: null });
-    await enviarSeleccionSorteos(sock, remoteJid, db, loteria.id, interactiveJid);
+    await enviarSeleccionSorteos(sock, remoteJid, db, loteria.id, interactiveJid, loteria);
     return;
   }
 
@@ -614,7 +617,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const sorteoId = Number(sorteoMatch[1]);
     const { data: sorteo } = await db.from('sorteos').select('id,nombre,hora_apertura,hora_cierre,activo,loteria_id').eq('id', sorteoId).eq('loteria_id', pref.loteria_id).eq('activo', true).maybeSingle();
     if (!sorteo) return sock.sendMessage(remoteJid, { text: '❌ Sorteo no encontrado para la lotería seleccionada. Usa /sorteos.' });
-    await guardarPreferenciaWhatsApp(db, comercialId, senderJid, { sorteo_id: sorteo.id });
+    await guardarPreferenciaWhatsApp(db, comercialId, senderJid, { loteria_id: pref.loteria_id, sorteo_id: sorteo.id, moneda: pref.moneda || 'cup' });
     const { data: loteria } = await db.from('loterias').select('nombre').eq('id', pref.loteria_id).maybeSingle();
     await sendConfirmationMenu(sock, remoteJid, loteria?.nombre || String(pref.loteria_id), sorteo.nombre, `${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)}`, interactiveJid);
     return;
