@@ -4,9 +4,7 @@ const { createClient } = require('@supabase/supabase-js');
 const baileys = require('@whiskeysockets/baileys');
 const { sendNative } = require('./lib/wa-menu');
 
-const originalMakeWASocket = baileys.default;
 const depositStates = new Map();
-let telegramHandlersInstalled = false;
 
 function supa() {
   return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY);
@@ -50,7 +48,6 @@ async function downloadProof(sock, message) {
 async function resolverComercialId(sock) {
   const attachedId = Number(sock?.__lotoComercialId);
   if (Number.isFinite(attachedId) && attachedId > 0) {
-    commercialSockets.set(attachedId, sock);
     return attachedId;
   }
   const telefono = phoneKey(sock?.user?.id);
@@ -67,7 +64,7 @@ async function resolverComercialId(sock) {
     return null;
   }
   const id = Number(row.comercial_telegram_id);
-  if (Number.isFinite(id)) { commercialSockets.set(id, sock); return id; }
+  if (Number.isFinite(id)) return id;
   return null;
 }
 
@@ -131,7 +128,7 @@ async function notificarComercialWhatsApp(sock, request, cliente) {
     'Verifica el pago y confirma la recarga:'
   ].join('\n');
 
-  const fallback = texto + '\n\n✅ Aprobar: /aprobar_recarga ' + request.id + '\\n❌ Rechazar: /rechazar_recarga ' + request.id;
+  const fallback = texto + '\n\n✅ Aprobar: /aprobar_recarga ' + request.id + '\n❌ Rechazar: /rechazar_recarga ' + request.id;
 
   let nativeOk = false;
   try {
@@ -182,7 +179,7 @@ async function resolverSolicitudWhatsApp(sock, comercialId, requestId, accion) {
         `💵 Nuevo saldo: ${money(result.saldo_despues)}`,
         '',
         'Ya puedes continuar jugando.'
-      ].join('\\n')
+      ].join('\n')
     }).catch(() => {});
 
     return { ok: true, status: 'approved', request: req, saldoDespues: Number(result.saldo_despues || 0) };
@@ -203,7 +200,7 @@ async function resolverSolicitudWhatsApp(sock, comercialId, requestId, accion) {
       `La solicitud por ${money(req.amount)} fue rechazada.`,
       '',
       'Si realizaste el pago, contacta al comercial para revisar el comprobante.'
-    ].join('\\n')
+    ].join('\n')
   }).catch(() => {});
 
   return { ok: true, status: 'rejected', request: req };
@@ -252,7 +249,7 @@ async function crearSolicitud(sock, comercialId, message, state, referenceText) 
     if (target) {
       await sock.sendMessage(target, {
         image: proof,
-        caption: `🧾 Comprobante de la solicitud #${request.id}\n👤 ${cliente.nombre || 'Sin nombre'}\\n💵 ${money(request.amount)}\\n💳 ${request.payment_method}\\n\\nVerifica el comprobante y aprueba o rechaza desde este chat.`
+        caption: `🧾 Comprobante de la solicitud #${request.id}\n👤 ${cliente.nombre || 'Sin nombre'}\n💵 ${money(request.amount)}\n💳 ${request.payment_method}\n\nVerifica el comprobante y aprueba o rechaza desde este chat.`
       }).catch(e => console.warn('[WA DEPOSITO] no se pudo enviar comprobante al comercial:', e?.message || e));
     }
   }
@@ -278,10 +275,10 @@ async function procesarMensajeDeposito(sock, comercialId, message) {
   if (aprobarMatch) {
     try {
       const result = await resolverSolicitudWhatsApp(sock, comercialId, Number(aprobarMatch[1]), 'aprobar');
-      await sock.sendMessage(remote, { text: `✅ Recarga #${aprobarMatch[1]} aprobada.\\n💰 Acreditado: ${money(result.request.amount)}\\n💵 Nuevo saldo: ${money(result.saldoDespues)}` });
+      await sock.sendMessage(remote, { text: `✅ Recarga #${aprobarMatch[1]} aprobada.\n💰 Acreditado: ${money(result.request.amount)}\n💵 Nuevo saldo: ${money(result.saldoDespues)}` });
     } catch (e) {
       console.error('[WA DEPOSITO] aprobar por WhatsApp:', e);
-      await sock.sendMessage(remote, { text: `❌ No se pudo aprobar la recarga #${aprobarMatch[1]}.\\n\\n${e?.message || e}` });
+      await sock.sendMessage(remote, { text: `❌ No se pudo aprobar la recarga #${aprobarMatch[1]}.\n\n${e?.message || e}` });
     }
     return true;
   }
@@ -293,12 +290,14 @@ async function procesarMensajeDeposito(sock, comercialId, message) {
       await sock.sendMessage(remote, { text: `❌ Recarga #${rechazarMatch[1]} rechazada.` });
     } catch (e) {
       console.error('[WA DEPOSITO] rechazar por WhatsApp:', e);
-      await sock.sendMessage(remote, { text: `❌ No se pudo rechazar la recarga #${rechazarMatch[1]}.\\n\\n${e?.message || e}` });
+      await sock.sendMessage(remote, { text: `❌ No se pudo rechazar la recarga #${rechazarMatch[1]}.\n\n${e?.message || e}` });
     }
     return true;
   }
 
-  }\n\n  if (command === '/saldo') {
+  }
+
+  if (command === '/saldo') {
     try {
       const cliente = await clienteWhatsApp(supa(), comercialId, jid, remote);
       await sock.sendMessage(remote, { text: cliente ? `💰 SALDO DISPONIBLE\n\n👤 ${cliente.nombre}\n💵 $${money(cliente.saldo)}\n\nPara recargar escribe /depositar.` : '❌ Este WhatsApp no está registrado con el comercial.' });
