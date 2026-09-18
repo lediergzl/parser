@@ -127,13 +127,47 @@ async function sendQr(id, qr) {
   if (!ok) await telegramText(id, '⚠️ No pude enviarte el QR. Usa /wa_qr para solicitar el más reciente.');
 }
 
-async function buscarClienteWhatsApp(db, comercialId, senderJid) {
-  const jid = String(senderJid || '').trim();
-  if (!jid) throw new Error('No se pudo identificar el WhatsApp del cliente.');
-  const { data, error } = await db.from('clientes_banca').select('*').eq('comercial_telegram_id', comercialId).eq('whatsapp_jid', jid).maybeSingle();
+function normalizarWhatsAppKey(value) {
+  const v = String(value || '').trim().toLowerCase();
+  const pn = v.match(/^(\d+)(?::\d+)?@s\.whatsapp\.net$/);
+  if (pn) return pn[1];
+  return v;
+}
+
+async function buscarClienteWhatsApp(db, comercialId, senderJid, alternateJid = null) {
+  const candidatos = [...new Set(
+    [senderJid, alternateJid]
+      .map(v => String(v || '').trim())
+      .filter(Boolean)
+  )];
+  if (!candidatos.length) throw new Error('No se pudo identificar el WhatsApp del cliente.');
+
+  // Primero intentamos coincidencia exacta. Esto conserva clientes antiguos
+  // registrados con @lid.
+  const orExact = candidatos.map(jid => `whatsapp_jid.eq.${jid}`).join(',');
+  const { data: exactRows, error: exactError } = await db
+    .from('clientes_banca')
+    .select('*')
+    .eq('comercial_telegram_id', comercialId)
+    .or(orExact)
+    .limit(2);
+  if (exactError) throw exactError;
+  if (exactRows?.length === 1) return exactRows[0];
+  if (exactRows?.length > 1) throw new Error('Hay más de un registro para este WhatsApp con el comercial.');
+
+  // Compatibilidad con registros antiguos guardados como número/JID PN.
+  const { data: rows, error } = await db
+    .from('clientes_banca')
+    .select('*')
+    .eq('comercial_telegram_id', comercialId)
+    .limit(1000);
   if (error) throw error;
-  if (!data) throw new Error('Este WhatsApp no está registrado con el comercial. Debes registrarte y realizar un depósito antes de jugar.');
-  return data;
+
+  const keys = new Set(candidatos.map(normalizarWhatsAppKey));
+  const matches = (rows || []).filter(row => keys.has(normalizarWhatsAppKey(row.whatsapp_jid)));
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) throw new Error('Hay más de un registro para este WhatsApp con el comercial.');
+  throw new Error('Este WhatsApp no está registrado con el comercial. Debes registrarte y realizar un depósito antes de jugar.');
 }
 
 async function obtenerPreferenciaWhatsApp(db, comercialId, whatsappJid) {
@@ -236,9 +270,9 @@ async function validarSorteoAbierto(db, sorteoId, loteriaId) {
   return sorteo;
 }
 
-async function procesarJugadaWhatsApp({ comercialId, texto, senderJid }) {
+async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, alternateJid = null }) {
   const db = supa();
-  const cliente = await buscarClienteWhatsApp(db, comercialId, senderJid);
+  const cliente = await buscarClienteWhatsApp(db, comercialId, senderJid, alternateJid);
   const saldo = Number(cliente.saldo || 0);
   if (!Number.isFinite(saldo) || saldo <= 0) throw new Error('No tienes saldo disponible. Debes realizar un depósito antes de jugar.');
   const pref = await obtenerPreferenciaWhatsApp(db, comercialId, senderJid);
@@ -360,7 +394,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
   await db.from('whatsapp_comercial_session').update({ ultimo_mensaje_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('comercial_telegram_id', comercialId);
 
   try {
-    const r = await procesarJugadaWhatsApp({ comercialId, texto, senderJid });
+    const r = await procesarJugadaWhatsApp({ comercialId, texto, senderJid, alternateJid: remoteJid });
     await db.from('whatsapp_inbox').update({ procesado: true, bet_ids: r.bets.map(b => b.id), error: null }).eq('id', inserted.id);
     const b = r.bets[0];
     const resumen = `👤 ${b.nombre}\n🧾 ${r.textoOriginal}\n\n💵 Total: $${r.total.toFixed(2)}\n💰 Saldo restante: $${b.saldoDespues.toFixed(2)}\n🎲 ${r.loteriaNombre}\n🎰 ${r.sorteo}`;
