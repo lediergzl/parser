@@ -397,8 +397,7 @@ async function enviarMenuListaSorteosWhatsApp(db, sock, targetJid) {
     '',
     actualId ? '🟢 El sorteo abierto ahora está marcado como ACTUAL.' : 'ℹ️ No hay un sorteo abierto ahora.',
     '',
-    ...sorteos.map(s => {
-      const actual = Number(s.id) === Number(actualId);
+    ...sorteos.map(s => {      const actual = Number(s.id) === Number(actualId);
       const loteria = loteriasMap.get(Number(s.loteria_id)) || 'Lotería';
       return `${actual ? '🟢' : '🎰'} ${loteria} — ${s.nombre} · ${formatoHora(s.hora_apertura)}-${formatoHora(s.hora_cierre)}`;
     }),
@@ -484,8 +483,13 @@ async function enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid, sort
   const encabezado = [
     String(loteria?.nombre || 'Lotería') + ' - ' + String(sorteoSeleccionado.nombre || 'Sorteo'),
     'Fecha: ' + fecha,
-    bets.length + ' ' + (bets.length === 1 ? 'jugada' : 'jugadas') + ' | Total: 
-    const raw = String(bet.input_raw || '')
+    bets.length + ' ' + (bets.length === 1 ? 'jugada' : 'jugadas') + ' | Total: $' + totalGeneral.toFixed(2),
+    '',
+    '༆࿐༵ ༆࿐༵ ༆࿐༵'
+  ].join('\\n');
+
+  const bloques = bets.map(bet => {
+
       .replace(/\r\n/g, '\n')
       .replace(/\r/g, '\n')
       .replace(/\u2028|\u2029/g, '\n')
@@ -797,8 +801,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
   if (!activeBettingChats.has(key)) return;
 
   const { data: inserted, error } = await db.from('whatsapp_inbox').insert([{ comercial_telegram_id: comercialId, message_id: String(message.key.id), remote_jid: remoteJid, sender_jid: senderJid || null, sender_name: senderName(message) || null, texto }]).select('id').single();
-  if (error) { if (String(error.message || '').toLowerCase().includes('duplicate')) return; console.error('WhatsApp inbox error:', error); return; }
-  await db.from('whatsapp_comercial_session').update({ ultimo_mensaje_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('comercial_telegram_id', comercialId);
+  if (error) { if (String(error.message || '').toLowerCase().includes('duplicate')) return; console.error('WhatsApp inbox error:', error); return; }  await db.from('whatsapp_comercial_session').update({ ultimo_mensaje_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('comercial_telegram_id', comercialId);
 
   try {
     const r = await procesarJugadaWhatsApp({ comercialId, texto, senderJid, alternateJid: remoteJid });
@@ -1197,8 +1200,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
   const remoteJid = String(message.key.remoteJid || '').trim(); if (!remoteJid || remoteJid === 'status@broadcast') return;
   const senderPn = String(message.key.senderPn || message.key.participantPn || '').trim();
   const senderJid = senderPn.endsWith('@s.whatsapp.net')
-    ? senderPn
-    : String(message.key.participant || remoteJid).trim();
+    ? senderPn    : String(message.key.participant || remoteJid).trim();
   const interactiveJid = senderPn.endsWith('@s.whatsapp.net') ? senderPn : null;
   const key = bettingChatKey(comercialId, senderJid || remoteJid);
   const command = normalizeCommand(texto);
@@ -1597,8 +1599,7 @@ async function registrarWhatsappComerciales(bot) {
 
 module.exports = { registrarWhatsappComerciales, conectarComercial, desconectarComercial, procesarJugadaWhatsApp }; + totalGeneral.toFixed(2),
     '',
-    '༆࿐༵ ༆࿐༵ ༆࿐༵'
-  ].join('\n');
+    '༆࿐༵ ༆࿐༵ ༆࿐༵'  ].join('\n');
 
   const bloques = bets.map(bet => {
     const raw = String(bet.input_raw || '')
@@ -1997,8 +1998,7 @@ async function conectarComercial(db, comercialId, force = false) {
         const loggedOut = code === DisconnectReason.loggedOut;
         await saveStatus(db, id, { estado: loggedOut ? 'desconectado' : 'conectando', ultimo_error: String(lastDisconnect?.error?.message || '') });
         sockets.delete(id);
-        if (!loggedOut && !reconnectTimers.has(id)) {
-          const timer = setTimeout(() => {
+        if (!loggedOut && !reconnectTimers.has(id)) {          const timer = setTimeout(() => {
             reconnectTimers.delete(id);
             if (socketGenerations.get(id) !== generation) return;
             conectarComercial(db, id).catch(e => console.error(`reconnect WA ${id}:`, e));
@@ -2397,8 +2397,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
       const { data: nuevo, error: insertError } = await db
         .from('clientes_banca')
         .insert([{          comercial_telegram_id: Number(comercialId),
-          nombre,
-          saldo: 0,
+          nombre,          saldo: 0,
           whatsapp_jid: senderJid
         }])
         .select('id,nombre,saldo,whatsapp_jid')
