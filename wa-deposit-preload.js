@@ -280,6 +280,9 @@ async function procesarMensajeDeposito(sock, comercialId, message) {
   const text = nativeId || textFromMessage(message);
   const command = text.toLowerCase();
 
+  const selfTarget = String(sock?.user?.id || '').trim();
+  const isCommercialSelfChat = Boolean(selfTarget && normalizarWhatsAppKey(remote) === normalizarWhatsAppKey(selfTarget));
+  if (isCommercialSelfChat) {
   const aprobarMatch = command.match(/^\/aprobar_recarga\s+(\d+)$/);
   if (aprobarMatch) {
     try {
@@ -304,7 +307,7 @@ async function procesarMensajeDeposito(sock, comercialId, message) {
     return true;
   }
 
-  if (command === '/saldo') {
+  }\n\n  if (command === '/saldo') {
     try {
       const cliente = await clienteWhatsApp(supa(), comercialId, jid, remote);
       await sock.sendMessage(remote, { text: cliente ? `💰 SALDO DISPONIBLE\n\n👤 ${cliente.nombre}\n💵 $${money(cliente.saldo)}\n\nPara recargar escribe /depositar.` : '❌ Este WhatsApp no está registrado con el comercial.' });
