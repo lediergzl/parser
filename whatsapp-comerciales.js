@@ -459,6 +459,24 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const commandSelf = normalizeCommand(textoSelf);
     const aprobarSelf = commandSelf.match(/^\/aprobar_recarga\s+(\d+)$/);
     const rechazarSelf = commandSelf.match(/^\/rechazar_recarga\s+(\d+)$/);
+
+    // Los comandos /lista y /jugadas enviados desde el propio WhatsApp
+    // llegan como fromMe=true. Deben procesarse aquí, antes del filtro
+    // de decisiones de recarga.
+    if (commandSelf === '/lista' || commandSelf === '/jugadas') {
+      const targetJid = String(message.key.remoteJid || '').trim();
+      if (!targetJid || targetJid === 'status@broadcast') return;
+      try {
+        await enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid);
+      } catch (e) {
+        console.error('[WA JUGADAS] error generando lista:', e?.stack || e);
+        await sock.sendMessage(targetJid, {
+          text: `❌ No se pudo generar la lista de jugadas.\n\n${e?.message || e}`
+        }).catch(() => {});
+      }
+      return;
+    }
+
     if (!aprobarSelf && !rechazarSelf) return;
 
     const requestId = Number((aprobarSelf || rechazarSelf)[1]);
