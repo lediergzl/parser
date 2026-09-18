@@ -489,13 +489,24 @@ async function enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid, sort
   ].join('\n');
 
   const bloques = bets.map(bet => {
-    const raw = String(bet.input_raw || '').trim();
+    const raw = String(bet.input_raw || '')
+      .replace(/\\r\\n/g, '\\n')
+      .replace(/\\r/g, '\\n')
+      .replace(/\\u2028|\\u2029/g, '\\n')
+      .split('\\n')
+      .map(linea => linea.trim())
+      .filter(Boolean)
+      .join('\\n');
     const total = Number(bet.total_apuesta || 0);
-    return (raw || 'Jugada sin texto') + '\nTOTAL : ' + total.toFixed(2) + '\n──────────────────────────────';
+
+    return [
+      raw || 'Jugada sin texto',
+      'TOTAL : ' + total.toFixed(2),
+      '──────────────────────────────'
+    ].join('\\n');
   });
 
-  let texto = encabezado + '\n' + bloques.join('\n');
-  texto += '\nTOTAL GENERAL: ' + totalGeneral.toFixed(2);
+  let texto = encabezado + '\\n' + bloques.join('\\n') + '\\nTOTAL GENERAL: ' + totalGeneral.toFixed(2);
 
   const chunks = [];
   while (texto.length > 3900) {
