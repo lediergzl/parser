@@ -152,9 +152,9 @@ async function notificarComercialWhatsApp(sock, request, cliente) {
     `💳 Método: ${request.payment_method}`,
     '',
     'Verifica el pago y confirma la recarga:'
-  ].join('\\n');
+  ].join('\n');
 
-  const fallback = texto + '\\n\\n✅ Aprobar: /aprobar_recarga ' + request.id + '\\n❌ Rechazar: /rechazar_recarga ' + request.id;
+  const fallback = texto + '\n\n✅ Aprobar: /aprobar_recarga ' + request.id + '\\n❌ Rechazar: /rechazar_recarga ' + request.id;
 
   let nativeOk = false;
   try {
@@ -275,7 +275,7 @@ async function crearSolicitud(sock, comercialId, message, state, referenceText) 
     if (target) {
       await sock.sendMessage(target, {
         image: proof,
-        caption: `🧾 Comprobante de la solicitud #${request.id}\\n👤 ${cliente.nombre || 'Sin nombre'}\\n💵 ${money(request.amount)}\\n💳 ${request.payment_method}\\n\\nVerifica el comprobante y aprueba o rechaza desde este chat.`
+        caption: `🧾 Comprobante de la solicitud #${request.id}\n👤 ${cliente.nombre || 'Sin nombre'}\\n💵 ${money(request.amount)}\\n💳 ${request.payment_method}\\n\\nVerifica el comprobante y aprueba o rechaza desde este chat.`
       }).catch(e => console.warn('[WA DEPOSITO] no se pudo enviar comprobante al comercial:', e?.message || e));
     }
   }
