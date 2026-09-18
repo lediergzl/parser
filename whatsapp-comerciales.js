@@ -384,11 +384,11 @@ async function enviarMenuListaSorteosWhatsApp(db, sock, targetJid) {
   const rows = sorteos.map(s => {
     const actual = Number(s.id) === Number(actualId);
     const loteria = loteriasMap.get(Number(s.loteria_id)) || 'Lotería';
-    const horario = \`${formatoHora(s.hora_apertura)}-${formatoHora(s.hora_cierre)}\`;
+    const horario = `${formatoHora(s.hora_apertura)}-${formatoHora(s.hora_cierre)}`;
     return {
-      id: \`/lista_sorteo ${s.id}\`,
-      title: \`${actual ? '🟢 ' : '🎰 '}${loteria} — ${s.nombre}\`.slice(0, 24),
-      description: \`${actual ? 'ACTUAL · ' : ''}${horario}\`.slice(0, 72)
+      id: `/lista_sorteo ${s.id}`,
+      title: `${actual ? '🟢 ' : '🎰 '}${loteria} — ${s.nombre}`.slice(0, 24),
+      description: `${actual ? 'ACTUAL · ' : ''}${horario}`.slice(0, 72)
     };
   });
 
@@ -400,7 +400,7 @@ async function enviarMenuListaSorteosWhatsApp(db, sock, targetJid) {
     ...sorteos.map(s => {
       const actual = Number(s.id) === Number(actualId);
       const loteria = loteriasMap.get(Number(s.loteria_id)) || 'Lotería';
-      return \`${actual ? '🟢' : '🎰'} ${loteria} — ${s.nombre} · ${formatoHora(s.hora_apertura)}-${formatoHora(s.hora_cierre)}\`;
+      return `${actual ? '🟢' : '🎰'} ${loteria} — ${s.nombre} · ${formatoHora(s.hora_apertura)}-${formatoHora(s.hora_cierre)}`;
     }),
     '',
     'Selecciona el sorteo del que quieres ver las jugadas.'
@@ -412,8 +412,8 @@ async function enviarMenuListaSorteosWhatsApp(db, sock, targetJid) {
     return {
       name: 'quick_reply',
       params: {
-        display_text: \`${actual ? '🟢 ' : ''}${loteria} ${s.nombre}\`.slice(0, 20),
-        id: \`/lista_sorteo ${s.id}\`
+        display_text: `${actual ? '🟢 ' : ''}${loteria} ${s.nombre}`.slice(0, 20),
+        id: `/lista_sorteo ${s.id}`
       }
     };
   });
