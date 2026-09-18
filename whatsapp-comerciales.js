@@ -297,8 +297,7 @@ async function validarSorteoAbierto(db, sorteoId, loteriaId) {
     const abierto = cierre >= apertura ? actual >= apertura && actual < cierre : actual >= apertura || actual < cierre;
     if (!abierto) throw new Error(`El sorteo ${sorteo.nombre} está cerrado. Horario: ${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)} (Cuba).`);
   }
-  return sorteo;
-}
+  return sorteo;}
 
 async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, alternateJid = null }) {
   const db = supa();
@@ -345,16 +344,56 @@ async function enviarListaJugadas(bot, db, ctx) {
   for (const chunk of chunks) await ctx.reply(chunk);
 }
 
-async function enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid) {
+async function enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid, sorteoId = null) {
   const fecha = fechaCuba();
+  let sorteoSeleccionado = null;
+
+  if (sorteoId !== null) {
+    const { data, error } = await db.from('sorteos')
+      .select('id,nombre,hora_apertura,hora_cierre,activo,loteria_id')
+      .eq('id', Number(sorteoId))
+      .eq('activo', true)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) {
+      await sock.sendMessage(targetJid, { text: '❌ El sorteo especificado no existe o está inactivo.' });
+      return;
+    }
+    sorteoSeleccionado = data;
+  } else {
+    const { data: sorteos, error } = await db.from('sorteos')
+      .select('id,nombre,hora_apertura,hora_cierre,activo,loteria_id')
+      .eq('activo', true)
+      .order('hora_apertura');
+    if (error) throw error;
+    const ahora = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Havana', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+    const [xh, xm] = ahora.split(':').map(Number);
+    const actual = xh * 60 + xm;
+    sorteoSeleccionado = (sorteos || []).find(s => {
+      if (!s.hora_apertura || !s.hora_cierre) return false;
+      const [ah, am] = String(s.hora_apertura).slice(0, 5).split(':').map(Number);
+      const [ch, cm] = String(s.hora_cierre).slice(0, 5).split(':').map(Number);
+      const apertura = ah * 60 + am;
+      const cierre = ch * 60 + cm;
+      return cierre >= apertura ? actual >= apertura && actual < cierre : actual >= apertura || actual < cierre;
+    }) || null;
+    if (!sorteoSeleccionado) {
+      await sock.sendMessage(targetJid, { text: 'ℹ️ No hay un sorteo abierto en este momento. Usa /lista ID para consultar un sorteo específico.' });
+      return;
+    }
+  }
+
   const { data: bets, error } = await db.from('bets')
     .select('id,input_raw,total_apuesta,moneda,created_at,cliente_banca_id,loteria_id,sorteo_id')
     .eq('comercial_telegram_id', comercialId)
     .eq('fecha_apuesta', fecha)
+    .eq('sorteo_id', Number(sorteoSeleccionado.id))
     .order('created_at', { ascending: true });
   if (error) throw error;
   if (!bets?.length) {
-    await sock.sendMessage(targetJid, { text: '📋 No hay jugadas registradas hoy (' + fecha + ').' });
+    await sock.sendMessage(targetJid, {
+      text: '📋 No hay jugadas para el sorteo ' + sorteoSeleccionado.nombre + ' en la fecha de hoy (' + fecha + ').'
+    });
     return;
   }
   const clienteIds = [...new Set(bets.map(b => b.cliente_banca_id).filter(Boolean))];
@@ -460,14 +499,13 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const aprobarSelf = commandSelf.match(/^\/aprobar_recarga\s+(\d+)$/);
     const rechazarSelf = commandSelf.match(/^\/rechazar_recarga\s+(\d+)$/);
 
-    // Los comandos /lista y /jugadas enviados desde el propio WhatsApp
-    // llegan como fromMe=true. Deben procesarse aquí, antes del filtro
-    // de decisiones de recarga.
-    if (commandSelf === '/lista' || commandSelf === '/jugadas') {
+    const listaMatch = commandSelf.match(/^\/(lista|jugadas)(?:\s+(\d+))?$/);
+    if (listaMatch) {
       const targetJid = String(message.key.remoteJid || '').trim();
       if (!targetJid || targetJid === 'status@broadcast') return;
+      const sorteoId = listaMatch[2] ? Number(listaMatch[2]) : null;
       try {
-        await enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid);
+        await enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid, sorteoId);
       } catch (e) {
         console.error('[WA JUGADAS] error generando lista:', e?.stack || e);
         await sock.sendMessage(targetJid, {
@@ -597,8 +635,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
 
       const { data: nuevo, error: insertError } = await db
         .from('clientes_banca')
-        .insert([{
-          comercial_telegram_id: Number(comercialId),
+        .insert([{          comercial_telegram_id: Number(comercialId),
           nombre,
           saldo: 0,
           whatsapp_jid: senderJid
