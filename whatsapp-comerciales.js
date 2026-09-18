@@ -2,7 +2,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { useSupabaseAuthState } = require('./lib/wa-session-store');
 const { DisconnectReason } = require('@whiskeysockets/baileys');
 const { adaptIncomingInteractive, sendMainMenu, sendLotteryMenu, sendDrawMenu, sendConfirmationMenu } = require('./lib/wa-menu');
-const { procesarMensajeDeposito } = require('./wa-deposit-preload');
+const { procesarMensajeDeposito, resolverSolicitudWhatsApp } = require('./wa-deposit-preload');
 
 const sockets = new Map();
 const reconnectTimers = new Map();
@@ -317,10 +317,43 @@ async function enviarListaJugadas(bot, db, ctx) {
 }
 
 async function recibirMensaje(db, sock, comercialId, message) {
-  if (!message?.key?.id || message.key.fromMe) return;
+  if (!message?.key?.id) return;
+
+  // El comercial recibe las solicitudes de recarga de clientes WhatsApp
+  // en el chat privado de su propio WhatsApp. Ese mensaje y los botones
+  // pueden regresar como fromMe=true, por lo que se procesa únicamente
+  // si contiene una orden explícita de aprobar/rechazar una recarga WA.
+  if (message.key.fromMe) {
+    const interactiveId = adaptIncomingInteractive(message);
+    const textoSelf = interactiveId || textFromMessage(message);
+    const commandSelf = normalizeCommand(textoSelf);
+    const aprobarSelf = commandSelf.match(/^\\/aprobar_recarga\\s+(\\d+)$/);
+    const rechazarSelf = commandSelf.match(/^\\/rechazar_recarga\\s+(\\d+)$/);
+    if (!aprobarSelf && !rechazarSelf) return;
+
+    const requestId = Number((aprobarSelf || rechazarSelf)[1]);
+    try {
+      const result = await resolverSolicitudWhatsApp(
+        sock,
+        comercialId,
+        requestId,
+        aprobarSelf ? 'aprobar' : 'rechazar'
+      );
+      await sock.sendMessage(String(message.key.remoteJid || sock.user?.id || '').trim(), {
+        text: aprobarSelf
+          ? `✅ Recarga #${requestId} aprobada.\\n💰 Acreditado: ${result.request.amount}\n💵 Nuevo saldo: ${result.saldoDespues.toFixed(2)}`
+          : `❌ Recarga #${requestId} rechazada.`
+      }).catch(() => {});
+    } catch (e) {
+      console.error('[WA DEPOSITO] decisión del comercial por WhatsApp:', e);
+      await sock.sendMessage(String(message.key.remoteJid || sock.user?.id || '').trim(), {
+        text: `❌ No se pudo procesar la recarga #${requestId}.\\n\\n${e?.message || e}`
+      }).catch(() => {});
+    }
+    return;
+  }
 
   // El depósito se procesa aquí, dentro del listener principal de Baileys.
-  // Esto evita depender del monkey-patch de sock.ev.on del preload.
   try {
     if (await procesarMensajeDeposito(sock, comercialId, message)) return;
   } catch (e) {
