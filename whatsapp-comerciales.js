@@ -9,6 +9,7 @@ const reconnectTimers = new Map();
 const connecting = new Map();
 const socketGenerations = new Map();
 const activeBettingChats = new Set();
+const registrationStates = new Map();
 
 function enabled() {
   return String(process.env.WA_BAILEYS_ENABLED || '').trim().toLowerCase() === 'true';
@@ -337,6 +338,105 @@ async function recibirMensaje(db, sock, comercialId, message) {
   const interactiveJid = senderPn.endsWith('@s.whatsapp.net') ? senderPn : null;
   const key = bettingChatKey(comercialId, senderJid || remoteJid);
   const command = normalizeCommand(texto);
+
+  if (command === '/registrar' || command === '/registro') {
+    registrationStates.set(key, { comercialId, senderJid, remoteJid });
+    await sock.sendMessage(remoteJid, {
+      text: '📝 REGISTRO DE CLIENTE\\n\\nEscribe ahora tu nombre. Ese nombre quedará vinculado a este WhatsApp con este comercial.\\n\\nEjemplo: Juan Pérez'
+    });
+    return;
+  }
+
+  const registrationState = registrationStates.get(key);
+  if (registrationState && !command.startsWith('/')) {
+    const nombre = String(texto || '').trim().replace(/\\s+/g, ' ').slice(0, 120);
+    if (!nombre) {
+      await sock.sendMessage(remoteJid, { text: '❌ Debes escribir un nombre válido.' });
+      return;
+    }
+
+    try {
+      const candidatos = [...new Set([senderJid, remoteJid].filter(Boolean))];
+      const orExact = candidatos.map(jid => `whatsapp_jid.eq.${jid}`).join(',');
+      const { data: porWhatsApp, error: whatsappError } = await db
+        .from('clientes_banca')
+        .select('id,nombre,whatsapp_jid')
+        .eq('comercial_telegram_id', comercialId)
+        .or(orExact)
+        .limit(2);
+      if (whatsappError) throw whatsappError;
+
+      if ((porWhatsApp || []).length > 1) {
+        throw new Error('Este WhatsApp tiene más de un registro con el comercial. Debe revisarlo el comercial.');
+      }
+
+      if ((porWhatsApp || []).length === 1) {
+        const cliente = porWhatsApp[0];
+        const { data: actualizado, error } = await db
+          .from('clientes_banca')
+          .update({ nombre, whatsapp_jid: senderJid, updated_at: new Date().toISOString() })
+          .eq('id', cliente.id)
+          .select('id,nombre,saldo,whatsapp_jid')
+          .single();
+        if (error) throw error;
+        registrationStates.delete(key);
+        await sock.sendMessage(remoteJid, {
+          text: `✅ Registro actualizado.\\n\\n👤 Cliente: ${actualizado.nombre}\\n📱 WhatsApp vinculado correctamente.\\n💰 Saldo: ${Number(actualizado.saldo || 0).toFixed(2)}\\n\\nAhora puedes usar /depositar para solicitar una recarga.`
+        });
+        return;
+      }
+
+      const { data: porNombre, error: nombreError } = await db
+        .from('clientes_banca')
+        .select('id,nombre,whatsapp_jid')
+        .eq('comercial_telegram_id', comercialId)
+        .eq('nombre', nombre)
+        .limit(1);
+      if (nombreError) throw nombreError;
+
+      if ((porNombre || []).length === 1) {
+        const cliente = porNombre[0];
+        if (cliente.whatsapp_jid && String(cliente.whatsapp_jid) !== senderJid) {
+          throw new Error('Ya existe un cliente con ese nombre vinculado a otro WhatsApp. Usa otro nombre o habla con el comercial.');
+        }
+
+        const { data: actualizado, error } = await db
+          .from('clientes_banca')
+          .update({ whatsapp_jid: senderJid, updated_at: new Date().toISOString() })
+          .eq('id', cliente.id)
+          .select('id,nombre,saldo,whatsapp_jid')
+          .single();
+        if (error) throw error;
+        registrationStates.delete(key);
+        await sock.sendMessage(remoteJid, {
+          text: `✅ Registro completado.\\n\\n👤 Cliente: ${actualizado.nombre}\\n📱 WhatsApp vinculado correctamente.\\n💰 Saldo: ${Number(actualizado.saldo || 0).toFixed(2)}\\n\\nAhora puedes usar /depositar para solicitar una recarga.`
+        });
+        return;
+      }
+
+      const { data: nuevo, error: insertError } = await db
+        .from('clientes_banca')
+        .insert([{
+          comercial_telegram_id: Number(comercialId),
+          nombre,
+          saldo: 0,
+          whatsapp_jid: senderJid
+        }])
+        .select('id,nombre,saldo,whatsapp_jid')
+        .single();
+      if (insertError) throw insertError;
+
+      registrationStates.delete(key);
+      await sock.sendMessage(remoteJid, {
+        text: `✅ Registro completado.\\n\\n👤 Cliente: ${nuevo.nombre}\\n📱 WhatsApp vinculado correctamente.\\n💰 Saldo: ${Number(nuevo.saldo || 0).toFixed(2)}\\n\\nAhora puedes usar /depositar para solicitar una recarga.`
+      });
+    } catch (e) {
+      console.error('[WA REGISTRO] error:', e);
+      registrationStates.delete(key);
+      await sock.sendMessage(remoteJid, { text: `❌ No se pudo completar el registro.\\n\\n${String(e?.message || e)}\\n\\nSi ya estás registrado con el comercial, usa /saldo o /depositar.` });
+    }
+    return;
+  }
 
   if (command === '/jugar') {
     activeBettingChats.add(key);
