@@ -280,7 +280,7 @@ async function procesarMensajeDeposito(sock, comercialId, message) {
   const text = nativeId || textFromMessage(message);
   const command = text.toLowerCase();
 
-  const aprobarMatch = command.match(/^\\/aprobar_recarga\\s+(\\d+)$/);
+  const aprobarMatch = command.match(/^\/aprobar_recarga\s+(\d+)$/);
   if (aprobarMatch) {
     try {
       const result = await resolverSolicitudWhatsApp(sock, comercialId, Number(aprobarMatch[1]), 'aprobar');
@@ -292,7 +292,7 @@ async function procesarMensajeDeposito(sock, comercialId, message) {
     return true;
   }
 
-  const rechazarMatch = command.match(/^\\/rechazar_recarga\\s+(\\d+)$/);
+  const rechazarMatch = command.match(/^\/rechazar_recarga\s+(\d+)$/);
   if (rechazarMatch) {
     try {
       await resolverSolicitudWhatsApp(sock, comercialId, Number(rechazarMatch[1]), 'rechazar');
