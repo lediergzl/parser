@@ -449,19 +449,9 @@ async function enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid, sort
       .eq('activo', true)
       .order('hora_apertura');
     if (error) throw error;
-    const ahora = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Havana', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
-    const [xh, xm] = ahora.split(':').map(Number);
-    const actual = xh * 60 + xm;
-    sorteoSeleccionado = (sorteos || []).find(s => {
-      if (!s.hora_apertura || !s.hora_cierre) return false;
-      const [ah, am] = String(s.hora_apertura).slice(0, 5).split(':').map(Number);
-      const [ch, cm] = String(s.hora_cierre).slice(0, 5).split(':').map(Number);
-      const apertura = ah * 60 + am;
-      const cierre = ch * 60 + cm;
-      return cierre >= apertura ? actual >= apertura && actual < cierre : actual >= apertura || actual < cierre;
-    }) || null;
+    sorteoSeleccionado = (sorteos || []).find(s => sorteoEstaAbiertoAhora(s)) || null;
     if (!sorteoSeleccionado) {
-      await sock.sendMessage(targetJid, { text: 'ℹ️ No hay un sorteo abierto en este momento. Usa /lista ID para consultar un sorteo específico.' });
+      await sock.sendMessage(targetJid, { text: 'ℹ️ No hay un sorteo abierto en este momento. Usa /lista para seleccionar el sorteo.' });
       return;
     }
   }
@@ -473,56 +463,49 @@ async function enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid, sort
     .eq('sorteo_id', Number(sorteoSeleccionado.id))
     .order('created_at', { ascending: true });
   if (error) throw error;
+
+  const { data: loteria, error: loteriaError } = await db.from('loterias')
+    .select('id,nombre').eq('id', Number(sorteoSeleccionado.loteria_id)).maybeSingle();
+  if (loteriaError) throw loteriaError;
+
   if (!bets?.length) {
     await sock.sendMessage(targetJid, {
-      text: '📋 No hay jugadas para el sorteo ' + sorteoSeleccionado.nombre + ' en la fecha de hoy (' + fecha + ').'
+      text: String(loteria?.nombre || 'Lotería') + ' - ' + String(sorteoSeleccionado.nombre || 'Sorteo') +
+        '\nFecha: ' + fecha + '\n\nNo hay jugadas registradas.'
     });
     return;
   }
-  const clienteIds = [...new Set(bets.map(b => b.cliente_banca_id).filter(Boolean))];
-  const loteriaIds = [...new Set(bets.map(b => b.loteria_id).filter(Boolean))];
-  const sorteoIds = [...new Set(bets.map(b => b.sorteo_id).filter(Boolean))];
-  const [{ data: clientes }, { data: loterias }, { data: sorteos }] = await Promise.all([
-    clienteIds.length ? db.from('clientes_banca').select('id,nombre,whatsapp_jid').in('id', clienteIds) : Promise.resolve({ data: [] }),
-    loteriaIds.length ? db.from('loterias').select('id,nombre').in('id', loteriaIds) : Promise.resolve({ data: [] }),
-    sorteoIds.length ? db.from('sorteos').select('id,nombre').in('id', sorteoIds) : Promise.resolve({ data: [] })
-  ]);
-  const clientesMap = new Map((clientes || []).map(c => [Number(c.id), c]));
-  const loteriasMap = new Map((loterias || []).map(l => [Number(l.id), l]));
-  const sorteosMap = new Map((sorteos || []).map(s => [Number(s.id), s]));
-  const bloques = bets.map((bet, i) => {
-    const cliente = clientesMap.get(Number(bet.cliente_banca_id));
-    const loteria = loteriasMap.get(Number(bet.loteria_id));
-    const sorteo = sorteosMap.get(Number(bet.sorteo_id));
-    const hora = bet.created_at ? new Date(bet.created_at).toLocaleTimeString('es-CU', {
-      timeZone: 'America/Havana', hour: '2-digit', minute: '2-digit'
-    }) : '--:--';
-    return [
-      (i + 1) + '. 🧾 Apuesta #' + bet.id,
-      '👤 Cliente: ' + (cliente?.nombre || 'Sin nombre'),
-      '📱 WhatsApp: ' + (cliente?.whatsapp_jid || 'N/D'),
-      '🎲 ' + (loteria?.nombre || bet.loteria_id || 'Lotería') + ' — ' + (sorteo?.nombre || bet.sorteo_id || 'Sorteo'),
-      '🕒 ' + hora,
-      '📝 ' + String(bet.input_raw || '').slice(0, 700),
-      '💵 Total: $' + Number(bet.total_apuesta || 0).toFixed(2) + ' ' + String(bet.moneda || 'cup').toUpperCase()
-    ].join('\n');
-  });
+
+  const totalGeneral = bets.reduce((sum, bet) => {
+    const value = Number(bet.total_apuesta || 0);
+    return sum + (Number.isFinite(value) ? value : 0);
+  }, 0);
+
   const encabezado = [
-    '📋 JUGADAS DEL DÍA', '', '📅 Fecha: ' + fecha,
-    '🔢 Total de jugadas: ' + bets.length, ''
+    String(loteria?.nombre || 'Lotería') + ' - ' + String(sorteoSeleccionado.nombre || 'Sorteo'),
+    'Fecha: ' + fecha + ' ' + bets.length + ' ' + (bets.length === 1 ? 'jugada' : 'jugadas') + ' | Total: $' + totalGeneral.toFixed(2),
+    '',
+    '༆࿐༵ ༆࿐༵ ༆࿐༵'
   ].join('\n');
+
+  const bloques = bets.map(bet => {
+    const raw = String(bet.input_raw || '').trim();
+    const total = Number(bet.total_apuesta || 0);
+    return (raw || 'Jugada sin texto') + '\nTOTAL : ' + total.toFixed(2) + '\n──────────────────────────────';
+  });
+
+  let texto = encabezado + '\n' + bloques.join('\n');
+  texto += '\nTOTAL GENERAL: ' + totalGeneral.toFixed(2);
+
   const chunks = [];
-  let actual = encabezado;
-  for (const bloque of bloques) {
-    const candidato = actual + (actual === encabezado ? '' : '\n\n') + bloque;
-    if (candidato.length > 3900 && actual !== encabezado) {
-      chunks.push(actual);
-      actual = bloque;
-    } else {
-      actual = candidato;
-    }
+  while (texto.length > 3900) {
+    let corte = texto.lastIndexOf('\n', 3900);
+    if (corte < 1000) corte = 3900;
+    chunks.push(texto.slice(0, corte));
+    texto = texto.slice(corte + 1);
   }
-  if (actual) chunks.push(actual);
+  if (texto) chunks.push(texto);
+
   for (let i = 0; i < chunks.length; i++) {
     await sock.sendMessage(targetJid, {
       text: chunks[i] + (chunks.length > 1 ? '\n\n📄 Parte ' + (i + 1) + '/' + chunks.length : '')
