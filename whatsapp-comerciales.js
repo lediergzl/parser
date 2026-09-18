@@ -2,6 +2,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { useSupabaseAuthState } = require('./lib/wa-session-store');
 const { DisconnectReason } = require('@whiskeysockets/baileys');
 const { adaptIncomingInteractive, sendMainMenu, sendLotteryMenu, sendDrawMenu, sendConfirmationMenu } = require('./lib/wa-menu');
+const { procesarMensajeDeposito } = require('./wa-deposit-preload');
 
 const sockets = new Map();
 const reconnectTimers = new Map();
@@ -282,6 +283,15 @@ async function enviarListaJugadas(bot, db, ctx) {
 
 async function recibirMensaje(db, sock, comercialId, message) {
   if (!message?.key?.id || message.key.fromMe) return;
+
+  // El depósito se procesa aquí, dentro del listener principal de Baileys.
+  // Esto evita depender del monkey-patch de sock.ev.on del preload.
+  try {
+    if (await procesarMensajeDeposito(sock, comercialId, message)) return;
+  } catch (e) {
+    console.error('[WA DEPOSITO] error en listener principal:', e);
+  }
+
   const interactiveId = adaptIncomingInteractive(message);
   const texto = interactiveId || textFromMessage(message);
   if (!texto) return;
