@@ -390,6 +390,7 @@ async function conectarComercial(db, comercialId, force = false) {
     if (socketGenerations.get(id) !== generation) return sockets.get(id) || null;
 
     const sock = makeWASocket({ auth: state, printQRInTerminal: false, markOnlineOnConnect: false, shouldSyncHistoryMessage: () => false });
+    sock.__lotoComercialId = id;
     sockets.set(id, sock);
 
     sock.ev.on('creds.update', saveCreds);
