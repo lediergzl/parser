@@ -14,8 +14,24 @@ function supa() {
 function admins() { return String(process.env.ADMIN_IDS || '').split(',').map(v => Number(v.trim())).filter(Number.isFinite); }
 function money(v) { return Number(v || 0).toFixed(2); }
 function norm(v) { return String(v || '').trim().replace(/\s+/g, ' '); }
-function senderJid(m) { return String(m?.key?.participant || m?.key?.remoteJid || '').trim(); }
+function senderJid(m) {
+  const senderPn = String(m?.key?.senderPn || m?.key?.participantPn || '').trim();
+  if (senderPn.endsWith('@s.whatsapp.net')) return senderPn;
+  return String(m?.key?.participant || m?.key?.remoteJid || '').trim();
+}
 function remoteJid(m) { return String(m?.key?.remoteJid || '').trim(); }
+function interactiveId(m) {
+  const msg = m?.message || {};
+  const native = msg?.interactiveResponseMessage?.nativeFlowResponseMessage;
+  let params = null;
+  try { params = JSON.parse(String(native?.paramsJson || '{}')); } catch (_) {}
+  return String(
+    msg?.buttonsResponseMessage?.selectedButtonId ||
+    msg?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+    msg?.templateButtonReplyMessage?.selectedId ||
+    params?.id || params?.selectedId || params?.rowId || params?.selected_row_id || ''
+  ).trim();
+}
 function textFromMessage(m) {
   const x = m?.message;
   return norm(x?.conversation || x?.extendedTextMessage?.text || x?.imageMessage?.caption || x?.videoMessage?.caption || x?.documentMessage?.caption || '');
@@ -124,7 +140,9 @@ async function procesarMensajeDeposito(sock, comercialId, message) {
   const jid = senderJid(message);
   if (!jid || jid.endsWith('@g.us')) return false;
   const key = `${Number(comercialId)}:${jid}`;
-  const text = textFromMessage(message);
+  const nativeId = interactiveId(message);
+  if (nativeId) message.message = { conversation: nativeId };
+  const text = nativeId || textFromMessage(message);
   const command = text.toLowerCase();
 
   if (command === '/saldo') {
