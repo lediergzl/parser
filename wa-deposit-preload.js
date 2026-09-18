@@ -109,10 +109,10 @@ async function clienteWhatsApp(db, comercialId, jid, alternateJid = null) {
 }
 
 async function notificarComercialWhatsApp(sock, request, cliente) {
-  const rawTarget = String(sock?.user?.id || '').trim();
-  const target = rawTarget.replace(/:\d+(?=@s\.whatsapp\.net$)/, '');
+  const rawTarget = String(sock?.user?.id || sock?.user?.jid || '').trim();
+  const target = rawTarget;
   if (!target) {
-    console.warn('[WA DEPOSITO] No se pudo obtener el JID del comercial para notificar por WhatsApp.');
+    console.warn('[WA DEPOSITO] No se pudo obtener el JID del comercial desde sock.user.');
     return false;
   }
 
@@ -130,24 +130,28 @@ async function notificarComercialWhatsApp(sock, request, cliente) {
 
   const fallback = texto + '\n\n✅ Aprobar: /aprobar_recarga ' + request.id + '\n❌ Rechazar: /rechazar_recarga ' + request.id;
 
-  let nativeOk = false;
+  console.log(`[WA DEPOSITO] Notificando al comercial por WhatsApp target=${target} user.id=${String(sock?.user?.id || '')} request=${request.id}`);
+
   try {
-    nativeOk = Boolean(await sendNative(sock, target, texto, [
+    const sent = await sock.sendMessage(target, { text: fallback });
+    console.log(`[WA DEPOSITO] mensaje enviado al comercial target=${target} messageId=${sent?.key?.id || 'N/A'}`);
+  } catch (e) {
+    console.error('[WA DEPOSITO] FALLÓ envío al WhatsApp del comercial:', e?.stack || e?.message || e);
+    return false;
+  }
+
+  try {
+    const nativeOk = Boolean(await sendNative(sock, target, texto, [
       { name: 'quick_reply', params: { display_text: '✅ Aprobar recarga', id: `/aprobar_recarga ${request.id}` } },
       { name: 'quick_reply', params: { display_text: '❌ Rechazar', id: `/rechazar_recarga ${request.id}` } }
     ], fallback));
+    console.log(`[WA DEPOSITO] menú enviado=${nativeOk} target=${target} request=${request.id}`);
+    return nativeOk;
   } catch (e) {
     console.warn('[WA DEPOSITO] menú nativo al comercial falló:', e?.message || e);
+    return false;
   }
-
-  // El texto normal garantiza que la solicitud llegue aunque WhatsApp no
-  // renderice el mensaje interactivo.
-  await sock.sendMessage(target, { text: fallback }).catch(e => {
-    console.warn('[WA DEPOSITO] mensaje normal al comercial falló:', e?.message || e);
-  });
-  return nativeOk;
 }
-
 async function resolverSolicitudWhatsApp(sock, comercialId, requestId, accion) {
   const db = supa();
   const { data: req, error } = await db.from('deposit_requests')
