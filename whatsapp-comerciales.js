@@ -286,8 +286,11 @@ async function recibirMensaje(db, sock, comercialId, message) {
   const texto = interactiveId || textFromMessage(message);
   if (!texto) return;
   const remoteJid = String(message.key.remoteJid || '').trim(); if (!remoteJid || remoteJid === 'status@broadcast') return;
-  const senderJid = String(message.key.participant || remoteJid).trim();
-  const interactiveJid = String(message.key.senderPn || '').trim() || null;
+  const senderPn = String(message.key.senderPn || message.key.participantPn || '').trim();
+  const senderJid = senderPn.endsWith('@s.whatsapp.net')
+    ? senderPn
+    : String(message.key.participant || remoteJid).trim();
+  const interactiveJid = senderPn.endsWith('@s.whatsapp.net') ? senderPn : null;
   const key = bettingChatKey(comercialId, senderJid || remoteJid);
   const command = normalizeCommand(texto);
 
