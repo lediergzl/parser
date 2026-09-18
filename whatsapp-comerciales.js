@@ -664,12 +664,16 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const b = r.bets[0];
     const resumen = `👤 ${b.nombre}\n🧾 ${r.textoOriginal}\n\n💵 Total: $${r.total.toFixed(2)}\n💰 Saldo restante: $${b.saldoDespues.toFixed(2)}\n🎲 ${r.loteriaNombre}\n🎰 ${r.sorteo}`;
     await sock.sendMessage(remoteJid, { text: `✅ Jugada recibida y registrada.\n\n${resumen}` });
-    await telegramText(comercialId, `📲 JUGADA RECIBIDA POR WHATSAPP\n\n${resumen}\n\n🆔 Apuesta #${b.id}`);
+    // Las jugadas originadas en WhatsApp se notifican al comercial por su
+    // propio WhatsApp. No deben generar avisos duplicados en Telegram.
+    await notificarComercialJugadaWhatsApp(sock, db, comercialId, b.id);
   } catch (err) {
     const errorTexto = String(err?.message || err);
     await db.from('whatsapp_inbox').update({ error: errorTexto }).eq('id', inserted.id);
     await sock.sendMessage(remoteJid, { text: `⚠️ La jugada NO fue registrada.\n\n${errorTexto}` });
-    await telegramText(comercialId, `⚠️ JUGADA WHATSAPP NO REGISTRADA\n\n👤 ${senderJid}\n🧾 ${texto}\n\n${errorTexto}`);
+    // No enviamos cada mensaje rechazado a Telegram: el cliente ya recibe
+    // el motivo directamente por WhatsApp y Telegram queda reservado para
+    // la gestión de conexión/QR.
   }
 }
 
@@ -711,8 +715,22 @@ async function conectarComercial(db, comercialId, force = false) {
       if (connection === 'open') {
         if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
         const telefono = sock.user?.id || null;
+
+        // Evita repetir el aviso de conexión en Telegram cada vez que Baileys
+        // reconstruye/reconecta el socket con la misma sesión.
+        const { data: estadoAnterior } = await db.from('whatsapp_comercial_session')
+          .select('estado,telefono')
+          .eq('comercial_telegram_id', id)
+          .maybeSingle();
+
         await saveStatus(db, id, { estado: 'conectado', ultimo_qr: null, telefono, ultimo_error: null });
-        await telegramText(id, `✅ WhatsApp conectado${telefono ? `: ${telefono}` : ''}. Ya puedes recibir jugadas.`);
+
+        const yaEstabaConectado = estadoAnterior?.estado === 'conectado'
+          && String(estadoAnterior?.telefono || '') === String(telefono || '');
+
+        if (!yaEstabaConectado) {
+          await telegramText(id, `✅ WhatsApp conectado${telefono ? `: ${telefono}` : ''}. Ya puedes recibir jugadas.`);
+        }
       }
 
       if (connection === 'close') {
