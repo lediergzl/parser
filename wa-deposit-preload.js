@@ -70,13 +70,24 @@ async function downloadProof(sock, message) {
 }
 
 async function resolverComercialId(sock) {
+  const attachedId = Number(sock?.__lotoComercialId);
+  if (Number.isFinite(attachedId) && attachedId > 0) {
+    commercialSockets.set(attachedId, sock);
+    return attachedId;
+  }
   const telefono = phoneKey(sock?.user?.id);
-  if (!telefono) return null;
+  if (!telefono) {
+    console.warn('[WA DEPOSITO] No se pudo obtener el teléfono del socket comercial.');
+    return null;
+  }
   const db = supa();
   const { data, error } = await db.from('whatsapp_comercial_session').select('comercial_telegram_id,telefono').limit(1000);
   if (error) { console.warn('[WA DEPOSITO] resolver comercial:', error.message); return null; }
   const row = (data || []).find(x => phoneKey(x.telefono) === telefono);
-  if (!row) return null;
+  if (!row) {
+    console.warn('[WA DEPOSITO] No se encontró comercial para teléfono ' + telefono + '.');
+    return null;
+  }
   const id = Number(row.comercial_telegram_id);
   if (Number.isFinite(id)) { commercialSockets.set(id, sock); return id; }
   return null;
@@ -256,6 +267,7 @@ if (typeof originalMakeWASocket === 'function' && !originalMakeWASocket.__lotoPr
       const wrapped = async payload => {
         const comercialId = await resolverComercialId(sock);
         if (comercialId) {
+          console.log('[WA DEPOSITO] interceptando mensajes comercial=' + comercialId + ' socket=' + phoneKey(sock?.user?.id));
           for (const message of payload?.messages || []) {
             try { if (await procesarMensajeDeposito(sock, comercialId, message)) continue; }
             catch (e) { console.error('[WA DEPOSITO] interceptor:', e); }
