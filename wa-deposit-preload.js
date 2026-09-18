@@ -93,16 +93,51 @@ async function resolverComercialId(sock) {
   return null;
 }
 
-async function clienteWhatsApp(db, comercialId, jid) {
-  const { data, error } = await db.from('clientes_banca').select('id,nombre,saldo,whatsapp_jid,comercial_telegram_id').eq('comercial_telegram_id', comercialId).eq('whatsapp_jid', jid).maybeSingle();
+function normalizarWhatsAppKey(value) {
+  const v = String(value || '').trim().toLowerCase();
+  const pn = v.match(/^(\d+)(?::\d+)?@s\.whatsapp\.net$/);
+  if (pn) return pn[1];
+  return v;
+}
+
+async function clienteWhatsApp(db, comercialId, jid, alternateJid = null) {
+  const candidatos = [...new Set(
+    [jid, alternateJid]
+      .map(v => String(v || '').trim())
+      .filter(Boolean)
+  )];
+  if (!candidatos.length) return null;
+
+  // Primero exacto: permite clientes antiguos cuyo registro quedó con @lid.
+  const orExact = candidatos.map(x => `whatsapp_jid.eq.${x}`).join(',');
+  const { data: exactRows, error: exactError } = await db
+    .from('clientes_banca')
+    .select('id,nombre,saldo,whatsapp_jid,comercial_telegram_id')
+    .eq('comercial_telegram_id', comercialId)
+    .or(orExact)
+    .limit(2);
+  if (exactError) throw exactError;
+  if (exactRows?.length === 1) return exactRows[0];
+  if (exactRows?.length > 1) return null;
+
+  // Compatibilidad con registros antiguos almacenados como número o PN.
+  const { data: rows, error } = await db
+    .from('clientes_banca')
+    .select('id,nombre,saldo,whatsapp_jid,comercial_telegram_id')
+    .eq('comercial_telegram_id', comercialId)
+    .limit(1000);
   if (error) throw error;
-  return data || null;
+
+  const keys = new Set(candidatos.map(normalizarWhatsAppKey));
+  const matches = (rows || []).filter(row => keys.has(normalizarWhatsAppKey(row.whatsapp_jid)));
+  return matches.length === 1 ? matches[0] : null;
 }
 
 async function crearSolicitud(sock, comercialId, message, state, referenceText) {
   const db = supa();
   const jid = senderJid(message);
-  const cliente = await clienteWhatsApp(db, comercialId, jid);
+  const alternateJid = remoteJid(message);
+  const cliente = await clienteWhatsApp(db, comercialId, jid, alternateJid);
   if (!cliente) {
     await sock.sendMessage(remoteJid(message), { text: '❌ Este WhatsApp no está registrado con el comercial. Primero debes registrarte con el comercial para poder solicitar una recarga.' });
     return;
@@ -158,7 +193,7 @@ async function procesarMensajeDeposito(sock, comercialId, message) {
 
   if (command === '/saldo') {
     try {
-      const cliente = await clienteWhatsApp(supa(), comercialId, jid);
+      const cliente = await clienteWhatsApp(supa(), comercialId, jid, remote);
       await sock.sendMessage(remote, { text: cliente ? `💰 SALDO DISPONIBLE\n\n👤 ${cliente.nombre}\n💵 $${money(cliente.saldo)}\n\nPara recargar escribe /depositar.` : '❌ Este WhatsApp no está registrado con el comercial.' });
     } catch (e) { console.error('[WA DEPOSITO] /saldo:', e); await sock.sendMessage(remote, { text: '❌ No pude consultar tu saldo en este momento.' }); }
     return true;
