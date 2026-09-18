@@ -1,7 +1,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const { useSupabaseAuthState } = require('./lib/wa-session-store');
 const { DisconnectReason } = require('@whiskeysockets/baileys');
-const { adaptIncomingInteractive, sendMainMenu, sendLotteryMenu, sendDrawMenu, sendConfirmationMenu } = require('./lib/wa-menu');
+const { adaptIncomingInteractive, sendNative, sendMainMenu, sendLotteryMenu, sendDrawMenu, sendConfirmationMenu } = require('./lib/wa-menu');
 const { procesarMensajeDeposito, resolverSolicitudWhatsApp } = require('./wa-deposit-preload');
 
 const sockets = new Map();
@@ -344,6 +344,89 @@ async function enviarListaJugadas(bot, db, ctx) {
   for (const chunk of chunks) await ctx.reply(chunk);
 }
 
+
+function minutosCuba() {
+  const ahora = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Havana', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+  const [h, m] = ahora.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function sorteoEstaAbiertoAhora(sorteo) {
+  if (!sorteo?.hora_apertura || !sorteo?.hora_cierre) return false;
+  const actual = minutosCuba();
+  const [ah, am] = String(sorteo.hora_apertura).slice(0, 5).split(':').map(Number);
+  const [ch, cm] = String(sorteo.hora_cierre).slice(0, 5).split(':').map(Number);
+  const apertura = ah * 60 + am;
+  const cierre = ch * 60 + cm;
+  return cierre >= apertura ? actual >= apertura && actual < cierre : actual >= apertura || actual < cierre;
+}
+
+async function enviarMenuListaSorteosWhatsApp(db, sock, targetJid) {
+  const { data: sorteos, error } = await db.from('sorteos')
+    .select('id,nombre,hora_apertura,hora_cierre,activo,loteria_id')
+    .eq('activo', true)
+    .order('hora_apertura');
+  if (error) throw error;
+  if (!sorteos?.length) {
+    await sock.sendMessage(targetJid, { text: 'ℹ️ No hay sorteos activos disponibles.' });
+    return;
+  }
+
+  const loteriaIds = [...new Set(sorteos.map(s => s.loteria_id).filter(Boolean))];
+  const { data: loterias, error: loteriasError } = loteriaIds.length
+    ? await db.from('loterias').select('id,nombre').in('id', loteriaIds)
+    : { data: [] };
+  if (loteriasError) throw loteriasError;
+
+  const loteriasMap = new Map((loterias || []).map(l => [Number(l.id), l.nombre]));
+  const actualId = (sorteos.find(s => sorteoEstaAbiertoAhora(s)) || {}).id || null;
+
+  const rows = sorteos.map(s => {
+    const actual = Number(s.id) === Number(actualId);
+    const loteria = loteriasMap.get(Number(s.loteria_id)) || 'Lotería';
+    const horario = \`${formatoHora(s.hora_apertura)}-${formatoHora(s.hora_cierre)}\`;
+    return {
+      id: \`/lista_sorteo ${s.id}\`,
+      title: \`${actual ? '🟢 ' : '🎰 '}${loteria} — ${s.nombre}\`.slice(0, 24),
+      description: \`${actual ? 'ACTUAL · ' : ''}${horario}\`.slice(0, 72)
+    };
+  });
+
+  const texto = [
+    '📋 LISTA DE JUGADAS',
+    '',
+    actualId ? '🟢 El sorteo abierto ahora está marcado como ACTUAL.' : 'ℹ️ No hay un sorteo abierto ahora.',
+    '',
+    ...sorteos.map(s => {
+      const actual = Number(s.id) === Number(actualId);
+      const loteria = loteriasMap.get(Number(s.loteria_id)) || 'Lotería';
+      return \`${actual ? '🟢' : '🎰'} ${loteria} — ${s.nombre} · ${formatoHora(s.hora_apertura)}-${formatoHora(s.hora_cierre)}\`;
+    }),
+    '',
+    'Selecciona el sorteo del que quieres ver las jugadas.'
+  ].join('\\n');
+
+  const quick = sorteos.slice(0, 3).map(s => {
+    const actual = Number(s.id) === Number(actualId);
+    const loteria = loteriasMap.get(Number(s.loteria_id)) || 'Lotería';
+    return {
+      name: 'quick_reply',
+      params: {
+        display_text: \`${actual ? '🟢 ' : ''}${loteria} ${s.nombre}\`.slice(0, 20),
+        id: \`/lista_sorteo ${s.id}\`
+      }
+    };
+  });
+
+  if (sorteos.length <= 3) {
+    return sendNative(sock, targetJid, '📋 LISTA DE JUGADAS\\n\\nSelecciona un sorteo:', quick, texto);
+  }
+
+  return sendNative(sock, targetJid, '📋 LISTA DE JUGADAS\\n\\nSelecciona un sorteo:', [
+    { name: 'single_select', params: { title: 'Seleccionar sorteo', sections: [{ title: 'Sorteos disponibles', rows }] } }
+  ], texto);
+}
+
 async function enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid, sorteoId = null) {
   const fecha = fechaCuba();
   let sorteoSeleccionado = null;
@@ -499,17 +582,31 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const aprobarSelf = commandSelf.match(/^\/aprobar_recarga\s+(\d+)$/);
     const rechazarSelf = commandSelf.match(/^\/rechazar_recarga\s+(\d+)$/);
 
-    const listaMatch = commandSelf.match(/^\/(lista|jugadas)(?:\s+(\d+))?$/);
-    if (listaMatch) {
+    const listaMenu = commandSelf.match(/^\/(lista|jugadas)$/);
+    if (listaMenu) {
       const targetJid = String(message.key.remoteJid || '').trim();
       if (!targetJid || targetJid === 'status@broadcast') return;
-      const sorteoId = listaMatch[2] ? Number(listaMatch[2]) : null;
       try {
-        await enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid, sorteoId);
+        await enviarMenuListaSorteosWhatsApp(db, sock, targetJid);
+      } catch (e) {
+        console.error('[WA JUGADAS] error generando menú de sorteos:', e?.stack || e);
+        await sock.sendMessage(targetJid, {
+          text: `❌ No se pudo mostrar el menú de sorteos.\\n\\n${e?.message || e}`
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    const listaSorteoMatch = commandSelf.match(/^\/lista_sorteo\s+(\d+)$/);
+    if (listaSorteoMatch) {
+      const targetJid = String(message.key.remoteJid || '').trim();
+      if (!targetJid || targetJid === 'status@broadcast') return;
+      try {
+        await enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid, Number(listaSorteoMatch[1]));
       } catch (e) {
         console.error('[WA JUGADAS] error generando lista:', e?.stack || e);
         await sock.sendMessage(targetJid, {
-          text: `❌ No se pudo generar la lista de jugadas.\n\n${e?.message || e}`
+          text: `❌ No se pudo generar la lista de jugadas.\\n\\n${e?.message || e}`
         }).catch(() => {});
       }
       return;
