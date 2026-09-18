@@ -12,6 +12,8 @@ const activeBettingChats = new Set();
 const registrationStates = new Map();
 const waMenuCache = { loterias: null, loteriasAt: 0, sorteos: new Map() };
 const WA_MENU_CACHE_TTL_MS = 30 * 1000;
+const waPreferenceCache = new Map();
+const WA_PREFERENCE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function enabled() {
   return String(process.env.WA_BAILEYS_ENABLED || '').trim().toLowerCase() === 'true';
@@ -174,9 +176,19 @@ async function buscarClienteWhatsApp(db, comercialId, senderJid, alternateJid = 
 }
 
 async function obtenerPreferenciaWhatsApp(db, comercialId, whatsappJid) {
-  const { data, error } = await db.from('whatsapp_cliente_preferencias').select('comercial_telegram_id,whatsapp_jid,loteria_id,sorteo_id,moneda,updated_at').eq('comercial_telegram_id', comercialId).eq('whatsapp_jid', whatsappJid).maybeSingle();
+  const key = String(Number(comercialId)) + ':' + String(whatsappJid);
+  const cached = waPreferenceCache.get(key);
+  if (cached && Date.now() - cached.at < WA_PREFERENCE_CACHE_TTL_MS) return cached.data;
+
+  const { data, error } = await db.from('whatsapp_cliente_preferencias')
+    .select('comercial_telegram_id,whatsapp_jid,loteria_id,sorteo_id,moneda,updated_at')
+    .eq('comercial_telegram_id', comercialId)
+    .eq('whatsapp_jid', whatsappJid)
+    .maybeSingle();
   if (error) throw error;
-  return data || null;
+  const result = data || null;
+  waPreferenceCache.set(key, { data: result, at: Date.now() });
+  return result;
 }
 
 async function guardarPreferenciaWhatsApp(db, comercialId, whatsappJid, patch) {
@@ -194,6 +206,8 @@ async function guardarPreferenciaWhatsApp(db, comercialId, whatsappJid, patch) {
     .select('*')
     .single();
   if (error) throw error;
+  const key = String(Number(comercialId)) + ':' + String(whatsappJid);
+  waPreferenceCache.set(key, { data, at: Date.now() });
   return data;
 }
 
