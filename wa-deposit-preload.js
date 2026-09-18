@@ -6,7 +6,6 @@ const { sendNative } = require('./lib/wa-menu');
 
 const originalMakeWASocket = baileys.default;
 const depositStates = new Map();
-const commercialSockets = new Map();
 let telegramHandlersInstalled = false;
 
 function supa() {
@@ -39,28 +38,6 @@ function textFromMessage(m) {
 }
 function hasProofMedia(m) { const x = m?.message; return Boolean(x?.imageMessage || x?.documentMessage || x?.videoMessage); }
 function phoneKey(jid) { const m = String(jid || '').match(/^(\d+)(?::\d+)?@s\.whatsapp\.net$/); return m ? m[1] : String(jid || '').split('@')[0].replace(/:\d+$/, ''); }
-
-async function telegramSendMessage(chatId, text, replyMarkup) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) return false;
-  const body = { chat_id: String(chatId), text };
-  if (replyMarkup) body.reply_markup = replyMarkup;
-  const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  return r.ok;
-}
-
-async function telegramSendPhoto(chatId, buffer, caption) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token || !buffer) return false;
-  try {
-    const form = new FormData();
-    form.append('chat_id', String(chatId));
-    form.append('caption', caption);
-    form.append('photo', new Blob([buffer], { type: 'image/jpeg' }), 'comprobante.jpg');
-    const r = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: 'POST', body: form });
-    return r.ok;
-  } catch (e) { console.warn('[WA DEPOSITO] comprobante:', e?.message || e); return false; }
-}
 
 async function downloadProof(sock, message) {
   if (!hasProofMedia(message)) return null;
@@ -376,59 +353,9 @@ async function procesarMensajeDeposito(sock, comercialId, message) {
   return false;
 }
 
-function instalarTelegram() {
-  const bot = global.__LOTO_BOT__;
-  if (!bot || telegramHandlersInstalled) return;
-  telegramHandlersInstalled = true;
-
-  bot.action(/^wa_deposit_approve_(\d+)$/, async ctx => {
-    try { await ctx.answerCbQuery(); } catch (_) {}
-    const requestId = Number(ctx.match[1]);
-    try {
-      const db = supa();
-      const { data: req, error } = await db.from('deposit_requests').select('id,comercial_telegram_id,whatsapp_jid,amount,status,client_name').eq('id', requestId).eq('source', 'whatsapp_comercial').maybeSingle();
-      if (error) throw error;
-      if (!req) return ctx.reply('❌ Solicitud no encontrada.');
-      if (!admins().includes(Number(ctx.from.id)) && Number(req.comercial_telegram_id) !== Number(ctx.from.id)) return ctx.reply('⛔ No estás autorizado para aprobar esta recarga.');
-      if (req.status !== 'pending') return ctx.reply(`ℹ️ La solicitud #${requestId} ya fue procesada.`);
-      const { data, error: rpcError } = await db.rpc('aprobar_deposito_comercial_atomico', { p_request_id: requestId, p_aprobado_por: Number(ctx.from.id) });
-      if (rpcError) throw rpcError;
-      const result = Array.isArray(data) ? data[0] : data;
-      if (!result?.ok) throw new Error('La base de datos no confirmó la acreditación.');
-      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-      await ctx.reply(`✅ Recarga #${requestId} aprobada.\n\n👤 ${req.client_name || req.whatsapp_jid}\n💰 Acreditado: $${money(req.amount)}\n💵 Nuevo saldo: $${money(result.saldo_despues)}`);
-      const sock = commercialSockets.get(Number(req.comercial_telegram_id));
-      if (sock) await sock.sendMessage(req.whatsapp_jid, { text: `🎉 RECARGA APROBADA\n\n💰 Se acreditaron $${money(req.amount)} a tu saldo.\n💵 Nuevo saldo: $${money(result.saldo_despues)}\n\nYa puedes continuar jugando.` }).catch(() => {});
-    } catch (e) { console.error('[WA DEPOSITO] aprobar:', e); await ctx.reply(`❌ No se pudo aprobar la solicitud #${requestId}.\n\n${e?.message || e}`); }
-  });
-
-  bot.action(/^wa_deposit_reject_(\d+)$/, async ctx => {
-    try { await ctx.answerCbQuery(); } catch (_) {}
-    const requestId = Number(ctx.match[1]);
-    try {
-      const db = supa();
-      const { data: req, error } = await db.from('deposit_requests').select('id,comercial_telegram_id,whatsapp_jid,amount,status').eq('id', requestId).eq('source', 'whatsapp_comercial').maybeSingle();
-      if (error) throw error;
-      if (!req) return ctx.reply('❌ Solicitud no encontrada.');
-      if (!admins().includes(Number(ctx.from.id)) && Number(req.comercial_telegram_id) !== Number(ctx.from.id)) return ctx.reply('⛔ No estás autorizado para rechazar esta recarga.');
-      if (req.status !== 'pending') return ctx.reply(`ℹ️ La solicitud #${requestId} ya fue procesada.`);
-      const { error: updateError } = await db.from('deposit_requests').update({ status: 'rejected', admin_notes: `Rechazado por ${ctx.from.id}`, updated_at: new Date().toISOString() }).eq('id', requestId).eq('source', 'whatsapp_comercial').eq('status', 'pending');
-      if (updateError) throw updateError;
-      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-      await ctx.reply(`❌ Recarga #${requestId} rechazada.`);
-      const sock = commercialSockets.get(Number(req.comercial_telegram_id));
-      if (sock) await sock.sendMessage(req.whatsapp_jid, { text: `❌ RECARGA RECHAZADA\n\nLa solicitud #${requestId} por $${money(req.amount)} fue rechazada. Si realizaste el pago, contacta al comercial para revisar el comprobante.` }).catch(() => {});
-    } catch (e) { console.error('[WA DEPOSITO] rechazar:', e); await ctx.reply('❌ No se pudo rechazar la solicitud.'); }
-  });
-}
-
 // El procesamiento de mensajes se realiza directamente desde recibirMensaje()
-// en whatsapp-comerciales.js. El preload conserva aquí solo el estado y los
-// callbacks de Telegram para el flujo de depósitos.
-
-setInterval(instalarTelegram, 1000).unref?.();
-instalarTelegram();
+// en whatsapp-comerciales.js. Las solicitudes originadas en WhatsApp se
+// aprueban/rechazan exclusivamente desde el chat privado de WhatsApp del comercial.
 global.__LOTO_WA_DEPOSIT_STATES__ = depositStates;
-global.__LOTO_WA_DEPOSIT_SOCKETS__ = commercialSockets;
 
-module.exports = { procesarMensajeDeposito, instalarTelegram, resolverSolicitudWhatsApp };
+module.exports = { procesarMensajeDeposito, resolverSolicitudWhatsApp };
