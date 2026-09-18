@@ -257,34 +257,13 @@ function instalarTelegram() {
   });
 }
 
-if (typeof originalMakeWASocket === 'function' && !originalMakeWASocket.__lotoProDepositPatch) {
-  const patchedMakeWASocket = function (...args) {
-    const sock = originalMakeWASocket(...args);
-    const originalOn = sock?.ev?.on?.bind(sock.ev);
-    if (!originalOn) return sock;
-    sock.ev.on = function (event, listener) {
-      if (event !== 'messages.upsert' || typeof listener !== 'function') return originalOn(event, listener);
-      const wrapped = async payload => {
-        const comercialId = await resolverComercialId(sock);
-        if (comercialId) {
-          console.log('[WA DEPOSITO] interceptando mensajes comercial=' + comercialId + ' socket=' + phoneKey(sock?.user?.id));
-          for (const message of payload?.messages || []) {
-            try { if (await procesarMensajeDeposito(sock, comercialId, message)) continue; }
-            catch (e) { console.error('[WA DEPOSITO] interceptor:', e); }
-          }
-        }
-        return listener(payload);
-      };
-      return originalOn(event, wrapped);
-    };
-    return sock;
-  };
-  Object.assign(patchedMakeWASocket, originalMakeWASocket);
-  patchedMakeWASocket.__lotoProDepositPatch = true;
-  baileys.default = patchedMakeWASocket;
-}
+// El procesamiento de mensajes se realiza directamente desde recibirMensaje()
+// en whatsapp-comerciales.js. El preload conserva aquí solo el estado y los
+// callbacks de Telegram para el flujo de depósitos.
 
 setInterval(instalarTelegram, 1000).unref?.();
 instalarTelegram();
 global.__LOTO_WA_DEPOSIT_STATES__ = depositStates;
 global.__LOTO_WA_DEPOSIT_SOCKETS__ = commercialSockets;
+
+module.exports = { procesarMensajeDeposito, instalarTelegram };
