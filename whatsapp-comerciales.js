@@ -808,6 +808,19 @@ async function recibirMensaje(db, sock, comercialId, message) {
         requestId,
         aprobarSelf ? 'aprobar' : 'rechazar'
       );
+
+      if (aprobarSelf && result?.status === 'approved' && result?.request?.whatsapp_jid) {
+        const procesadas = await procesarPendientesSaldoWhatsApp(
+          db,
+          sock,
+          comercialId,
+          result.request.whatsapp_jid
+        );
+        if (procesadas > 0) {
+          console.log('[WA SALDO] Recarga #' + requestId + ' reanudó ' + procesadas + ' jugada(s) pendiente(s).');
+        }
+      }
+
       await sock.sendMessage(String(message.key.remoteJid || sock.user?.id || '').trim(), {
         text: aprobarSelf
           ? `✅ Recarga #${requestId} aprobada.\n💰 Acreditado: ${result.request.amount}\n💵 Nuevo saldo: ${result.saldoDespues.toFixed(2)}`
@@ -1026,6 +1039,33 @@ async function recibirMensaje(db, sock, comercialId, message) {
     await notificarComercialJugadaWhatsApp(sock, db, comercialId, b.id);
   } catch (err) {
     const errorTexto = String(err?.message || err);
+
+    if (err?.code === 'INSUFFICIENT_BALANCE') {
+      const pendingMarker = codificarPendienteSaldo({
+        loteriaId: Number(err.loteriaId),
+        sorteoId: Number(err.sorteoId),
+        total: Number(err.totalRequerido || 0),
+        saldoDisponible: Number(err.saldoDisponible || 0),
+        faltante: Number(err.faltante || 0)
+      });
+
+      await db.from('whatsapp_inbox').update({
+        error: pendingMarker,
+        procesado: false,
+        bet_ids: []
+      }).eq('id', inserted.id);
+
+      await enviarOpcionesRecargaWhatsApp(
+        sock,
+        remoteJid,
+        inserted.id,
+        Number(err.totalRequerido || 0),
+        Number(err.saldoDisponible || 0),
+        Number(err.faltante || 0)
+      );
+      return;
+    }
+
     await db.from('whatsapp_inbox').update({ error: errorTexto }).eq('id', inserted.id);
     await sock.sendMessage(remoteJid, { text: `⚠️ La jugada NO fue registrada.\n\n${errorTexto}` });
     // No enviamos cada mensaje rechazado a Telegram: el cliente ya recibe
