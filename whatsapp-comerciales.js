@@ -11,11 +11,43 @@ const socketGenerations = new Map();
 const activeBettingChats = new Set();
 const jugarCooldowns = new Map();
 const JUGAR_COOLDOWN_MS = 4000;
+const WA_JUGADA_TIMEOUT_MS = Math.max(60 * 1000, Number(process.env.WA_JUGADA_TIMEOUT_MS || 15 * 60 * 1000));
+const bettingSessionTimers = new Map();
 const registrationStates = new Map();
 const waMenuCache = { loterias: null, loteriasAt: 0, sorteos: new Map() };
 const WA_MENU_CACHE_TTL_MS = 30 * 1000;
 const waPreferenceCache = new Map();
 const WA_PREFERENCE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function programarSalidaAutomaticaWhatsApp(sock, db, comercialId, senderJid, remoteJid, key) {
+  const anterior = bettingSessionTimers.get(key);
+  if (anterior) clearTimeout(anterior);
+
+  const timer = setTimeout(async () => {
+    bettingSessionTimers.delete(key);
+    if (!activeBettingChats.has(key)) return;
+
+    activeBettingChats.delete(key);
+    jugarCooldowns.delete(key);
+
+    await reiniciarSesionWhatsApp(db, comercialId, senderJid).catch(() => {});
+    try {
+      await sock.sendMessage(remoteJid, {
+        text: '⏱️ Tu sesión de jugada fue cerrada automáticamente por inactividad.\n\nCuando quieras jugar de nuevo escribe /jugar.'
+      });
+    } catch (e) {
+      console.error('[WA SESION] No se pudo notificar salida automática:', e?.message || e);
+    }
+  }, WA_JUGADA_TIMEOUT_MS);
+
+  bettingSessionTimers.set(key, timer);
+}
+
+function cancelarSalidaAutomaticaWhatsApp(key) {
+  const timer = bettingSessionTimers.get(key);
+  if (timer) clearTimeout(timer);
+  bettingSessionTimers.delete(key);
+}
 
 function enabled() {
   return String(process.env.WA_BAILEYS_ENABLED || '').trim().toLowerCase() === 'true';
@@ -764,10 +796,12 @@ async function recibirMensaje(db, sock, comercialId, message) {
     jugarCooldowns.set(key, ahora);
 
     activeBettingChats.add(key);
+    programarSalidaAutomaticaWhatsApp(sock, db, comercialId, senderJid, remoteJid, key);
     try {
       await reiniciarSesionWhatsApp(db, comercialId, senderJid);
     } catch (e) {
       activeBettingChats.delete(key);
+      cancelarSalidaAutomaticaWhatsApp(key);
       console.error(`No se pudo reiniciar sesión WhatsApp ${comercialId}/${senderJid}:`, e);
       return sock.sendMessage(remoteJid, { text: '❌ No pude iniciar una sesión de juego segura. Inténtalo nuevamente.' });
     }
@@ -777,6 +811,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
 
   if (command === '/salir') {
     activeBettingChats.delete(key);
+    cancelarSalidaAutomaticaWhatsApp(key);
     await reiniciarSesionWhatsApp(db, comercialId, senderJid).catch(() => {});
     await sock.sendMessage(remoteJid, { text: '✅ Modo jugada desactivado y selección borrada.\n\nCuando quieras jugar de nuevo escribe /jugar.' });
     return;
@@ -819,6 +854,10 @@ async function recibirMensaje(db, sock, comercialId, message) {
   }
 
   if (command === '/estado') { await enviarEstadoCliente(sock, remoteJid, db, comercialId, senderJid); return; }  if (!activeBettingChats.has(key)) return;
+
+  // Cada interacción mantiene viva la sesión; si el cliente se queda inactivo,
+  // el temporizador ejecutará la misma limpieza que /salir.
+  programarSalidaAutomaticaWhatsApp(sock, db, comercialId, senderJid, remoteJid, key);
 
   const { data: inserted, error } = await db.from('whatsapp_inbox').insert([{ comercial_telegram_id: comercialId, message_id: String(message.key.id), remote_jid: remoteJid, sender_jid: senderJid || null, sender_name: senderName(message) || null, texto }]).select('id').single();
   if (error) { if (String(error.message || '').toLowerCase().includes('duplicate')) return; console.error('WhatsApp inbox error:', error); return; }  await db.from('whatsapp_comercial_session').update({ ultimo_mensaje_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('comercial_telegram_id', comercialId);
@@ -1001,7 +1040,10 @@ async function desconectarComercial(db, id) {
   const sock = sockets.get(numericId);
   if (sock) { try { sock.logout(); } catch (_) { try { sock.end?.(); } catch (_) {} } sockets.delete(numericId); }
   for (const key of activeBettingChats) {
-    if (key.startsWith(`${numericId}:`)) activeBettingChats.delete(key);
+    if (key.startsWith(`${numericId}:`)) {
+      activeBettingChats.delete(key);
+      cancelarSalidaAutomaticaWhatsApp(key);
+    }
   }
   await db.from('whatsapp_comercial_session').update({ estado: 'desconectado', creds: null, keys: null, ultimo_qr: null, updated_at: new Date().toISOString() }).eq('comercial_telegram_id', id);
 }
