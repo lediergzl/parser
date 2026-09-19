@@ -828,9 +828,9 @@ async function recibirMensaje(db, sock, comercialId, message) {
     await db.from('whatsapp_inbox').update({ procesado: true, bet_ids: r.bets.map(b => b.id), error: null }).eq('id', inserted.id);
     const b = r.bets[0];
     const advertenciaTotal = r.hayDiferenciaTotal
-      ? `\\n\\n⚠️ *DIFERENCIA DETECTADA*\\n💳 Total indicado: $${r.totalDeclarado.toFixed(2)}\\n🧮 Total calculado: $${r.total.toFixed(2)}\\n📊 Diferencia: $${Math.abs(r.diferenciaTotal).toFixed(2)}\\n\\nLa jugada fue registrada por el total calculado: $${r.total.toFixed(2)}.`
+      ? `\n\n⚠️ *DIFERENCIA DETECTADA*\n💳 Total indicado: $${r.totalDeclarado.toFixed(2)}\n🧮 Total calculado: $${r.total.toFixed(2)}\n📊 Diferencia: $${Math.abs(r.diferenciaTotal).toFixed(2)}\n\nLa jugada fue registrada por el total calculado: $${r.total.toFixed(2)}.`
       : '';
-    const resumen = `👤 ${b.nombre}\\n🧾 ${r.textoOriginal}\\n\\n💵 Total: $${r.total.toFixed(2)}${advertenciaTotal}\\n💰 Saldo restante: $${b.saldoDespues.toFixed(2)}\\n🎲 ${r.loteriaNombre}\\n🎰 ${r.sorteo}`;
+    const resumen = `👤 ${b.nombre}\n🧾 ${r.textoOriginal}\n\n💵 Total: $${r.total.toFixed(2)}${advertenciaTotal}\n💰 Saldo restante: $${b.saldoDespues.toFixed(2)}\n🎲 ${r.loteriaNombre}\n🎰 ${r.sorteo}`;
     await sock.sendMessage(remoteJid, { text: `✅ Jugada recibida y registrada.\n\n${resumen}` });
     // Las jugadas originadas en WhatsApp se notifican al comercial por su
     // propio WhatsApp. No deben generar avisos duplicados en Telegram.
