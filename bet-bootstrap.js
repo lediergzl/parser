@@ -2,6 +2,7 @@
 // recuperación de jugadas por saldo + flujo de apuestas.
 require('./bootstrap.js');
 require('./decimal-amount-patch');
+const { createClient } = require('@supabase/supabase-js');
 const { registrarComandoVerificarPremio } = require('./premio-diagnostico');
 
 const { registrarRevisionHumana } = require('./human-review');
@@ -9,6 +10,8 @@ const { registrarPendientesPorSaldo } = require('./pending-balance');
 const { registrarModuloComercial } = require('./banca');
 const { registrarFlujoApuesta } = require('./bet-handler');
 const { registrarWhatsappComerciales } = require('./whatsapp-comerciales');
+const { registrarControlDestino } = require('./lib/whatsapp-destino');
+const { conectarWhatsapp } = require('./lib/whatsapp-sender');
 
 const bot = global.__LOTO_BOT__;
 if (!bot) {
@@ -73,6 +76,27 @@ if (!bot) {
     .then(() => registrarModuloComercial(bot))
     .then(() => registrarFlujoApuesta(bot))
     .then(() => registrarWhatsappComerciales(bot))
+    .then(async () => {
+      const supabase = createClient(
+        process.env.SUPABASE_URL,
+        process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY
+      );
+
+      // El destino persistido debe cargarse antes de procesar resultados/premios,
+      // porque esos eventos no traen un destino propio.
+      await registrarControlDestino(supabase);
+
+      // Reactiva el consumidor del bus:
+      // jugada:procesada -> WhatsApp
+      // resultado:recibido -> WhatsApp
+      // premio:detectado -> WhatsApp
+      try {
+        await conectarWhatsapp(supabase);
+        console.log('✅ Sender WhatsApp de jugadas/resultados iniciado.');
+      } catch (err) {
+        console.error('❌ No se pudo iniciar el sender WhatsApp de jugadas/resultados:', err && err.stack ? err.stack : err);
+      }
+    })
     .catch(err => {
       console.error('❌ Error registrando flujos de jugadas:', err && err.stack ? err.stack : err);
       process.exitCode = 1;
