@@ -354,6 +354,8 @@ async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, alternate
     error.saldoDisponible = saldo;
     error.totalRequerido = total;
     error.faltante = Math.max(0, total - saldo);
+    error.loteriaId = pref.loteria_id;
+    error.sorteoId = pref.sorteo_id;
     throw error;
   }
   const fecha = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Havana' }).format(new Date());
@@ -927,8 +929,8 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const errorTexto = String(err?.message || err);
     if (err?.code === 'INSUFFICIENT_BALANCE') {
       const pendingMarker = codificarPendienteSaldo({
-        loteriaId: r?.loteriaId,
-        sorteoId: r?.sorteoId,
+        loteriaId: Number(err.loteriaId),
+        sorteoId: Number(err.sorteoId),
         total: Number(err.totalRequerido || 0),
         saldoDisponible: Number(err.saldoDisponible || 0),
         faltante: Number(err.faltante || 0)
