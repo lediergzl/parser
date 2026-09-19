@@ -9,6 +9,8 @@ const reconnectTimers = new Map();
 const connecting = new Map();
 const socketGenerations = new Map();
 const activeBettingChats = new Set();
+const jugarCooldowns = new Map();
+const JUGAR_COOLDOWN_MS = 4000;
 const registrationStates = new Map();
 const waMenuCache = { loterias: null, loteriasAt: 0, sorteos: new Map() };
 const WA_MENU_CACHE_TTL_MS = 30 * 1000;
@@ -745,8 +747,19 @@ async function recibirMensaje(db, sock, comercialId, message) {
   }
 
   if (command === '/jugar') {
+    const ahora = Date.now();
+    const ultimoJugar = jugarCooldowns.get(key) || 0;
+    if (ahora - ultimoJugar < JUGAR_COOLDOWN_MS) return;
+    jugarCooldowns.set(key, ahora);
+
     activeBettingChats.add(key);
-    try { await reiniciarSesionWhatsApp(db, comercialId, senderJid); } catch (e) { activeBettingChats.delete(key); console.error(`No se pudo reiniciar sesión WhatsApp ${comercialId}/${senderJid}:`, e); return sock.sendMessage(remoteJid, { text: '❌ No pude iniciar una sesión de juego segura. Inténtalo nuevamente.' }); }
+    try {
+      await reiniciarSesionWhatsApp(db, comercialId, senderJid);
+    } catch (e) {
+      activeBettingChats.delete(key);
+      console.error(`No se pudo reiniciar sesión WhatsApp ${comercialId}/${senderJid}:`, e);
+      return sock.sendMessage(remoteJid, { text: '❌ No pude iniciar una sesión de juego segura. Inténtalo nuevamente.' });
+    }
     await sendMainMenu(sock, remoteJid, interactiveJid);
     return;
   }
