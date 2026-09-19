@@ -313,12 +313,23 @@ async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, alternate
   const result = Engine.calcular({ rawInput: texto, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id }, { Expansion, limpiarMonto: Utils.limpiarMonto, preprocesarJugada: Preprocesador.preprocesarJugada, obtenerTimestampLocal: () => new Date().toISOString() });
   if (!result?.ok || !result.certified) { const detail = (result?.errors || []).map(e => e.message || e.reason).join('\n'); throw new Error(`${result?.message || 'La jugada no pudo procesarse.'}${detail ? `\n${detail}` : ''}`); }
   const total = Number(result.totalGeneral || 0);
+  const totalDeclarado = extraerTotalDeclarado(texto);
+  const diferenciaTotal = totalDeclarado !== null ? Number((totalDeclarado - total).toFixed(2)) : 0;
+  const hayDiferenciaTotal = totalDeclarado !== null && Math.abs(diferenciaTotal) > 0.001;
   if (!Number.isFinite(total) || total <= 0) throw new Error('La jugada no tiene un monto válido.');
   if (saldo < total) throw new Error(`Saldo insuficiente. Disponible: $${saldo.toFixed(2)}, necesario: $${total.toFixed(2)}. Debes realizar un depósito antes de jugar.`);
   const fecha = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Havana' }).format(new Date());
   const detalle = (result.jugadas || []).flatMap(j => j.jugadas_detalle || []);
   const registro = await registrarBetAtomica(db, { comercialId, clienteBancaId: cliente.id, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id, fecha, inputRaw: texto, totalApuesta: total, detalle: JSON.stringify(detalle), moneda: pref.moneda || 'cup' });
-  return { bets: [{ id: registro.id, nombre: cliente.nombre, total, credito: registro.credito, saldoAntes: registro.saldoAntes, saldoDespues: registro.saldoDespues }], total, sorteo: sorteo.nombre, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id, loteriaNombre: (await db.from('loterias').select('nombre').eq('id', pref.loteria_id).maybeSingle()).data?.nombre || String(pref.loteria_id), textoOriginal: texto };
+  return { bets: [{ id: registro.id, nombre: cliente.nombre, total, credito: registro.credito, saldoAntes: registro.saldoAntes, saldoDespues: registro.saldoDespues }], total, totalDeclarado, diferenciaTotal, hayDiferenciaTotal, sorteo: sorteo.nombre, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id, loteriaNombre: (await db.from('loterias').select('nombre').eq('id', pref.loteria_id).maybeSingle()).data?.nombre || String(pref.loteria_id), textoOriginal: texto };
+}
+
+function extraerTotalDeclarado(texto) {
+  const raw = String(texto || '');
+  const matches = [...raw.matchAll(/(?:^|\\n)\\s*total\\s*[:=]?\\s*\\$?\\s*([0-9]+(?:[.,][0-9]+)?)/gim)];
+  if (!matches.length) return null;
+  const valor = Number(String(matches[matches.length - 1][1] || '').replace(',', '.'));
+  return Number.isFinite(valor) && valor > 0 ? valor : null;
 }
 
 function fechaCuba() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Havana' }).format(new Date()); }
@@ -816,7 +827,10 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const r = await procesarJugadaWhatsApp({ comercialId, texto, senderJid, alternateJid: remoteJid });
     await db.from('whatsapp_inbox').update({ procesado: true, bet_ids: r.bets.map(b => b.id), error: null }).eq('id', inserted.id);
     const b = r.bets[0];
-    const resumen = `👤 ${b.nombre}\n🧾 ${r.textoOriginal}\n\n💵 Total: $${r.total.toFixed(2)}\n💰 Saldo restante: $${b.saldoDespues.toFixed(2)}\n🎲 ${r.loteriaNombre}\n🎰 ${r.sorteo}`;
+    const advertenciaTotal = r.hayDiferenciaTotal
+      ? `\\n\\n⚠️ *DIFERENCIA DETECTADA*\\n💳 Total indicado: $\${r.totalDeclarado.toFixed(2)}\\n🧮 Total calculado: $\${r.total.toFixed(2)}\\n📊 Diferencia: $\${Math.abs(r.diferenciaTotal).toFixed(2)}\\n\\nLa jugada fue registrada por el total calculado: $\${r.total.toFixed(2)}.`
+      : '';
+    const resumen = `👤 \${b.nombre}\\n🧾 \${r.textoOriginal}\\n\\n💵 Total: $\${r.total.toFixed(2)}\${advertenciaTotal}\\n💰 Saldo restante: $\${b.saldoDespues.toFixed(2)}\\n🎲 \${r.loteriaNombre}\\n🎰 \${r.sorteo}`;
     await sock.sendMessage(remoteJid, { text: `✅ Jugada recibida y registrada.\n\n${resumen}` });
     // Las jugadas originadas en WhatsApp se notifican al comercial por su
     // propio WhatsApp. No deben generar avisos duplicados en Telegram.
