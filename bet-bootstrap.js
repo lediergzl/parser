@@ -34,7 +34,7 @@ if (!bot) {
     // Engine.calcular(). Así ambos canales llegan al motor con exactamente
     // la misma sintaxis canónica.
     const textoOriginal = ctx.message.text;
-    const totalDeclaradoMatch = textoOriginal.match(/\\btotal\\s*(?:(?:[-:]\\s*)|(?:de\\s+))?\\$?\\s*(\\d+(?:[.,]\\d+)?)/i);
+    const totalDeclaradoMatch = textoOriginal.match(/\btotal\s*(?:(?:[-:]\s*)|(?:de\s+))?\$?\s*(\d+(?:[.,]\d+)?)/i);
     if (totalDeclaradoMatch) {
       ctx.state = ctx.state || {};
       ctx.state.totalDeclarado = Number(String(totalDeclaradoMatch[1]).replace(',', '.'));
