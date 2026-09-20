@@ -13,6 +13,9 @@ const jugarCooldowns = new Map();
 const JUGAR_COOLDOWN_MS = 4000;
 const WA_JUGADA_TIMEOUT_MS = Math.max(60 * 1000, Number(process.env.WA_JUGADA_TIMEOUT_MS || 15 * 60 * 1000));
 const bettingSessionTimers = new Map();
+// Baileys puede alternar entre @lid y senderPn en mensajes del mismo chat.
+// Ambos deben apuntar al mismo identificador canónico de sesión.
+const waIdentityAliases = new Map();
 const registrationStates = new Map();
 const waMenuCache = { loterias: null, loteriasAt: 0, sorteos: new Map() };
 const WA_MENU_CACHE_TTL_MS = 30 * 1000;
@@ -31,6 +34,9 @@ function programarSalidaAutomaticaWhatsApp(sock, db, comercialId, senderJid, rem
     jugarCooldowns.delete(key);
 
     await reiniciarSesionWhatsApp(db, comercialId, senderJid).catch(() => {});
+    for (const alias of [...waIdentityAliases.keys()]) {
+      if (alias === bettingChatKey(comercialId, remoteJid) || alias === bettingChatKey(comercialId, senderJid)) waIdentityAliases.delete(alias);
+    }
     try {
       await sock.sendMessage(remoteJid, {
         text: '⏱️ Tu sesión de jugada fue cerrada automáticamente por inactividad.\n\nCuando quieras jugar de nuevo escribe /jugar.'
@@ -847,10 +853,21 @@ async function recibirMensaje(db, sock, comercialId, message) {
   if (!texto) return;
   const remoteJid = String(message.key.remoteJid || '').trim(); if (!remoteJid || remoteJid === 'status@broadcast') return;
   const senderPn = String(message.key.senderPn || message.key.participantPn || '').trim();
-  const senderJid = senderPn.endsWith('@s.whatsapp.net')
+  const rawSenderJid = senderPn.endsWith('@s.whatsapp.net')
     ? senderPn
     : String(message.key.participant || remoteJid).trim();
   const interactiveJid = senderPn.endsWith('@s.whatsapp.net') ? senderPn : null;
+
+  const aliasRemoteKey = bettingChatKey(comercialId, remoteJid);
+  const aliasSenderKey = bettingChatKey(comercialId, rawSenderJid || remoteJid);
+  const senderJid = waIdentityAliases.get(aliasRemoteKey)
+    || waIdentityAliases.get(aliasSenderKey)
+    || rawSenderJid
+    || remoteJid;
+
+  waIdentityAliases.set(aliasRemoteKey, senderJid);
+  waIdentityAliases.set(aliasSenderKey, senderJid);
+
   const key = bettingChatKey(comercialId, senderJid || remoteJid);
   const command = normalizeCommand(texto);
 
@@ -959,6 +976,8 @@ async function recibirMensaje(db, sock, comercialId, message) {
     jugarCooldowns.set(key, ahora);
 
     activeBettingChats.add(key);
+    waIdentityAliases.set(aliasRemoteKey, senderJid);
+    waIdentityAliases.set(aliasSenderKey, senderJid);
     programarSalidaAutomaticaWhatsApp(sock, db, comercialId, senderJid, remoteJid, key);
     try {
       await reiniciarSesionWhatsApp(db, comercialId, senderJid);
@@ -975,6 +994,8 @@ async function recibirMensaje(db, sock, comercialId, message) {
   if (command === '/salir') {
     activeBettingChats.delete(key);
     cancelarSalidaAutomaticaWhatsApp(key);
+    waIdentityAliases.delete(aliasRemoteKey);
+    waIdentityAliases.delete(aliasSenderKey);
     await reiniciarSesionWhatsApp(db, comercialId, senderJid).catch(() => {});
     await sock.sendMessage(remoteJid, { text: '✅ Modo jugada desactivado y selección borrada.\n\nCuando quieras jugar de nuevo escribe /jugar.' });
     return;
@@ -1022,7 +1043,11 @@ async function recibirMensaje(db, sock, comercialId, message) {
     return;
   }
 
-  if (command === '/estado') { await enviarEstadoCliente(sock, remoteJid, db, comercialId, senderJid); return; }  if (!activeBettingChats.has(key)) return;
+  if (command === '/estado') { await enviarEstadoCliente(sock, remoteJid, db, comercialId, senderJid); return; }
+  if (!activeBettingChats.has(key)) {
+    console.log('ℹ️ WA ' + comercialId + ': mensaje ignorado fuera de sesión jid=' + remoteJid + ' sender=' + senderJid + ' text=' + JSON.stringify(texto.slice(0, 100)));
+    return;
+  }
 
   // Cada interacción mantiene viva la sesión; si el cliente se queda inactivo,
   // el temporizador ejecutará la misma limpieza que /salir.
@@ -1236,10 +1261,13 @@ async function desconectarComercial(db, id) {
   const sock = sockets.get(numericId);
   if (sock) { try { sock.logout(); } catch (_) { try { sock.end?.(); } catch (_) {} } sockets.delete(numericId); }
   for (const key of activeBettingChats) {
-    if (key.startsWith(`${numericId}:`)) {
+    if (key.startsWith('' + numericId + ':')) {
       activeBettingChats.delete(key);
       cancelarSalidaAutomaticaWhatsApp(key);
     }
+  }
+  for (const alias of [...waIdentityAliases.keys()]) {
+    if (alias.startsWith('' + numericId + ':')) waIdentityAliases.delete(alias);
   }
   await db.from('whatsapp_comercial_session').update({ estado: 'desconectado', creds: null, keys: null, ultimo_qr: null, updated_at: new Date().toISOString() }).eq('comercial_telegram_id', id);
 }
