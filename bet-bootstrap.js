@@ -102,15 +102,20 @@ if (!bot) {
         console.error('❌ No se pudo iniciar el sender WhatsApp de jugadas/resultados:', err && err.stack ? err.stack : err);
       }
     })
+    .then(async () => {
+      // El userbot de resultados se inicia DESPUÉS del sender de WhatsApp.
+      // Así ningún resultado/premio puede emitirse antes de que existan sus
+      // listeners de WhatsApp. Los eventos del bus son efímeros.
+      try {
+        const userbotResultados = require('./userbot-resultados');
+        await userbotResultados.iniciarUserbotResultados();
+        console.log('✅ Userbot de resultados iniciado después del sender WhatsApp.');
+      } catch (err) {
+        console.error('❌ Userbot de resultados no pudo iniciar:', err && err.stack ? err.stack : err);
+      }
+    })
     .catch(err => {
       console.error('❌ Error registrando flujos de jugadas:', err && err.stack ? err.stack : err);
       process.exitCode = 1;
     });
-
-  try {
-    require('./userbot-resultados').iniciarUserbotResultados()
-      .catch(err => console.error('❌ Userbot de resultados no pudo iniciar:', err && err.stack ? err.stack : err));
-  } catch (err) {
-    console.error('⚠️ Userbot de resultados no disponible (¿falta "npm install telegram input?"):', err.message);
-  }
 }
