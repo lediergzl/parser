@@ -17,6 +17,8 @@ const bettingSessionTimers = new Map();
 // Ambos deben apuntar al mismo identificador canónico de sesión.
 const waIdentityAliases = new Map();
 const registrationStates = new Map();
+const qrLastSentAt = new Map();
+const QR_RESEND_INTERVAL_MS = 15000;
 const waMenuCache = { loterias: null, loteriasAt: 0, sorteos: new Map() };
 const WA_MENU_CACHE_TTL_MS = 30 * 1000;
 const waPreferenceCache = new Map();
@@ -165,11 +167,29 @@ async function saveStatus(db, id, patch) {
   await db.from('whatsapp_comercial_session').upsert({ comercial_telegram_id: id, ...patch, updated_at: new Date().toISOString() });
 }
 
-async function sendQr(id, qr) {
+async function sendQr(id, qr, options = {}) {
   const db = supa();
+  const now = Date.now();
+  const force = Boolean(options.force);
+  const lastSent = qrLastSentAt.get(Number(id)) || 0;
   await saveStatus(db, id, { estado: 'esperando_qr', ultimo_qr: qr, ultimo_error: null });
-  const ok = await telegramPhoto(id, qrToPng(qr), '📲 QR de tu WhatsApp\n\nEn WhatsApp: Ajustes → Dispositivos vinculados → Vincular dispositivo.\n\n⚠️ Este QR es temporal. Si aparece otro, usa siempre el más reciente.');
+
+  // Baileys puede rotar el QR varias veces durante una misma ventana de
+  // vinculación. No inundamos Telegram con imágenes casi idénticas: el QR
+  // almacenado en Supabase sigue siendo siempre el último generado.
+  if (!force && now - lastSent < QR_RESEND_INTERVAL_MS) {
+    console.log(`⏳ WA ${id}: QR actualizado en Supabase, envío a Telegram omitido por throttle.`);
+    return false;
+  }
+  qrLastSentAt.set(Number(id), now);
+
+  const ok = await telegramPhoto(
+    id,
+    qrToPng(qr),
+    '📲 QR PARA VINCULAR EL WHATSAPP DEL COMERCIAL\\n\\nEn WhatsApp: Ajustes → Dispositivos vinculados → Vincular dispositivo.\\n\\n⚠️ Este QR es temporal. Si ya vinculaste el WhatsApp, ignora cualquier QR posterior y revisa /wa_estado.'
+  );
   if (!ok) await telegramText(id, '⚠️ No pude enviarte el QR. Usa /wa_qr para solicitar el más reciente.');
+  return ok;
 }
 
 function normalizarWhatsAppKey(value) {
@@ -1201,8 +1221,22 @@ async function conectarComercial(db, comercialId, force = false) {
       }
 
       if (qr) {
-        console.log(`📲 WA ${id}: QR nuevo generado; guardando y enviando el más reciente.`);
-        await sendQr(id, qr).catch(e => console.error(`QR ${id}:`, e));
+        // Si Baileys ya tiene credenciales registradas/usuario identificado,
+        // un QR posterior pertenece a una fase de reconstrucción del socket y
+        // no debe volver a presentarse al comercial como si estuviera sin vincular.
+        const yaRegistrado = Boolean(state?.creds?.registered || state?.creds?.me || sock.user?.id);
+        if (yaRegistrado) {
+          console.log(`🛡️ WA ${id}: QR ignorado porque la sesión ya está registrada (${sock.user?.id || 'creds registrados'}).`);
+          await saveStatus(db, id, {
+            estado: 'conectado',
+            ultimo_qr: null,
+            telefono: sock.user?.id || null,
+            ultimo_error: null
+          });
+        } else {
+          console.log(`📲 WA ${id}: QR nuevo generado; guardando y enviando el más reciente.`);
+          await sendQr(id, qr).catch(e => console.error(`QR ${id}:`, e));
+        }
       }
 
       if (connection === 'open') {
@@ -1218,6 +1252,7 @@ async function conectarComercial(db, comercialId, force = false) {
           .eq('comercial_telegram_id', id)
           .maybeSingle();
 
+        qrLastSentAt.delete(Number(id));
         await saveStatus(db, id, {
           estado: 'conectado',
           ultimo_qr: null,
@@ -1417,9 +1452,10 @@ async function registrarWhatsappComerciales(bot) {
   bot.command('wa_qr', async ctx => {
     const role = await commercialRole(db, ctx.from.id);
     if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Solo un comercial puede usar este comando.');
-    const { data } = await db.from('whatsapp_comercial_session').select('ultimo_qr,estado').eq('comercial_telegram_id', ctx.from.id).maybeSingle();
+    const { data } = await db.from('whatsapp_comercial_session').select('ultimo_qr,estado,telefono').eq('comercial_telegram_id', ctx.from.id).maybeSingle();
+    if (data?.estado === 'conectado') return ctx.reply(`✅ WhatsApp ya está conectado${data.telefono ? ` (${data.telefono})` : ''}. No hay ningún QR pendiente.`);
     if (!data?.ultimo_qr) return ctx.reply('ℹ️ No hay un QR pendiente. Usa /wa_conectar.');
-    await sendQr(ctx.from.id, data.ultimo_qr);
+    await sendQr(ctx.from.id, data.ultimo_qr, { force: true });
   });
 
   bot.command('wa_estado', async ctx => {
