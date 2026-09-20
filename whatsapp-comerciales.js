@@ -1,10 +1,13 @@
 const { createClient } = require('@supabase/supabase-js');
 const { useSupabaseAuthState } = require('./lib/wa-session-store');
+const { crearLockSesionWhatsapp } = require('./lib/wa-instance-lock');
 const { DisconnectReason } = require('@whiskeysockets/baileys');
 const { adaptIncomingInteractive, sendNative, sendMainMenu, sendLotteryMenu, sendDrawMenu, sendConfirmationMenu } = require('./lib/wa-menu');
 const { procesarMensajeDeposito, resolverSolicitudWhatsApp } = require('./wa-deposit-preload');
 
 const sockets = new Map();
+const authStates = new Map();
+const locks = new Map();
 const reconnectTimers = new Map();
 const connecting = new Map();
 const socketGenerations = new Map();
@@ -67,17 +70,24 @@ function enabled() {
 // mismas credenciales, WhatsApp expulsa una de las dos conexiones con un
 // error de tipo conflict/replaced.
 let shuttingDown = false;
-function cerrarTodo(signal) {
+async function cerrarTodo(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`🛑 ${signal} recibido, cerrando ${sockets.size} conexión(es) de WhatsApp...`);
   for (const sock of sockets.values()) {
     try { sock.end(new Error('shutdown')); } catch (_) {}
   }
-  setTimeout(() => process.exit(0), 800);
+  // CRÍTICO: si el proceso muere (por ejemplo durante un redeploy de Render)
+  // con escrituras de creds/keys todavía en cola en Supabase, el próximo
+  // arranque carga un estado Signal desincronizado del real. Eso es lo que
+  // produce el bucle "conecta -> Connection Failure -> 401 -> QR nuevo" que
+  // nunca se estabiliza aunque se escanee el QR. Esperamos a que cada sesión
+  // termine de escribirse y liberamos los locks distribuidos antes de salir.
+  await Promise.all([...authStates.values()].map(a => a.flush().catch(() => {})));
+  await Promise.all([...locks.values()].map(l => l.liberar().catch(() => {})));
 }
-process.on('SIGTERM', () => cerrarTodo('SIGTERM'));
-process.on('SIGINT', () => cerrarTodo('SIGINT'));
+process.on('SIGTERM', () => { cerrarTodo('SIGTERM').finally(() => process.exit(0)); });
+process.on('SIGINT', () => { cerrarTodo('SIGINT').finally(() => process.exit(0)); });
 
 function admins() {
   return String(process.env.ADMIN_IDS || '').split(',').map(v => Number(v.trim())).filter(Number.isFinite);
@@ -1190,7 +1200,22 @@ async function conectarComercial(db, comercialId, force = false) {
 
   const promise = (async () => {
     const makeWASocket = require('@whiskeysockets/baileys').default;
-    const { state, saveCreds } = await useSupabaseAuthState(db, `commercial:${id}`);
+
+    // Igual que en lib/whatsapp-sender.js (ver wa-instance-lock.js): sin este
+    // lock, un redeploy de Render puede dejar la instancia vieja todavía
+    // sosteniendo el socket de ESTE comercial mientras la instancia nueva
+    // abre otro con las mismas credenciales. Dos sockets Baileys escribiendo
+    // sobre el mismo estado Signal corrompen las claves de sync y provocan
+    // el ciclo "conecta -> Connection Failure -> 401 -> QR nuevo" que nunca
+    // se estabiliza aunque el QR se escanee correctamente.
+    let lock = locks.get(id);
+    if (!lock) { lock = crearLockSesionWhatsapp(db, `commercial:${id}`); locks.set(id, lock); }
+    await lock.esperarYAdquirir();
+    if (socketGenerations.get(id) !== generation) return sockets.get(id) || null;
+
+    const authState = await useSupabaseAuthState(db, `commercial:${id}`);
+    authStates.set(id, authState);
+    const { state, saveCreds } = authState;
     if (socketGenerations.get(id) !== generation) return sockets.get(id) || null;
 
     const sock = makeWASocket({ auth: state, printQRInTerminal: false, markOnlineOnConnect: false, shouldSyncHistoryMessage: () => false });
