@@ -1135,10 +1135,34 @@ async function conectarComercial(db, comercialId, force = false) {
   if (force) {
     const timer = reconnectTimers.get(id);
     if (timer) { clearTimeout(timer); reconnectTimers.delete(id); }
+
     if (existing) {
       try { existing.end?.(new Error('reconnect')); } catch (_) {}
       sockets.delete(id);
     }
+
+    // /wa_conectar significa "volver a vincular".
+    // Si quedó una credencial inválida después de un 401, no debemos cargarla
+    // otra vez y esperar que el mismo QR repare una sesión revocada.
+    // Limpiamos SOLO la sesión de este comercial antes de crear el socket nuevo.
+    const { error: resetError } = await db
+      .from('whatsapp_comercial_session')
+      .update({
+        estado: 'esperando_qr',
+        creds: null,
+        keys: null,
+        telefono: null,
+        ultimo_qr: null,
+        ultimo_error: null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('comercial_telegram_id', id);
+
+    if (resetError) {
+      throw new Error(`No se pudo reiniciar la sesión de WhatsApp: ${resetError.message}`);
+    }
+
+    console.log(`🧹 WA ${id}: sesión reiniciada manualmente; se generará un QR nuevo.`);
   }
 
   const generation = (socketGenerations.get(id) || 0) + 1;
