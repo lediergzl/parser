@@ -1156,12 +1156,36 @@ async function conectarComercial(db, comercialId, force = false) {
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('connection.update', async update => {
       if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
-      const { connection, lastDisconnect, qr } = update;
-      if (qr) await sendQr(id, qr).catch(e => console.error(`QR ${id}:`, e));
+
+      const { connection, lastDisconnect, qr, isNewLogin, receivedPendingNotifications } = update;
+
+      // Este log permite distinguir:
+      // QR generado -> QR escaneado/registro -> open -> close.
+      // Sin esto, un fallo 401 después del escaneo parece simplemente que
+      // "el QR no funcionó".
+      if (connection || isNewLogin || receivedPendingNotifications) {
+        const code = lastDisconnect?.error?.output?.statusCode
+          ?? lastDisconnect?.error?.data?.statusCode
+          ?? lastDisconnect?.error?.statusCode
+          ?? null;
+        console.log(
+          `📡 WA ${id}: connection.update connection=${connection || '—'}` +
+          ` isNewLogin=${Boolean(isNewLogin)}` +
+          ` pending=${Boolean(receivedPendingNotifications)}` +
+          ` code=${code ?? '—'}`
+        );
+      }
+
+      if (qr) {
+        console.log(`📲 WA ${id}: QR nuevo generado; guardando y enviando el más reciente.`);
+        await sendQr(id, qr).catch(e => console.error(`QR ${id}:`, e));
+      }
 
       if (connection === 'open') {
         if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
+
         const telefono = sock.user?.id || null;
+        console.log(`✅ WA ${id}: conexión OPEN. Usuario=${telefono || 'desconocido'}`);
 
         // Evita repetir el aviso de conexión en Telegram cada vez que Baileys
         // reconstruye/reconecta el socket con la misma sesión.
@@ -1170,7 +1194,12 @@ async function conectarComercial(db, comercialId, force = false) {
           .eq('comercial_telegram_id', id)
           .maybeSingle();
 
-        await saveStatus(db, id, { estado: 'conectado', ultimo_qr: null, telefono, ultimo_error: null });
+        await saveStatus(db, id, {
+          estado: 'conectado',
+          ultimo_qr: null,
+          telefono,
+          ultimo_error: null
+        });
 
         const yaEstabaConectado = estadoAnterior?.estado === 'conectado'
           && String(estadoAnterior?.telefono || '') === String(telefono || '');
@@ -1182,11 +1211,62 @@ async function conectarComercial(db, comercialId, force = false) {
 
       if (connection === 'close') {
         if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
-        const code = lastDisconnect?.error?.output?.statusCode;
+
+        const error = lastDisconnect?.error;
+        const code = error?.output?.statusCode
+          ?? error?.data?.statusCode
+          ?? error?.statusCode
+          ?? null;
         const loggedOut = code === DisconnectReason.loggedOut;
-        await saveStatus(db, id, { estado: loggedOut ? 'desconectado' : 'conectando', ultimo_error: String(lastDisconnect?.error?.message || '') });
+
+        console.error(
+          `❌ WA ${id}: conexión CLOSED code=${code ?? 'desconocido'}` +
+          ` reason=${error?.message || error || 'sin detalle'}`
+        );
+
+        if (loggedOut) {
+          // 401 significa que WhatsApp revocó la sesión. No debemos conservar
+          // creds/keys inválidos y volver a arrancar con ellos: eso provoca
+          // un ciclo 401 -> QR -> registro fallido -> 401.
+          //
+          // Importante: solo limpiamos la sesión del comercial actual; nunca
+          // la sesión global ni la de otro comercial.
+          const { error: clearError } = await db
+            .from('whatsapp_comercial_session')
+            .update({
+              estado: 'desconectado',
+              creds: null,
+              keys: null,
+              ultimo_qr: null,
+              telefono: null,
+              ultimo_error: `401 loggedOut: ${error?.message || 'Connection Failure'}`,
+              updated_at: new Date().toISOString()
+            })
+            .eq('comercial_telegram_id', id);
+
+          if (clearError) {
+            console.error(`❌ WA ${id}: no se pudieron limpiar creds/keys tras 401:`, clearError);
+          } else {
+            console.log(`🧹 WA ${id}: sesión comercial eliminada tras loggedOut (401).`);
+          }
+        } else {
+          await saveStatus(db, id, {
+            estado: 'conectando',
+            ultimo_error: String(error?.message || error || '')
+          });
+        }
+
         sockets.delete(id);
-        if (!loggedOut && !reconnectTimers.has(id)) {
+
+        if (loggedOut) {
+          await telegramText(
+            id,
+            '⚠️ WhatsApp revocó la sesión anterior (401). La sesión fue limpiada. Usa /wa_conectar para generar un QR nuevo y vuelve a escanearlo.'
+          ).catch(() => {});
+          return;
+        }
+
+        if (!reconnectTimers.has(id)) {
           const timer = setTimeout(() => {
             reconnectTimers.delete(id);
             if (socketGenerations.get(id) !== generation) return;
