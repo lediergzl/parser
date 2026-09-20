@@ -5,6 +5,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const { enviarJugadaAlComercial } = require('./whatsapp');
 const bus = require('./lib/event-bus');
+const { validarLimites } = require('./lib/jugada-input');
 
 function fmtMoney(value) { return Number(value || 0).toFixed(2); }
 
@@ -68,39 +69,6 @@ async function obtenerContextoUsuario(supabase, telegramId) {
     if (ahora >= cierre) return { ok: false, message: `⏰ El sorteo *${sorteo.nombre}* ya cerró.\nHorario: ${String(sorteo.hora_apertura).slice(0,5)} - ${String(sorteo.hora_cierre).slice(0,5)} (Cuba).` };
   }
   return { ok: true, pref, sorteo };
-}
-
-async function validarLimites(supabase, loteriaId, sorteoId, fecha, detalles) {
-  const { data: limites, error: limitesError } = await supabase.from('limits').select('tipo,monto_maximo').or(`loteria_id.eq.${loteriaId},loteria_id.is.null`).or(`sorteo_id.eq.${sorteoId},sorteo_id.is.null`);
-  if (limitesError) throw limitesError;
-  if (!limites?.length) return null;
-  const limitesMap = {};
-  for (const l of limites) limitesMap[l.tipo] = Number(l.monto_maximo);
-  const { data: bets, error: betsError } = await supabase.from('bets').select('detalle').eq('loteria_id', loteriaId).eq('sorteo_id', sorteoId).eq('fecha_apuesta', fecha);
-  if (betsError) throw betsError;
-  const acumulado = {};
-  for (const bet of bets || []) {
-    try {
-      const rows = JSON.parse(bet.detalle || '[]');
-      for (const d of rows) {
-        const tipo = (d.tipo === 'candado' || d.tipo === 'candado_global') ? 'parle' : d.tipo;
-        const monto = Number(d.monto_unitario || 0);
-        if (!monto) continue;
-        for (const num of d.numeros || []) { const key = `${tipo}:${String(num)}`; acumulado[key] = (acumulado[key] || 0) + monto; }
-      }
-    } catch (_) {}
-  }
-  for (const d of detalles) {
-    const tipo = (d.tipo === 'candado' || d.tipo === 'candado_global') ? 'parle' : d.tipo;
-    const limite = limitesMap[tipo], monto = Number(d.monto_unitario || 0);
-    if (!limite || !monto) continue;
-    for (const num of d.numeros || []) {
-      const key = `${tipo}:${String(num)}`, anterior = acumulado[key] || 0;
-      if (anterior + monto > limite) return { numero: String(num), tipo, anterior, actual: monto, limite };
-      acumulado[key] = anterior + monto;
-    }
-  }
-  return null;
 }
 
 // La BD trabaja con una representación canónica. El parser puede producir
