@@ -482,7 +482,11 @@ async function procesarPendientesSaldoWhatsApp(db, sock, comercialId, whatsappJi
           'La recarga ya fue aplicada y la jugada quedó registrada correctamente.'
         ].join('\n')
       }).catch(() => {});
-      await notificarComercialJugadaWhatsApp(sock, db, comercialId, b.id);
+      // Esta notificación es secundaria. Nunca debe bloquear el procesamiento
+    // de la siguiente jugada del cliente si WhatsApp tiene un problema de sesión,
+    // cifrado o entrega al chat propio del comercial.
+    notificarComercialJugadaWhatsApp(sock, db, comercialId, b.id)
+      .catch(e => console.error('[WA JUGADA] notificación secundaria falló:', e?.message || e));
       procesadas++;
     } catch (err) {
       if (err?.code === 'INSUFFICIENT_BALANCE') {
@@ -723,6 +727,13 @@ async function enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid, sort
   }
 }
 
+function promesaConTimeout(promise, ms, etiqueta) {
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => setTimeout(() => reject(new Error(etiqueta + ' agotó el tiempo de espera (' + ms + ' ms).')), ms))
+  ]);
+}
+
 async function notificarComercialJugadaWhatsApp(sock, db, comercialId, betId) {
   const targetJid = String(sock?.user?.id || '').trim();
   if (!targetJid || !betId) return false;
@@ -752,7 +763,11 @@ async function notificarComercialJugadaWhatsApp(sock, db, comercialId, betId) {
       '📝 ' + String(bet.input_raw || '').slice(0, 1000), '',
       '💵 Total: $' + Number(bet.total_apuesta || 0).toFixed(2) + ' ' + String(bet.moneda || 'cup').toUpperCase()
     ].join('\n');
-    await sock.sendMessage(targetJid, { text: texto });
+    await promesaConTimeout(
+      sock.sendMessage(targetJid, { text: texto }),
+      8000,
+      '[WA JUGADA] envío al comercial'
+    );
     console.log('[WA JUGADA] notificación enviada al comercial target=' + targetJid + ' bet=' + bet.id);
     return true;
   } catch (error) {
