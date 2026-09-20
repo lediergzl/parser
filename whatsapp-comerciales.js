@@ -4,6 +4,7 @@ const { crearLockSesionWhatsapp } = require('./lib/wa-instance-lock');
 const { DisconnectReason } = require('@whiskeysockets/baileys');
 const { adaptIncomingInteractive, sendNative, sendMainMenu, sendLotteryMenu, sendDrawMenu, sendConfirmationMenu } = require('./lib/wa-menu');
 const { procesarMensajeDeposito, resolverSolicitudWhatsApp } = require('./wa-deposit-preload');
+const { normalizarEntradaJugada, detectarNumerosAmbiguos, validarLimites } = require('./lib/jugada-input');
 
 const sockets = new Map();
 const authStates = new Map();
@@ -370,22 +371,93 @@ async function validarSorteoAbierto(db, sorteoId, loteriaId) {
   return sorteo;}
 async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, alternateJid = null }) {
   const db = supa();
+  const textoOriginal = String(texto || '').trim();
+
+  // Telegram y WhatsApp deben entregar exactamente la misma entrada lógica
+  // al motor. Telegram normaliza esto en bet-bootstrap.js; WhatsApp lo hace
+  // aquí antes de Engine.calcular().
+  const textoProcesable = normalizarEntradaJugada(textoOriginal);
+  const ambiguos = detectarNumerosAmbiguos(textoProcesable);
+  if (ambiguos.length) {
+    const error = new Error(
+      'Jugada requiere atención humana. Se detectó un número ambiguo de 4 cifras: ' +
+      ambiguos.join(', ') +
+      '. No se calculó ni se descontó saldo.'
+    );
+    error.code = 'AMBIGUOUS_BET';
+    error.ambiguousNumbers = ambiguos;
+    throw error;
+  }
+
   const cliente = await buscarClienteWhatsApp(db, comercialId, senderJid, alternateJid);
   const saldo = Number(cliente.saldo || 0);
   const pref = await obtenerPreferenciaWhatsApp(db, comercialId, senderJid);
-  if (!pref?.loteria_id || !pref?.sorteo_id) throw new Error('Primero debes seleccionar la lotería y el sorteo antes de enviar una jugada. Usa /loterias.');
+  if (!pref?.loteria_id || !pref?.sorteo_id) {
+    throw new Error('Primero debes seleccionar la lotería y el sorteo antes de enviar una jugada. Usa /loterias.');
+  }
+
   const sorteo = await validarSorteoAbierto(db, pref.sorteo_id, pref.loteria_id);
   const Engine = global.Engine, Preprocesador = global.Preprocesador, Utils = global.Utils, Expansion = global.Expansion;
-  if (!Engine?.calcular || !Preprocesador?.preprocesarJugada || !Utils?.limpiarMonto || !Expansion) throw new Error('Motor LotoPro no disponible.');
-  const result = Engine.calcular({ rawInput: texto, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id }, { Expansion, limpiarMonto: Utils.limpiarMonto, preprocesarJugada: Preprocesador.preprocesarJugada, obtenerTimestampLocal: () => new Date().toISOString() });
-  if (!result?.ok || !result.certified) { const detail = (result?.errors || []).map(e => e.message || e.reason).join('\n'); throw new Error(`${result?.message || 'La jugada no pudo procesarse.'}${detail ? `\n${detail}` : ''}`); }
+  if (!Engine?.calcular || !Preprocesador?.preprocesarJugada || !Utils?.limpiarMonto || !Expansion) {
+    throw new Error('Motor LotoPro no disponible.');
+  }
+
+  const result = Engine.calcular(
+    { rawInput: textoProcesable, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id },
+    {
+      Expansion,
+      limpiarMonto: Utils.limpiarMonto,
+      preprocesarJugada: Preprocesador.preprocesarJugada,
+      obtenerTimestampLocal: () => new Date().toISOString()
+    }
+  );
+
+  if (!result?.ok || !result.certified) {
+    const detail = (result?.errors || [])
+      .map(e => e.message || e.reason)
+      .filter(Boolean)
+      .join('\n');
+    throw new Error((result?.message || 'La jugada no pudo procesarse.') + (detail ? '\n' + detail : ''));
+  }
+
   const total = Number(result.totalGeneral || 0);
-  const totalDeclarado = extraerTotalDeclarado(texto);
-  const diferenciaTotal = totalDeclarado !== null ? Number((totalDeclarado - total).toFixed(2)) : 0;
+  const totalDeclarado = extraerTotalDeclarado(textoOriginal);
+  const diferenciaTotal = totalDeclarado !== null
+    ? Number((totalDeclarado - total).toFixed(2))
+    : 0;
   const hayDiferenciaTotal = totalDeclarado !== null && Math.abs(diferenciaTotal) > 0.001;
-  if (!Number.isFinite(total) || total <= 0) throw new Error('La jugada no tiene un monto válido.');
+
+  if (!Number.isFinite(total) || total <= 0) {
+    throw new Error('La jugada no tiene un monto válido.');
+  }
+
+  // Misma validación acumulativa que Telegram, antes de tocar el saldo.
+  const fecha = fechaCuba();
+  const detalle = (result.jugadas || []).flatMap(j => j.jugadas_detalle || []);
+  const limite = await validarLimites(db, pref.loteria_id, pref.sorteo_id, fecha, detalle);
+  if (limite) {
+    const error = new Error(
+      'Límite excedido.\\n\\n' +
+      'Número: ' + limite.numero + '\\n' +
+      'Tipo: ' + limite.tipo + '\\n' +
+      'Acumulado anterior: $' + Number(limite.anterior).toFixed(2) + '\\n' +
+      'Esta jugada: $' + Number(limite.actual).toFixed(2) + '\\n' +
+      'Límite: $' + Number(limite.limite).toFixed(2) + '\\n\\n' +
+      'La jugada no fue guardada.'
+    );
+    error.code = 'BET_LIMIT_EXCEEDED';
+    error.limit = limite;
+    throw error;
+  }
+
+  // La comprobación local permite responder inmediatamente, pero el RPC
+  // sigue siendo la autoridad atómica sobre el saldo.
   if (saldo < total) {
-    const error = new Error('Saldo insuficiente. Disponible: $' + saldo.toFixed(2) + ', necesario: $' + total.toFixed(2) + '. Te faltan: $' + Math.max(0, total - saldo).toFixed(2) + '.');
+    const error = new Error(
+      'Saldo insuficiente. Disponible: $' + saldo.toFixed(2) +
+      ', necesario: $' + total.toFixed(2) +
+      '. Te faltan: $' + Math.max(0, total - saldo).toFixed(2) + '.'
+    );
     error.code = 'INSUFFICIENT_BALANCE';
     error.saldoDisponible = saldo;
     error.totalRequerido = total;
@@ -394,10 +466,38 @@ async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, alternate
     error.sorteoId = pref.sorteo_id;
     throw error;
   }
-  const fecha = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Havana' }).format(new Date());
-  const detalle = (result.jugadas || []).flatMap(j => j.jugadas_detalle || []);
-  const registro = await registrarBetAtomica(db, { comercialId, clienteBancaId: cliente.id, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id, fecha, inputRaw: texto, totalApuesta: total, detalle: JSON.stringify(detalle), moneda: pref.moneda || 'cup' });
-  return { bets: [{ id: registro.id, nombre: cliente.nombre, total, credito: registro.credito, saldoAntes: registro.saldoAntes, saldoDespues: registro.saldoDespues }], total, totalDeclarado, diferenciaTotal, hayDiferenciaTotal, sorteo: sorteo.nombre, loteriaId: pref.loteria_id, sorteoId: pref.sorteo_id, loteriaNombre: (await db.from('loterias').select('nombre').eq('id', pref.loteria_id).maybeSingle()).data?.nombre || String(pref.loteria_id), textoOriginal: texto };
+
+  const registro = await registrarBetAtomica(db, {
+    comercialId,
+    clienteBancaId: cliente.id,
+    loteriaId: pref.loteria_id,
+    sorteoId: pref.sorteo_id,
+    fecha,
+    inputRaw: textoOriginal,
+    totalApuesta: total,
+    detalle: JSON.stringify(detalle),
+    moneda: pref.moneda || 'cup'
+  });
+
+  return {
+    bets: [{
+      id: registro.id,
+      nombre: cliente.nombre,
+      total,
+      credito: registro.credito,
+      saldoAntes: registro.saldoAntes,
+      saldoDespues: registro.saldoDespues
+    }],
+    total,
+    totalDeclarado,
+    diferenciaTotal,
+    hayDiferenciaTotal,
+    sorteo: sorteo.nombre,
+    loteriaId: pref.loteria_id,
+    sorteoId: pref.sorteo_id,
+    loteriaNombre: (await db.from('loterias').select('nombre').eq('id', pref.loteria_id).maybeSingle()).data?.nombre || String(pref.loteria_id),
+    textoOriginal
+  };
 }
 
 
