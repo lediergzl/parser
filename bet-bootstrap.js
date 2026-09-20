@@ -12,6 +12,7 @@ const { registrarFlujoApuesta } = require('./bet-handler');
 const { registrarWhatsappComerciales } = require('./whatsapp-comerciales');
 const { registrarControlDestino } = require('./lib/whatsapp-destino');
 const { conectarWhatsapp } = require('./lib/whatsapp-sender');
+const { registrarEntregaDeJugadas } = require('./lib/jugadas-store');
 
 const bot = global.__LOTO_BOT__;
 if (!bot) {
@@ -85,6 +86,10 @@ if (!bot) {
       // El destino persistido debe cargarse antes de procesar resultados/premios,
       // porque esos eventos no traen un destino propio.
       await registrarControlDestino(supabase);
+
+      // Marca en la base de datos las jugadas que realmente fueron
+      // entregadas por WhatsApp; evita duplicados tras reconexiones.
+      registrarEntregaDeJugadas(supabase);
 
       // Reactiva el consumidor del bus:
       // jugada:procesada -> WhatsApp
