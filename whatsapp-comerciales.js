@@ -1302,11 +1302,44 @@ async function conectarComercial(db, comercialId, force = false) {
           ?? error?.statusCode
           ?? null;
         const loggedOut = code === DisconnectReason.loggedOut;
+        const errorText = String(error?.message || error || '');
+        const isConflict401 =
+          loggedOut &&
+          /conflict|connectionreplaced|stream errored/i.test(errorText);
 
         console.error(
           `❌ WA ${id}: conexión CLOSED code=${code ?? 'desconocido'}` +
-          ` reason=${error?.message || error || 'sin detalle'}`
+          ` reason=${errorText || 'sin detalle'}` +
+          ` conflict401=${isConflict401}`
         );
+
+        // 401 + "conflict" NO significa que el teléfono haya desvinculado
+        // la cuenta. Significa que WhatsApp expulsó este socket porque existe
+        // otra conexión con las mismas credenciales (por ejemplo, una
+        // instancia vieja de Render durante un deploy). En ese caso JAMÁS
+        // debemos borrar creds/keys: hacerlo convierte un conflicto temporal
+        // en un logout permanente y obliga a escanear QR otra vez.
+        if (isConflict401) {
+          await saveStatus(db, id, {
+            estado: 'conectando',
+            ultimo_qr: null,
+            ultimo_error: `401 conflict: ${errorText}`
+          }).catch(() => {});
+
+          sockets.delete(id);
+
+          if (!reconnectTimers.has(id)) {
+            const timer = setTimeout(() => {
+              reconnectTimers.delete(id);
+              if (socketGenerations.get(id) !== generation) return;
+              conectarComercial(db, id).catch(e =>
+                console.error(`reconnect WA ${id} tras conflict:`, e)
+              );
+            }, 5000);
+            reconnectTimers.set(id, timer);
+          }
+          return;
+        }
 
         if (loggedOut) {
           // 401 significa que WhatsApp revocó la sesión. No debemos conservar
