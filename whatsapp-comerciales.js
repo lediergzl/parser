@@ -983,6 +983,12 @@ async function recibirMensaje(db, sock, comercialId, message) {
   if (command === '/saldo') { await enviarEstadoCliente(sock, remoteJid, db, comercialId, senderJid); return; }
   if (command === '/depositar' || command === '/recargar') return;
 
+  // Cualquier interacción válida dentro del modo jugada mantiene viva la
+  // sesión, incluidos los menús /loterias, /sorteos y sus selecciones.
+  if (activeBettingChats.has(key)) {
+    programarSalidaAutomaticaWhatsApp(sock, db, comercialId, senderJid, remoteJid, key);
+  }
+
   if (command === '/loterias' || command === '/loteria') { await enviarSeleccionLoterias(sock, remoteJid, db, interactiveJid); return; }
   const loteriaMatch = command.match(/^\/loteria\s+(\d+)$/);
   if (loteriaMatch) {
