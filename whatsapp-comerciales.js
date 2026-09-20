@@ -1082,7 +1082,11 @@ async function recibirMensaje(db, sock, comercialId, message) {
     await sock.sendMessage(remoteJid, { text: `✅ Jugada recibida y registrada.\n\n${resumen}` });
     // Las jugadas originadas en WhatsApp se notifican al comercial por su
     // propio WhatsApp. No deben generar avisos duplicados en Telegram.
-    await notificarComercialJugadaWhatsApp(sock, db, comercialId, b.id);
+    // Esta notificación es secundaria. Nunca debe bloquear el procesamiento
+    // de la siguiente jugada del cliente si WhatsApp tiene un problema de sesión,
+    // cifrado o entrega al chat propio del comercial.
+    notificarComercialJugadaWhatsApp(sock, db, comercialId, b.id)
+      .catch(e => console.error('[WA JUGADA] notificación secundaria falló:', e?.message || e));
   } catch (err) {
     const errorTexto = String(err?.message || err);
 
