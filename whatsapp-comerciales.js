@@ -5,7 +5,7 @@ const { DisconnectReason } = require('@whiskeysockets/baileys');
 const { adaptIncomingInteractive, sendNative, sendMainMenu, sendLotteryMenu, sendDrawMenu, sendConfirmationMenu } = require('./lib/wa-menu');
 const { procesarMensajeDeposito, resolverSolicitudWhatsApp } = require('./wa-deposit-preload');
 const { normalizarEntradaJugada, detectarNumerosAmbiguos, validarLimites } = require('./lib/jugada-input');
-const { guardarGrupoResultadosComercial, leerGrupoResultadosComercial } = require('./lib/whatsapp-destino');
+const { guardarGrupoResultadosComercial, leerGrupoResultadosComercial, listarGruposResultadosComerciales } = require('./lib/whatsapp-destino');
 
 const sockets = new Map();
 const authStates = new Map();
@@ -1595,6 +1595,14 @@ async function conectarComercial(db, comercialId, force = false) {
         if (!yaEstabaConectado) {
           await telegramText(id, `✅ WhatsApp conectado${telefono ? `: ${telefono}` : ''}. Ya puedes recibir jugadas.`);
         }
+
+        // Despierta inmediatamente el outbox al quedar disponible un socket comercial.
+        try {
+          const sender = require('./lib/whatsapp-sender');
+          await sender.vaciarOutboxWhatsapp(db);
+        } catch (outboxError) {
+          console.error('[WA TRANSPORTE] Error vaciando outbox tras conectar comercial:', outboxError?.message || outboxError);
+        }
       }
 
       if (connection === 'close') {
@@ -1789,6 +1797,36 @@ async function conectarComercial(db, comercialId, force = false) {
   }
 }
 
+async function enviarMensajePorDestino(db, destinoId, texto) {
+  const destino = String(destinoId || '').trim();
+  if (!destino) throw new Error('Destino WhatsApp vacío.');
+
+  // Si el destino pertenece a un comercial, usamos exactamente su socket.
+  // Para grupos públicos sin comercial asociado usamos cualquier socket
+  // comercial conectado como emisor. Así nunca se abre una segunda sesión
+  // Baileys solo para publicar resultados.
+  let comercialId = null;
+  try {
+    const grupos = await listarGruposResultadosComerciales(db);
+    const grupo = (grupos || []).find(g => g?.activo && String(g.destino_id || '').trim() === destino);
+    if (grupo) comercialId = Number(grupo.comercial_telegram_id);
+  } catch (error) {
+    console.warn('[WA TRANSPORTE] No se pudo resolver comercial del destino:', error?.message || error);
+  }
+
+  let sock = comercialId != null ? sockets.get(comercialId) : null;
+  if (!sock) {
+    for (const candidato of sockets.values()) {
+      if (candidato?.user?.id) { sock = candidato; break; }
+    }
+  }
+  if (!sock?.user?.id) {
+    throw new Error('No hay ningún WhatsApp comercial conectado para enviar el destino ' + destino);
+  }
+  await sock.sendMessage(destino, { text: String(texto || '') });
+  return true;
+}
+
 async function desconectarComercial(db, id) {
   const numericId = Number(id);
   const timer = reconnectTimers.get(numericId);
@@ -1865,4 +1903,4 @@ async function registrarWhatsappComerciales(bot) {
   console.log(`✅ WhatsApp multi-comercial listo (${(comerciales || []).length} comerciales)`);
 }
 
-module.exports = { registrarWhatsappComerciales, conectarComercial, desconectarComercial, procesarJugadaWhatsApp };
+module.exports = { registrarWhatsappComerciales, conectarComercial, desconectarComercial, procesarJugadaWhatsApp, enviarMensajePorDestino };
