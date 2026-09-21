@@ -142,8 +142,11 @@ function parsearMensajeResultado(texto) {
   const nombreSorteo = CONCEPTO_A_SORTEO[loteriaKey][concepto];
   if (!nombreSorteo) return null;
 
-  const mPick3 = texto.match(/pick\s*3\s*(?:[:=\-]|=>)?\s*(\d{3})(?!\d)/i);
-  const mPick4 = texto.match(/pick\s*4\s*(?:[:=\-]|=>)?\s*(\d{4})(?!\d)/i);
+  // El mensaje real de Florida inserta emojis/símbolos entre "Pick 3" y el número
+  // (por ejemplo: "Pick 3 ➪ 617"). Trabajamos sobre el texto normalizado
+  // para que esos adornos no rompan la captura del número.
+  const mPick3 = normalizado.match(/\bpick\s*3\s+(\d{3})(?!\d)/i);
+  const mPick4 = normalizado.match(/\bpick\s*4\s+(\d{4})(?!\d)/i);
   if (!mPick3 && !mPick4) return null;
 
   const pick3 = mPick3 ? mPick3[1] : null;
