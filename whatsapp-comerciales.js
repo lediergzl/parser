@@ -102,6 +102,12 @@ function supa() {
 function textFromMessage(message) {
   const remoteJid = String(message?.key?.remoteJid || '').trim();
   if (remoteJid.endsWith('@g.us')) return '';
+  return textFromMessageAnyChat(message);
+}
+
+// Extrae texto tambien en grupos. Solo se usa para comandos enviados
+// por el propio WhatsApp comercial (fromMe=true).
+function textFromMessageAnyChat(message) {
   const m = message?.message;
   if (!m) return '';
   return String(m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || '').trim();
@@ -916,7 +922,9 @@ async function recibirMensaje(db, sock, comercialId, message) {
   // si contiene una orden explícita de aprobar/rechazar una recarga WA.
   if (message.key.fromMe) {
     const interactiveId = adaptIncomingInteractive(message);
-    const textoSelf = interactiveId || textFromMessage(message);
+    // Los comandos de configuracion pueden ejecutarse dentro de un grupo.
+    // El flujo normal de clientes sigue ignorando mensajes de grupos.
+    const textoSelf = interactiveId || textFromMessageAnyChat(message);
     const commandSelf = normalizeCommand(textoSelf);
     const aprobarSelf = commandSelf.match(/^\/aprobar_recarga\s+(\d+)$/);
     const rechazarSelf = commandSelf.match(/^\/rechazar_recarga\s+(\d+)$/);
@@ -924,7 +932,9 @@ async function recibirMensaje(db, sock, comercialId, message) {
     // Configuración del grupo de resultados del propio comercial.
     // Se ejecuta desde el WhatsApp comercial: basta enviar el comando dentro
     // del grupo que se quiere asignar.
-    if (commandSelf === '/wa_grupo_resultados') {
+    const comandosAsignarGrupo = new Set(['/wa_grupo_resultados', '/asignargrupo', '/asignar_grupo']);
+
+    if (comandosAsignarGrupo.has(commandSelf)) {
       const targetJid = String(message.key.remoteJid || '').trim();
       if (!targetJid.endsWith('@g.us')) {
         await sock.sendMessage(targetJid || sock.user?.id, {
@@ -933,31 +943,71 @@ async function recibirMensaje(db, sock, comercialId, message) {
         return;
       }
       try {
-        const grupo = await guardarGrupoResultadosComercial(
-          db,
-          comercialId,
-          targetJid,
-          null
-        );
+        let nombreGrupo = null;
+        try {
+          const metadata = await sock.groupMetadata(targetJid);
+          nombreGrupo = String(metadata?.subject || '').trim() || null;
+        } catch (_) {}
+        const grupo = await guardarGrupoResultadosComercial(db, comercialId, targetJid, nombreGrupo);
         await sock.sendMessage(targetJid, {
           text: [
             '✅ GRUPO DE RESULTADOS ASIGNADO',
             '',
-            `👤 Comercial: ${comercialId}`,
-            `👥 Grupo: ${grupo.destino_id}`,
+            '👤 Comercial: ' + comercialId,
+            '👥 ' + (nombreGrupo || 'Grupo WhatsApp'),
+            '🆔 ' + grupo.destino_id,
             '',
             'Este grupo recibirá:',
             '🎲 resultados de los sorteos',
             '🏆 premios correspondientes a las jugadas de este comercial',
             '',
-            'Para cambiarlo, ejecuta /wa_grupo_resultados dentro del nuevo grupo.'
+            'No necesitas copiar el ID manualmente.',
+            'Para cambiarlo, ejecuta /asignargrupo dentro del nuevo grupo.'
           ].join('\n')
         }).catch(() => {});
       } catch (e) {
-        console.error(`[WA RESULTADOS] No se pudo asignar grupo al comercial ${comercialId}:`, e?.message || e);
-        await sock.sendMessage(targetJid, {
-          text: `❌ No se pudo asignar este grupo: ${e?.message || e}`
+        console.error('[WA RESULTADOS] No se pudo asignar grupo al comercial ' + comercialId + ':', e?.message || e);
+        await sock.sendMessage(targetJid, { text: '❌ No se pudo asignar este grupo: ' + (e?.message || e) }).catch(() => {});
+      }
+      return;
+    }
+
+    if (commandSelf === '/idgrupo' || commandSelf === '/id_grupo') {
+      const targetJid = String(message.key.remoteJid || '').trim();
+      if (!targetJid.endsWith('@g.us')) {
+        await sock.sendMessage(targetJid || sock.user?.id, { text: '⚠️ Ejecuta /idgrupo dentro del grupo cuyo ID quieres consultar.' }).catch(() => {});
+        return;
+      }
+      let nombreGrupo = null;
+      try {
+        const metadata = await sock.groupMetadata(targetJid);
+        nombreGrupo = String(metadata?.subject || '').trim() || null;
+      } catch (_) {}
+      await sock.sendMessage(targetJid, {
+        text: [
+          '🆔 ID DEL GRUPO',
+          '',
+          '👥 ' + (nombreGrupo || 'Grupo WhatsApp'),
+          '🆔 ' + targetJid,
+          '',
+          'Para asignarlo al comercial usa:',
+          '/asignargrupo'
+        ].join('\n')
+      }).catch(() => {});
+      return;
+    }
+
+    if (commandSelf === '/mi_grupo' || commandSelf === '/migrupo') {
+      const targetJid = String(message.key.remoteJid || '').trim();
+      try {
+        const grupo = await leerGrupoResultadosComercial(db, comercialId);
+        await sock.sendMessage(targetJid || sock.user?.id, {
+          text: grupo?.activo
+            ? ['📢 GRUPO DE RESULTADOS ACTUAL', '', '👥 ' + (grupo.nombre || 'Grupo WhatsApp'), '🆔 ' + grupo.destino_id].join('\n')
+            : 'ℹ️ No tienes un grupo de resultados asignado.'
         }).catch(() => {});
+      } catch (e) {
+        await sock.sendMessage(targetJid || sock.user?.id, { text: '❌ No se pudo consultar el grupo: ' + (e?.message || e) }).catch(() => {});
       }
       return;
     }
@@ -967,18 +1017,13 @@ async function recibirMensaje(db, sock, comercialId, message) {
       try {
         const grupo = await leerGrupoResultadosComercial(db, comercialId);
         await sock.sendMessage(targetJid || sock.user?.id, {
-          text: grupo?.activo
-            ? `📢 Grupo de resultados actual: ${grupo.destino_id}`
-            : 'ℹ️ No tienes un grupo de resultados asignado.'
+          text: grupo?.activo ? '📢 Grupo de resultados actual: ' + grupo.destino_id : 'ℹ️ No tienes un grupo de resultados asignado.'
         }).catch(() => {});
       } catch (e) {
-        await sock.sendMessage(targetJid || sock.user?.id, {
-          text: `❌ No se pudo consultar el grupo: ${e?.message || e}`
-        }).catch(() => {});
+        await sock.sendMessage(targetJid || sock.user?.id, { text: '❌ No se pudo consultar el grupo: ' + (e?.message || e) }).catch(() => {});
       }
       return;
     }
-
     const listaMenu = commandSelf.match(/^\/(lista|jugadas)$/);
     if (listaMenu) {
       const targetJid = String(message.key.remoteJid || '').trim();
