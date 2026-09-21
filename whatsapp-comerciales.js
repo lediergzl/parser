@@ -449,6 +449,36 @@ async function validarSorteoAbierto(db, sorteoId, loteriaId) {
     if (!abierto) throw new Error(`El sorteo ${sorteo.nombre} está cerrado. Horario: ${formatoHora(sorteo.hora_apertura)}-${formatoHora(sorteo.hora_cierre)} (Cuba).`);
   }
   return sorteo;}
+
+async function sorteoSigueValido(db, loteriaId, sorteoId) {
+  if (!loteriaId || !sorteoId) return null;
+
+  const [{ data: loteria, error: loteriaError }, { data: sorteo, error: sorteoError }] = await Promise.all([
+    db.from('loterias')
+      .select('id,nombre,activo')
+      .eq('id', Number(loteriaId))
+      .maybeSingle(),
+    db.from('sorteos')
+      .select('id,nombre,loteria_id,hora_apertura,hora_cierre,activo')
+      .eq('id', Number(sorteoId))
+      .maybeSingle()
+  ]);
+
+  if (loteriaError) throw loteriaError;
+  if (sorteoError) throw sorteoError;
+
+  if (!loteria?.activo || !sorteo?.activo) return null;
+  if (Number(sorteo.loteria_id) !== Number(loteria.id)) return null;
+  if (!sorteoEstaAbiertoAhora(sorteo)) return null;
+
+  return {
+    loteriaNombre: String(loteria.nombre || loteria.id),
+    sorteoNombre: String(sorteo.nombre || sorteo.id),
+    hora_apertura: sorteo.hora_apertura,
+    hora_cierre: sorteo.hora_cierre
+  };
+}
+
 async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, alternateJid = null }) {
   const db = supa();
   const textoOriginal = String(texto || '').trim();
@@ -1334,14 +1364,52 @@ async function recibirMensaje(db, sock, comercialId, message) {
     waIdentityAliases.set(aliasRemoteKey, senderJid);
     waIdentityAliases.set(aliasSenderKey, senderJid);
     programarSalidaAutomaticaWhatsApp(sock, db, comercialId, senderJid, remoteJid, key);
+
     try {
+      const prefPrevia = await obtenerPreferenciaWhatsApp(
+        db,
+        comercialId,
+        senderJid
+      );
+
+      const valida = prefPrevia?.loteria_id && prefPrevia?.sorteo_id
+        ? await sorteoSigueValido(
+            db,
+            prefPrevia.loteria_id,
+            prefPrevia.sorteo_id
+          )
+        : null;
+
+      if (valida) {
+        await sock.sendMessage(remoteJid, {
+          text:
+            `▶️ *Sesión reanudada*\\n\\n` +
+            `🎲 ${valida.loteriaNombre}\\n` +
+            `🎰 ${valida.sorteoNombre}\\n` +
+            `⏰ ${formatoHora(valida.hora_apertura)}-${formatoHora(valida.hora_cierre)}\\n\\n` +
+            `Ya puedes escribir tu jugada.\\n\\n` +
+            `Para cambiar: /loterias o /sorteos`
+        });
+
+        return;
+      }
+
+      // La selección anterior ya no es utilizable (inactiva, inconsistente
+      // o fuera de horario). En ese caso sí limpiamos la preferencia y
+      // mostramos nuevamente el menú.
       await reiniciarSesionWhatsApp(db, comercialId, senderJid);
     } catch (e) {
       activeBettingChats.delete(key);
-      cancelarSalidaAutomaticaWhatsApp(key);
-      console.error(`No se pudo reiniciar sesión WhatsApp ${comercialId}/${senderJid}:`, e);
-      return sock.sendMessage(remoteJid, { text: '❌ No pude iniciar una sesión de juego segura. Inténtalo nuevamente.' });
+      cancelarSalidaAutomatica(key);
+      console.error(
+        `No se pudo preparar sesión WhatsApp ${comercialId}/${senderJid}:`,
+        e
+      );
+      return sock.sendMessage(remoteJid, {
+        text: '❌ No pude iniciar una sesión de juego segura. Inténtalo nuevamente.'
+      });
     }
+
     await sendMainMenu(sock, remoteJid, interactiveJid);
     return;
   }
