@@ -262,6 +262,10 @@ async function anunciarResultadoAAdmins({ loteriaNombre, nombreSorteo, fecha, fi
 const resultadosAnunciados = new Set();
 const mensajesProcesados = new Set();
 const mensajesNoReconocidos = new Set();
+// Mayor msg.id visto por chat. Permite que las recuperaciones periódicas pidan
+// solo mensajes posteriores a lo ya leído, sin perder un resultado si su
+// procesamiento falla: el cursor avanza al terminar cada mensaje.
+const ultimoIdPorChat = new Map();
 let sincronizacionIniciadaAt = 0;
 let sincronizacionResultadosEnCurso = false;
 let temporizadorSincronizacionResultados = null;
@@ -446,7 +450,13 @@ async function procesarMensajeResultado(msg, origen = 'evento', idOrigen = null)
   });
 
   if (!guardado?.ok) return false;
-  if (mensajeId) mensajesProcesados.add(mensajeId);
+  if (mensajeId) {
+    mensajesProcesados.add(mensajeId);
+    if (msg.id != null) {
+      const actual = ultimoIdPorChat.get(chatId) || 0;
+      if (Number(msg.id) > Number(actual)) ultimoIdPorChat.set(chatId, Number(msg.id));
+    }
+  }
   return true;
 }
 
@@ -462,7 +472,10 @@ async function sincronizarResultadosRecientes(entidades) {
   try {
     let reconocidos = 0;
     for (const item of entidades) {
-      const mensajes = await conTimeout(global.__USERBOT_CLIENT__.getMessages(item.entity, { limit: 150 }), 25000, 'getMessages');
+      const chatIdMarcado = idChatMarcado(item.entity);
+    const minId = Number(ultimoIdPorChat.get(chatIdMarcado) || 0);
+    const opcionesConsulta = minId > 0 ? { limit: 50, minId } : { limit: 150 };
+    const mensajes = await conTimeout(global.__USERBOT_CLIENT__.getMessages(item.entity, opcionesConsulta), 25000, 'getMessages');
 
       for (const msg of [...mensajes].reverse()) {
         if (!msg?.message) continue;
@@ -565,10 +578,10 @@ async function iniciarUserbotResultados() {
     sincronizarResultadosRecientes(entidadesResultados).catch(e =>
       console.error('⚠️ Error en sincronización programada de resultados:', e?.stack || e)
     );
-  }, 30 * 1000);
+  }, 3 * 60 * 1000);
   if (temporizadorSincronizacionResultados.unref) temporizadorSincronizacionResultados.unref();
 
-  console.log('🔄 Recuperación automática de resultados activa cada 30 segundos.');
+  console.log('🔄 Recuperación automática de resultados activa cada 3 minutos (con minId incremental seguro).');
 }
 
 async function buscarUltimoResultadoEnChat(chat) {
