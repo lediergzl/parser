@@ -108,9 +108,29 @@ function textFromMessage(message) {
 // Extrae texto tambien en grupos. Solo se usa para comandos enviados
 // por el propio WhatsApp comercial (fromMe=true).
 function textFromMessageAnyChat(message) {
-  const m = message?.message;
+  let m = message?.message;
   if (!m) return '';
-  return String(m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || '').trim();
+
+  // WhatsApp puede envolver un texto normal dentro de ephemeral/view-once.
+  // Los comandos de grupo deben llegar al parser aunque vengan envueltos.
+  for (let i = 0; i < 4 && m; i++) {
+    const nested =
+      m.ephemeralMessage?.message ||
+      m.viewOnceMessage?.message ||
+      m.viewOnceMessageV2?.message ||
+      m.viewOnceMessageV2Extension?.message ||
+      m.editedMessage?.message;
+    if (!nested) break;
+    m = nested;
+  }
+
+  return String(
+    m.conversation ||
+    m.extendedTextMessage?.text ||
+    m.imageMessage?.caption ||
+    m.videoMessage?.caption ||
+    ''
+  ).trim();
 }
 
 function senderName(message) {
@@ -131,11 +151,51 @@ function normalizarJidPropio(valor) {
   return s;
 }
 
-function mensajeEsPropio(sock, message) {
+async function normalizarJidPropioConLid(sock, valor) {
+  const raw = String(valor || '').trim();
+  if (!raw) return '';
+
+  const normal = normalizarJidPropio(raw);
+  if (!normal.endsWith('@lid')) return normal;
+
+  try {
+    const mapping = sock?.signalRepository?.lidMapping;
+    if (mapping?.getPNForLID) {
+      const pn = await mapping.getPNForLID(normal);
+      if (pn) return normalizarJidPropio(pn);
+    }
+  } catch (_) {}
+
+  return normal;
+}
+
+async function mensajeEsPropio(sock, message) {
   if (message?.key?.fromMe === true) return true;
-  const propio = normalizarJidPropio(sock?.user?.id);
-  const candidatos = [message?.key?.participantPn, message?.key?.senderPn, message?.key?.participant, message?.key?.senderAlt];
-  return Boolean(propio && candidatos.some(v => normalizarJidPropio(v) === propio));
+
+  const propioRaw = String(sock?.user?.id || '').trim();
+  const propio = await normalizarJidPropioConLid(sock, propioRaw);
+  if (!propio) return false;
+
+  const key = message?.key || {};
+  const candidatos = [
+    key.participantPn,
+    key.senderPn,
+    key.participant,
+    key.participantAlt,
+    key.senderAlt,
+    key.senderLid,
+    key.participantLid,
+    key.remoteJidAlt,
+    key.recipientAlt,
+    key.recipientLid
+  ].filter(Boolean);
+
+  for (const candidato of candidatos) {
+    const normal = await normalizarJidPropioConLid(sock, candidato);
+    if (normal && normal === propio) return true;
+  }
+
+  return false;
 }
 
 function pngChunk(type, data) {
@@ -933,7 +993,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
   // en el chat privado de su propio WhatsApp. Ese mensaje y los botones
   // pueden regresar como fromMe=true, por lo que se procesa únicamente
   // si contiene una orden explícita de aprobar/rechazar una recarga WA.
-  if (mensajeEsPropio(sock, message)) {
+  if (await mensajeEsPropio(sock, message)) {
     const interactiveId = adaptIncomingInteractive(message);
     // Los comandos de configuracion pueden ejecutarse dentro de un grupo.
     // El flujo normal de clientes sigue ignorando mensajes de grupos.
@@ -1613,14 +1673,22 @@ async function conectarComercial(db, comercialId, force = false) {
 
     sock.ev.on('messages.upsert', async event => {
       if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
-      if (event.type !== 'notify' || event.requestId) return;
+      if (event.requestId) return;
 
       for (const message of event.messages || []) {        try {
+          // Los mensajes propios enviados desde el teléfono pueden llegar
+          // como "append" durante sincronizaciones/reconstrucciones de sesión.
+          // No procesamos historial ajeno, pero sí permitimos comandos propios
+          // dentro de grupos aunque el tipo del evento no sea "notify".
+          const ownMessage = await mensajeEsPropio(sock, message);
+          const remoteJid = String(message?.key?.remoteJid || '').trim();
+          const isGroup = remoteJid.endsWith('@g.us');
+          if (event.type !== 'notify' && !(ownMessage && isGroup)) continue;
           // Diagnóstico mínimo: confirma que Baileys está entregando el mensaje
           // antes de entrar al parser/comandos.
           const jid = String(message?.key?.remoteJid || '').trim();
           const fromMe = Boolean(message?.key?.fromMe);
-          const preview = textFromMessage(message).slice(0, 120);
+          const preview = textFromMessageAnyChat(message).slice(0, 120);
           const key = message?.key || {};
           const identity = {
             remoteJid: key.remoteJid || null,
