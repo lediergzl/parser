@@ -1980,7 +1980,7 @@ async function resolverCanalWhatsAppPorEnlace(comercialId, enlace) {
     throw new Error('La versión de Baileys instalada no expone newsletterMetadata().');
   }
 
-  const match = url.match(/(?:https?:\\/\\/)?(?:www\\.)?whatsapp\\.com\\/channel\\/([^/?#\\s]+)/i);
+  const match = url.match(new RegExp('^(?:https?:\\/\\/)?(?:www\\.)?whatsapp\\.com\\/channel\\/([^/?#\\s]+)', 'i'));
   const invite = match ? match[1] : url.replace(/^https?:\\/\\//i, '').replace(/^www\\./i, '');
   if (!invite) throw new Error('Enlace de canal de WhatsApp inválido.');
 
