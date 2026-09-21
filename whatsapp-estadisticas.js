@@ -33,6 +33,43 @@ function formatoWhatsApp(post) {
   return partes.join('\n\n');
 }
 
+async function payloadWhatsApp(post) {
+  const texto = formatoWhatsApp(post);
+  if (post.tipo === 'texto' || !global.__USERBOT_CLIENT__ || !entidadOrigen) return { text: texto };
+
+  try {
+    const mensajes = await global.__USERBOT_CLIENT__.getMessages(entidadOrigen, { ids: [Number(post.telegram_message_id)] });
+    const msg = Array.isArray(mensajes) ? mensajes[0] : mensajes;
+    if (!msg || !msg.media || typeof msg.downloadMedia !== 'function') return { text: texto };
+
+    const buffer = await msg.downloadMedia({});
+    if (!buffer || !Buffer.isBuffer(buffer) || buffer.length === 0) return { text: texto };
+    const maxBytes = 20 * 1024 * 1024;
+    if (buffer.length > maxBytes) {
+      console.warn('📎 Multimedia de estadísticas demasiado grande (' + buffer.length + ' bytes); se envía enlace.');
+      return { text: texto };
+    }
+
+    if (post.tipo === 'foto') return { image: buffer, caption: texto };
+
+    const media = msg.media;
+    const mime = String(media.mimeType || 'application/octet-stream');
+    let fileName = 'estadistica-' + post.telegram_message_id;
+    const attrs = Array.isArray(media.attributes) ? media.attributes : [];
+    const attrFile = attrs.find(x => x && x.className === 'DocumentAttributeFilename' && x.fileName);
+    if (attrFile) fileName = String(attrFile.fileName);
+
+    if (mime.startsWith('video/')) return { video: buffer, mimetype: mime, caption: texto };
+
+    if (mime.startsWith('audio/')) return { audio: buffer, mimetype: mime };
+
+    return { document: buffer, mimetype: mime, fileName: fileName, caption: texto };
+  } catch (e) {
+    console.warn('⚠️ No se pudo descargar multimedia de la estadística; se envía texto/enlace:', e && e.message ? e.message : e);
+    return { text: texto };
+  }
+}
+
 async function guardarPost(msg) {
   const chatId = String(msg.chatId != null ? msg.chatId : '');
   const messageId = Number(msg.id);
@@ -103,18 +140,28 @@ async function drenarOutbox() {
   try { sender = require('./whatsapp-comerciales'); } catch (e) { console.error('❌ Transporte estadísticas:', e.message || e); return; }
   const r = await supabase.from('whatsapp_estadisticas_outbox').select('id,post_id,comercial_telegram_id,destino_id,intentos').eq('estado','pendiente').order('creado_at',{ascending:true}).limit(30);
   if (r.error) { console.error('❌ Outbox estadísticas:', r.error.message || r.error); return; }
+  const payloadCache = new Map();
+
   for (const item of r.data || []) {
     const m = await supabase.from('whatsapp_estadisticas_modulo').select('habilitado,fecha_vencimiento').eq('comercial_telegram_id',item.comercial_telegram_id).maybeSingle();
-    const vigente = m.data && m.data.habilitado && (!m.data.fecha_vencimiento || new Date(m.data.fecha_vencimiento).getTime() >= Date.now());
+    const vigente = m.data && m.data.habilitado && (!m.data.fecha_inicio || new Date(m.data.fecha_inicio).getTime() <= Date.now()) && (!m.data.fecha_vencimiento || new Date(m.data.fecha_vencimiento).getTime() >= Date.now());
     if (!vigente) { await supabase.from('whatsapp_estadisticas_outbox').update({estado:'omitido',ultimo_error:'Módulo no vigente.'}).eq('id',item.id).eq('estado','pendiente'); continue; }
-    const p = await supabase.from('whatsapp_estadisticas_posts').select('id,texto,enlace_telegram,tipo').eq('id',item.post_id).maybeSingle();
+
+    const p = await supabase.from('whatsapp_estadisticas_posts').select('id,telegram_chat_id,telegram_message_id,texto,enlace_telegram,tipo').eq('id',item.post_id).maybeSingle();
     if (!p.data) { await supabase.from('whatsapp_estadisticas_outbox').update({estado:'omitido',ultimo_error:'Publicación no encontrada.'}).eq('id',item.id); continue; }
+
     const intento = Number(item.intentos || 0) + 1;
     await supabase.from('whatsapp_estadisticas_outbox').update({estado:'enviando',intentos:intento,ultimo_intento_at:new Date().toISOString(),ultimo_error:null}).eq('id',item.id).eq('estado','pendiente');
+
     try {
-      await sender.enviarMensajePorDestino(supabase, item.destino_id, formatoWhatsApp(p.data));
+      let payload = payloadCache.get(Number(item.post_id));
+      if (!payload) {
+        payload = await payloadWhatsApp(p.data);
+        payloadCache.set(Number(item.post_id), payload);
+      }
+      await sender.enviarMensajePorDestino(supabase, item.destino_id, '', { payload: payload });
       await supabase.from('whatsapp_estadisticas_outbox').update({estado:'enviado',enviado_at:new Date().toISOString(),ultimo_error:null}).eq('id',item.id).eq('estado','enviando');
-      console.log('📊 Estadística enviada: comercial=' + item.comercial_telegram_id + ' destino=' + item.destino_id);
+      console.log('📊 Estadística enviada: comercial=' + item.comercial_telegram_id + ' destino=' + item.destino_id + ' post=' + item.post_id);
     } catch (e) {
       await supabase.from('whatsapp_estadisticas_outbox').update({estado:'pendiente',ultimo_error:String(e && e.message || e).slice(0,1000)}).eq('id',item.id).eq('estado','enviando');
       console.error('⚠️ Estadística pendiente comercial=' + item.comercial_telegram_id + ':', e.message || e);
