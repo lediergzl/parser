@@ -1969,6 +1969,36 @@ async function enviarMensajePorDestino(db, destinoId, texto, opciones = {}) {
   await sock.sendMessage(destino, payload);
   return true;
 }
+async function resolverCanalWhatsAppPorEnlace(comercialId, enlace) {
+  const id = Number(comercialId);
+  const url = String(enlace || '').trim();
+  const sock = sockets.get(id);
+  if (!sock?.user?.id) {
+    throw new Error('El WhatsApp del comercial ' + id + ' no está conectado.');
+  }
+  if (!sock.newsletterMetadata) {
+    throw new Error('La versión de Baileys instalada no expone newsletterMetadata().');
+  }
+
+  const match = url.match(/(?:https?:\\/\\/)?(?:www\\.)?whatsapp\\.com\\/channel\\/([^/?#\\s]+)/i);
+  const invite = match ? match[1] : url.replace(/^https?:\\/\\//i, '').replace(/^www\\./i, '');
+  if (!invite) throw new Error('Enlace de canal de WhatsApp inválido.');
+
+  const metadata = await sock.newsletterMetadata('invite', invite);
+  const destino = String(metadata?.id || '').trim();
+  if (!destino || !destino.endsWith('@newsletter')) {
+    throw new Error('WhatsApp no devolvió un JID de canal válido.');
+  }
+
+  const nombre =
+    metadata?.name ||
+    metadata?.thread_metadata?.name?.text ||
+    metadata?.thread_metadata?.name ||
+    invite;
+
+  return { destino_id: destino, nombre: String(nombre || invite), enlace: url };
+}
+
 async function enviarMensajePorComercial(db, comercialId, destinoId, texto, opciones = {}) {
   const id = Number(comercialId);
   const destino = String(destinoId || '').trim();
@@ -2064,4 +2094,4 @@ async function registrarWhatsappComerciales(bot) {
   console.log(`✅ WhatsApp multi-comercial listo (${(comerciales || []).length} comerciales)`);
 }
 
-module.exports = { registrarWhatsappComerciales, conectarComercial, desconectarComercial, procesarJugadaWhatsApp, enviarMensajePorDestino, enviarMensajePorComercial };
+module.exports = { registrarWhatsappComerciales, conectarComercial, desconectarComercial, procesarJugadaWhatsApp, enviarMensajePorDestino, enviarMensajePorComercial, resolverCanalWhatsAppPorEnlace };
