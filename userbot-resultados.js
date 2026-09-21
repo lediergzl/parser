@@ -115,7 +115,7 @@ async function resolverLoteriaSorteo(loteriaNombre, nombreSorteo) {
 }
 
 function extraerNumero(texto, tipo) {
-  const re = new RegExp(`(?:${tipo})\\s*(?:3|4)?\\s*(?:[:=\\-]|=>)?\\s*(\\d{${tipo === 'pick3' ? 3 : 4}})(?!\\d)`, 'i');
+  const re = new RegExp(`(?:${tipo})\\\\s*(?:3|4)?\\\\s*(?:[:=\\\\-]|=>)?\\\\s*(\\\\d{${tipo === 'pick3' ? 3 : 4}})(?!\\\\d)`, 'i');
   const m = texto.match(re);
   return m ? m[1] : null;
 }
@@ -142,9 +142,6 @@ function parsearMensajeResultado(texto) {
   const nombreSorteo = CONCEPTO_A_SORTEO[loteriaKey][concepto];
   if (!nombreSorteo) return null;
 
-  // El mensaje real de Florida inserta emojis/símbolos entre "Pick 3" y el número
-  // (por ejemplo: "Pick 3 ➪ 617"). Trabajamos sobre el texto normalizado
-  // para que esos adornos no rompan la captura del número.
   const mPick3 = normalizado.match(/\bpick\s*3\s+(\d{3})(?!\d)/i);
   const mPick4 = normalizado.match(/\bpick\s*4\s+(\d{4})(?!\d)/i);
   if (!mPick3 && !mPick4) return null;
@@ -187,7 +184,6 @@ function parsearFechaTexto(texto, referencia = new Date()) {
   const m = s.match(/\b(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})\b/);
   if (m) {
     const a = Number(m[1]), b = Number(m[2]), y = Number(m[3]);
-    // Las publicaciones de las loterías de EE. UU. usan normalmente MM/DD.
     if (a <= 12) candidatos.push(new Date(y, a - 1, b));
     if (b <= 12) candidatos.push(new Date(y, b - 1, a));
   }
@@ -230,7 +226,7 @@ async function anunciarResultadoAAdmins({ loteriaNombre, nombreSorteo, fecha, fi
     ganadores > 0
       ? `🏆 Ganadores detectados: *${ganadores}* (premios nuevos: ${registrados})`
       : '✅ Sin jugadas ganadoras en este sorteo.'
-  ].join('\n');
+  ].join('\\n');
 
   for (const adminId of adminIds) {
     try {
@@ -331,9 +327,6 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
       loteriaId,
       sorteoId,
     };
-    // El evento de RESULTADO es independiente de PREMIOS.
-    // Se emite después de persistir el resultado para que WhatsApp pueda
-    // guardarlo en su outbox persistente.
     bus.emit('resultado:recibido', payload);
     await anunciarResultadoAAdmins(payload);
   }
@@ -396,7 +389,6 @@ async function procesarMensajeResultado(msg, origen = 'evento', idOrigen = null)
     fecha: parsed.fecha,
   });
 
-  // Solo marcar el mensaje como procesado después de que Supabase confirme.
   if (!guardado?.ok) return false;
   if (mensajeId) mensajesProcesados.add(mensajeId);
   return true;
