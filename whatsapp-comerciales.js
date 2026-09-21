@@ -1488,14 +1488,41 @@ async function conectarComercial(db, comercialId, force = false) {
     let lock = locks.get(id);
     if (!lock) { lock = crearLockSesionWhatsapp(db, `commercial:${id}`); locks.set(id, lock); }
     await lock.esperarYAdquirir();
-    if (socketGenerations.get(id) !== generation) return sockets.get(id) || null;
 
-    const authState = await useSupabaseAuthState(db, `commercial:${id}`);
+    if (socketGenerations.get(id) !== generation) {
+      await lock.liberar().catch(() => {});
+      return sockets.get(id) || null;
+    }
+
+    let authState;
+    try {
+      authState = await useSupabaseAuthState(db, `commercial:${id}`);
+    } catch (error) {
+      await lock.liberar().catch(() => {});
+      throw error;
+    }
+
     authStates.set(id, authState);
     const { state, saveCreds } = authState;
-    if (socketGenerations.get(id) !== generation) return sockets.get(id) || null;
 
-    const sock = makeWASocket({ auth: state, printQRInTerminal: false, markOnlineOnConnect: false, shouldSyncHistoryMessage: () => false });
+    if (socketGenerations.get(id) !== generation) {
+      await lock.liberar().catch(() => {});
+      return sockets.get(id) || null;
+    }
+
+    let sock;
+    try {
+      sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+        markOnlineOnConnect: false,
+        shouldSyncHistoryMessage: () => false
+      });
+    } catch (error) {
+      await lock.liberar().catch(() => {});
+      throw error;
+    }
+
     sock.__lotoComercialId = id;
     sockets.set(id, sock);
 
