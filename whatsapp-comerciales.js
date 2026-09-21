@@ -1627,6 +1627,15 @@ async function conectarComercial(db, comercialId, force = false) {
     sock.__lotoComercialId = id;
     sockets.set(id, sock);
 
+    // Si otra instancia adquiere el lease porque este proceso perdió la
+    // renovación, este socket DEBE cerrarse inmediatamente. Mantenerlo vivo
+    // después de perder el lock permitiría que dos sockets escribieran la
+    // misma sesión Signal y volveríamos al patrón Bad MAC / connectionReplaced.
+    lock.setOnLost(() => {
+      console.error(`🚨 WA ${id}: se perdió el lock distribuido; cerrando socket para evitar doble sesión.`);
+      try { sock.end(new Error('WhatsApp session lock lost')); } catch (_) {}
+    });
+
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('connection.update', async update => {
       if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
