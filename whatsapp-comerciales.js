@@ -1613,11 +1613,41 @@ async function conectarComercial(db, comercialId, force = false) {
 
     let sock;
     try {
+      // Baileys 6.7.x puede recibir mensajes propios con addressingMode=LID
+      // que intenta descifrar usando la sesión LID equivocada y termina en:
+      // "Bad MAC" / "No matching sessions found for message".
+      // Este bot solo necesita mensajes ENTRANTES de clientes/comerciales;
+      // los mensajes enviados por el propio WhatsApp no deben entrar al
+      // pipeline de jugadas. Ignoramos únicamente el JID del propio usuario
+      // antes de que Baileys intente descifrarlo.
+      const mismoUsuarioWhatsApp = (jid, propio) => {
+        const normalizar = value => String(value || '')
+          .trim()
+          .replace(/:\\d+(?=@)/, '');
+        const a = normalizar(jid);
+        const b = normalizar(propio);
+        return Boolean(a && b && a === b);
+      };
+
       sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
         markOnlineOnConnect: false,
-        shouldSyncHistoryMessage: () => false
+        shouldSyncHistoryMessage: () => false,
+        shouldIgnoreJid: jid => {
+          const propioPn = state?.creds?.me?.id;
+          const propioLid = state?.creds?.me?.lid;
+          const ignorar = mismoUsuarioWhatsApp(jid, propioPn)
+            || mismoUsuarioWhatsApp(jid, propioLid);
+
+          if (ignorar) {
+            console.log(
+              `🛡️ WA ${id}: ignorando mensaje propio antes del descifrado jid=${jid}`
+            );
+          }
+
+          return ignorar;
+        }
       });
     } catch (error) {
       await lock.liberar().catch(() => {});
