@@ -1623,7 +1623,7 @@ async function conectarComercial(db, comercialId, force = false) {
       const mismoUsuarioWhatsApp = (jid, propio) => {
         const normalizar = value => String(value || '')
           .trim()
-          .replace(/:\\d+(?=@)/, '');
+          .replace(/:\d+(?=@)/, '');
         const a = normalizar(jid);
         const b = normalizar(propio);
         return Boolean(a && b && a === b);
