@@ -5,6 +5,7 @@ const { DisconnectReason } = require('@whiskeysockets/baileys');
 const { adaptIncomingInteractive, sendNative, sendMainMenu, sendLotteryMenu, sendDrawMenu, sendConfirmationMenu } = require('./lib/wa-menu');
 const { procesarMensajeDeposito, resolverSolicitudWhatsApp } = require('./wa-deposit-preload');
 const { normalizarEntradaJugada, detectarNumerosAmbiguos, validarLimites } = require('./lib/jugada-input');
+const { guardarGrupoResultadosComercial, leerGrupoResultadosComercial } = require('./lib/whatsapp-destino');
 
 const sockets = new Map();
 const authStates = new Map();
@@ -919,6 +920,64 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const commandSelf = normalizeCommand(textoSelf);
     const aprobarSelf = commandSelf.match(/^\/aprobar_recarga\s+(\d+)$/);
     const rechazarSelf = commandSelf.match(/^\/rechazar_recarga\s+(\d+)$/);
+
+    // Configuración del grupo de resultados del propio comercial.
+    // Se ejecuta desde el WhatsApp comercial: basta enviar el comando dentro
+    // del grupo que se quiere asignar.
+    if (commandSelf === '/wa_grupo_resultados') {
+      const targetJid = String(message.key.remoteJid || '').trim();
+      if (!targetJid.endsWith('@g.us')) {
+        await sock.sendMessage(targetJid || sock.user?.id, {
+          text: '⚠️ Este comando debe enviarse dentro del grupo de WhatsApp que quieres asignar para recibir resultados y premios.'
+        }).catch(() => {});
+        return;
+      }
+      try {
+        const grupo = await guardarGrupoResultadosComercial(
+          db,
+          comercialId,
+          targetJid,
+          null
+        );
+        await sock.sendMessage(targetJid, {
+          text: [
+            '✅ GRUPO DE RESULTADOS ASIGNADO',
+            '',
+            `👤 Comercial: ${comercialId}`,
+            `👥 Grupo: ${grupo.destino_id}`,
+            '',
+            'Este grupo recibirá:',
+            '🎲 resultados de los sorteos',
+            '🏆 premios correspondientes a las jugadas de este comercial',
+            '',
+            'Para cambiarlo, ejecuta /wa_grupo_resultados dentro del nuevo grupo.'
+          ].join('\n')
+        }).catch(() => {});
+      } catch (e) {
+        console.error(`[WA RESULTADOS] No se pudo asignar grupo al comercial ${comercialId}:`, e?.message || e);
+        await sock.sendMessage(targetJid, {
+          text: `❌ No se pudo asignar este grupo: ${e?.message || e}`
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    if (commandSelf === '/wa_ver_grupo_resultados') {
+      const targetJid = String(message.key.remoteJid || '').trim();
+      try {
+        const grupo = await leerGrupoResultadosComercial(db, comercialId);
+        await sock.sendMessage(targetJid || sock.user?.id, {
+          text: grupo?.activo
+            ? `📢 Grupo de resultados actual: ${grupo.destino_id}`
+            : 'ℹ️ No tienes un grupo de resultados asignado.'
+        }).catch(() => {});
+      } catch (e) {
+        await sock.sendMessage(targetJid || sock.user?.id, {
+          text: `❌ No se pudo consultar el grupo: ${e?.message || e}`
+        }).catch(() => {});
+      }
+      return;
+    }
 
     const listaMenu = commandSelf.match(/^\/(lista|jugadas)$/);
     if (listaMenu) {
