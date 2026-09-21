@@ -67,21 +67,18 @@ if (!bot) {
       // jugada:procesada -> WhatsApp
       // resultado:recibido -> WhatsApp
       // premio:detectado -> WhatsApp
-      try {
-        await conectarWhatsapp(supabase);
-        console.log('✅ Sender WhatsApp de jugadas/resultados iniciado.');
-      } catch (err) {
-        console.error('❌ No se pudo iniciar el sender WhatsApp de jugadas/resultados:', err && err.stack ? err.stack : err);
-      }
+      conectarWhatsapp(supabase)
+        .then(() => console.log('✅ Sender WhatsApp de jugadas/resultados iniciado.'))
+        .catch(err => console.error('❌ No se pudo iniciar el sender WhatsApp de jugadas/resultados:', err && err.stack ? err.stack : err));
     })
     .then(async () => {
-      // El userbot de resultados se inicia DESPUÉS del sender de WhatsApp.
-      // Así ningún resultado/premio puede emitirse antes de que existan sus
-      // listeners de WhatsApp. Los eventos del bus son efímeros.
+      // El sender suscribe el bus y persiste eventos en el outbox antes de
+      // adquirir el lock de WhatsApp. Por eso el userbot de resultados puede
+      // arrancar en paralelo sin perder resultados mientras Baileys conecta.
       try {
         const userbotResultados = require('./userbot-resultados');
         await userbotResultados.iniciarUserbotResultados();
-        console.log('✅ Userbot de resultados iniciado después del sender WhatsApp.');
+        console.log('✅ Userbot de resultados iniciado; entregas WhatsApp protegidas por outbox.');
       } catch (err) {
         console.error('❌ Userbot de resultados no pudo iniciar:', err && err.stack ? err.stack : err);
       }
