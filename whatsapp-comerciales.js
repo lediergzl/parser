@@ -2065,6 +2065,56 @@ async function registrarWhatsappComerciales(bot) {
     await sendQr(ctx.from.id, data.ultimo_qr, { force: true });
   });
 
+  bot.command('wa_canal_estadisticas', async ctx => {
+    const role = await commercialRole(db, ctx.from.id);
+    if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Solo un comercial puede configurar su canal de estadísticas.');
+
+    const enlace = String(ctx.message?.text || '').trim().split(/\s+/).slice(1).join(' ').trim();
+    if (!enlace) {
+      const r = await db
+        .from('whatsapp_estadisticas_canales')
+        .select('enlace,destino_id,nombre,activo')
+        .eq('comercial_telegram_id', ctx.from.id)
+        .maybeSingle();
+      if (r.error) return ctx.reply('❌ No se pudo consultar el canal: ' + r.error.message);
+      if (!r.data) return ctx.reply('ℹ️ No tienes un canal de estadísticas configurado.');
+      return ctx.reply([
+        '📣 Tu canal de estadísticas',
+        'Estado: ' + (r.data.activo ? '🟢 ACTIVO' : '🔴 INACTIVO'),
+        'Nombre: ' + (r.data.nombre || '—'),
+        'JID: ' + r.data.destino_id,
+        'Enlace: ' + r.data.enlace
+      ].join('\n'));
+    }
+
+    try {
+      const canal = await resolverCanalWhatsAppPorEnlace(ctx.from.id, enlace);
+      const r = await db
+        .from('whatsapp_estadisticas_canales')
+        .upsert({
+          comercial_telegram_id: Number(ctx.from.id),
+          enlace: canal.enlace,
+          destino_id: canal.destino_id,
+          nombre: canal.nombre,
+          activo: true,
+          actualizado_at: new Date().toISOString()
+        }, { onConflict: 'comercial_telegram_id' });
+
+      if (r.error) throw r.error;
+
+      return ctx.reply([
+        '✅ Canal de estadísticas configurado.',
+        'Nombre: ' + canal.nombre,
+        'JID: ' + canal.destino_id,
+        '',
+        'Las estadísticas del módulo se publicarán en este canal.'
+      ].join('\n'));
+    } catch (e) {
+      console.error('❌ Error configurando canal de estadísticas:', e);
+      return ctx.reply('❌ No pude configurar el canal: ' + String(e?.message || e));
+    }
+  });
+
   bot.command('wa_estado', async ctx => {
     const role = await commercialRole(db, ctx.from.id);
     if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Sin permiso.');
