@@ -78,7 +78,12 @@ if (!bot) {
       try {
         const userbotResultados = require('./userbot-resultados');
         await userbotResultados.iniciarUserbotResultados();
-        console.log('✅ Userbot de resultados iniciado; entregas WhatsApp protegidas por outbox.');
+
+        const estadisticas = require('./whatsapp-estadisticas');
+        await estadisticas.registrarComandos(bot);
+        await estadisticas.iniciarEstadisticas();
+
+        console.log('✅ Userbot de resultados + módulo de estadísticas iniciado; entregas WhatsApp protegidas por outbox.');
       } catch (err) {
         console.error('❌ Userbot de resultados no pudo iniciar:', err && err.stack ? err.stack : err);
       }
