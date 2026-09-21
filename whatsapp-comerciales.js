@@ -204,7 +204,7 @@ async function sendQr(id, qr, options = {}) {
   const ok = await telegramPhoto(
     id,
     qrToPng(qr),
-    '📲 QR PARA VINCULAR EL WHATSAPP DEL COMERCIAL\\n\\nEn WhatsApp: Ajustes → Dispositivos vinculados → Vincular dispositivo.\\n\\n⚠️ Este QR es temporal. Si ya vinculaste el WhatsApp, ignora cualquier QR posterior y revisa /wa_estado.'
+    '📲 QR PARA VINCULAR EL WHATSAPP DEL COMERCIAL\n\nEn WhatsApp: Ajustes → Dispositivos vinculados → Vincular dispositivo.\n\n⚠️ Este QR es temporal. Si ya vinculaste el WhatsApp, ignora cualquier QR posterior y revisa /wa_estado.'
   );
   if (!ok) await telegramText(id, '⚠️ No pude enviarte el QR. Usa /wa_qr para solicitar el más reciente.');
   return ok;
@@ -444,12 +444,12 @@ async function procesarJugadaWhatsApp({ comercialId, texto, senderJid, alternate
   const limite = await validarLimites(db, pref.loteria_id, pref.sorteo_id, fecha, detalle);
   if (limite) {
     const error = new Error(
-      'Límite excedido.\\n\\n' +
-      'Número: ' + limite.numero + '\\n' +
-      'Tipo: ' + limite.tipo + '\\n' +
-      'Acumulado anterior: $' + Number(limite.anterior).toFixed(2) + '\\n' +
-      'Esta jugada: $' + Number(limite.actual).toFixed(2) + '\\n' +
-      'Límite: $' + Number(limite.limite).toFixed(2) + '\\n\\n' +
+      'Límite excedido.\n\n' +
+      'Número: ' + limite.numero + '\n' +
+      'Tipo: ' + limite.tipo + '\n' +
+      'Acumulado anterior: $' + Number(limite.anterior).toFixed(2) + '\n' +
+      'Esta jugada: $' + Number(limite.actual).toFixed(2) + '\n' +
+      'Límite: $' + Number(limite.limite).toFixed(2) + '\n\n' +
       'La jugada no fue guardada.'
     );
     error.code = 'BET_LIMIT_EXCEEDED';
@@ -758,10 +758,10 @@ async function enviarMenuListaSorteosWhatsApp(db, sock, targetJid) {
   });
 
   if (sorteos.length <= 3) {
-    return sendNative(sock, targetJid, '📋 LISTA DE JUGADAS\\n\\nSelecciona un sorteo:', quick, texto);
+    return sendNative(sock, targetJid, '📋 LISTA DE JUGADAS\n\nSelecciona un sorteo:', quick, texto);
   }
 
-  return sendNative(sock, targetJid, '📋 LISTA DE JUGADAS\\n\\nSelecciona un sorteo:', [
+  return sendNative(sock, targetJid, '📋 LISTA DE JUGADAS\n\nSelecciona un sorteo:', [
     { name: 'single_select', params: { title: 'Seleccionar sorteo', sections: [{ title: 'Sorteos disponibles', rows }] } }
   ], texto);
 }
@@ -1033,7 +1033,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
       } catch (e) {
         console.error('[WA JUGADAS] error generando menú de sorteos:', e?.stack || e);
         await sock.sendMessage(targetJid, {
-          text: `❌ No se pudo mostrar el menú de sorteos.\\n\\n${e?.message || e}`
+          text: `❌ No se pudo mostrar el menú de sorteos.\n\n${e?.message || e}`
         }).catch(() => {});
       }
       return;
@@ -1047,7 +1047,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
         await enviarListaJugadasWhatsApp(db, sock, comercialId, targetJid, Number(listaSorteoMatch[1]));
       } catch (e) {
         console.error('[WA JUGADAS] error generando lista:', e?.stack || e);        await sock.sendMessage(targetJid, {
-          text: `❌ No se pudo generar la lista de jugadas.\\n\\n${e?.message || e}`
+          text: `❌ No se pudo generar la lista de jugadas.\n\n${e?.message || e}`
         }).catch(() => {});
       }
       return;
@@ -1084,7 +1084,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
     } catch (e) {
       console.error('[WA DEPOSITO] decisión del comercial por WhatsApp:', e);
       await sock.sendMessage(String(message.key.remoteJid || sock.user?.id || '').trim(), {
-        text: `❌ No se pudo procesar la recarga #${requestId}.\\n\\n${e?.message || e}`
+        text: `❌ No se pudo procesar la recarga #${requestId}.\n\n${e?.message || e}`
       }).catch(() => {});
     }
     return;
@@ -1123,14 +1123,14 @@ async function recibirMensaje(db, sock, comercialId, message) {
   if (command === '/registrar' || command === '/registro') {
     registrationStates.set(key, { comercialId, senderJid, remoteJid });
     await sock.sendMessage(remoteJid, {
-      text: '📝 REGISTRO DE CLIENTE\\n\\nEscribe ahora tu nombre. Ese nombre quedará vinculado a este WhatsApp con este comercial.\\n\\nEjemplo: Juan Pérez'
+      text: '📝 REGISTRO DE CLIENTE\n\nEscribe ahora tu nombre. Ese nombre quedará vinculado a este WhatsApp con este comercial.\n\nEjemplo: Juan Pérez'
     });
     return;
   }
 
   const registrationState = registrationStates.get(key);
   if (registrationState && !command.startsWith('/')) {
-    const nombre = String(texto || '').trim().replace(/\\s+/g, ' ').slice(0, 120);
+    const nombre = String(texto || '').trim().replace(/\s+/g, ' ').slice(0, 120);
     if (!nombre) {
       await sock.sendMessage(remoteJid, { text: '❌ Debes escribir un nombre válido.' });
       return;
@@ -1162,7 +1162,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
         if (error) throw error;
         registrationStates.delete(key);
         await sock.sendMessage(remoteJid, {
-          text: `✅ Registro actualizado.\\n\\n👤 Cliente: ${actualizado.nombre}\\n📱 WhatsApp vinculado correctamente.\\n💰 Saldo: ${Number(actualizado.saldo || 0).toFixed(2)}\\n\\nAhora puedes usar /depositar para solicitar una recarga.`
+          text: `✅ Registro actualizado.\n\n👤 Cliente: ${actualizado.nombre}\n📱 WhatsApp vinculado correctamente.\n💰 Saldo: ${Number(actualizado.saldo || 0).toFixed(2)}\n\nAhora puedes usar /depositar para solicitar una recarga.`
         });
         return;
       }
@@ -1190,7 +1190,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
         if (error) throw error;
         registrationStates.delete(key);
         await sock.sendMessage(remoteJid, {
-          text: `✅ Registro completado.\\n\\n👤 Cliente: ${actualizado.nombre}\\n📱 WhatsApp vinculado correctamente.\\n💰 Saldo: ${Number(actualizado.saldo || 0).toFixed(2)}\\n\\nAhora puedes usar /depositar para solicitar una recarga.`
+          text: `✅ Registro completado.\n\n👤 Cliente: ${actualizado.nombre}\n📱 WhatsApp vinculado correctamente.\n💰 Saldo: ${Number(actualizado.saldo || 0).toFixed(2)}\n\nAhora puedes usar /depositar para solicitar una recarga.`
         });
         return;
       }
@@ -1208,12 +1208,12 @@ async function recibirMensaje(db, sock, comercialId, message) {
 
       registrationStates.delete(key);
       await sock.sendMessage(remoteJid, {
-        text: `✅ Registro completado.\\n\\n👤 Cliente: ${nuevo.nombre}\\n📱 WhatsApp vinculado correctamente.\\n💰 Saldo: ${Number(nuevo.saldo || 0).toFixed(2)}\\n\\nAhora puedes usar /depositar para solicitar una recarga.`
+        text: `✅ Registro completado.\n\n👤 Cliente: ${nuevo.nombre}\n📱 WhatsApp vinculado correctamente.\n💰 Saldo: ${Number(nuevo.saldo || 0).toFixed(2)}\n\nAhora puedes usar /depositar para solicitar una recarga.`
       });
     } catch (e) {
       console.error('[WA REGISTRO] error:', e);
       registrationStates.delete(key);
-      await sock.sendMessage(remoteJid, { text: `❌ No se pudo completar el registro.\\n\\n${String(e?.message || e)}\\n\\nSi ya estás registrado con el comercial, usa /saldo o /depositar.` });
+      await sock.sendMessage(remoteJid, { text: `❌ No se pudo completar el registro.\n\n${String(e?.message || e)}\n\nSi ya estás registrado con el comercial, usa /saldo o /depositar.` });
     }
     return;
   }
