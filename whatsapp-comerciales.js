@@ -1969,6 +1969,25 @@ async function enviarMensajePorDestino(db, destinoId, texto, opciones = {}) {
   await sock.sendMessage(destino, payload);
   return true;
 }
+async function enviarMensajePorComercial(db, comercialId, destinoId, texto, opciones = {}) {
+  const id = Number(comercialId);
+  const destino = String(destinoId || '').trim();
+  if (!Number.isFinite(id)) throw new Error('Comercial WhatsApp inválido.');
+  if (!destino) throw new Error('Canal WhatsApp vacío.');
+
+  const sock = sockets.get(id);
+  if (!sock?.user?.id) {
+    throw new Error('El WhatsApp del comercial ' + id + ' no está conectado.');
+  }
+
+  const payload = opciones && opciones.payload
+    ? opciones.payload
+    : { text: String(texto || '') };
+
+  await sock.sendMessage(destino, payload);
+  return true;
+}
+
 async function desconectarComercial(db, id) {
   const numericId = Number(id);
   const timer = reconnectTimers.get(numericId);
@@ -2045,4 +2064,4 @@ async function registrarWhatsappComerciales(bot) {
   console.log(`✅ WhatsApp multi-comercial listo (${(comerciales || []).length} comerciales)`);
 }
 
-module.exports = { registrarWhatsappComerciales, conectarComercial, desconectarComercial, procesarJugadaWhatsApp, enviarMensajePorDestino };
+module.exports = { registrarWhatsappComerciales, conectarComercial, desconectarComercial, procesarJugadaWhatsApp, enviarMensajePorDestino, enviarMensajePorComercial };
