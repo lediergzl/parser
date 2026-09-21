@@ -29,7 +29,6 @@ function formatoWhatsApp(post) {
   const partes = ['📊 *ESTADÍSTICAS*'];
   if (post.texto) partes.push(post.texto);
   if (post.tipo !== 'texto') partes.push('📎 Publicación con multimedia.');
-  if (post.enlace_telegram) partes.push('🔗 ' + post.enlace_telegram);
   return partes.join('\n\n');
 }
 
@@ -65,7 +64,7 @@ async function payloadWhatsApp(post) {
 
     return { document: buffer, mimetype: mime, fileName: fileName, caption: texto };
   } catch (e) {
-    console.warn('⚠️ No se pudo descargar multimedia de la estadística; se envía texto/enlace:', e && e.message ? e.message : e);
+    console.warn('⚠️ No se pudo descargar multimedia de la estadística; se envía solo el texto:', e && e.message ? e.message : e);
     return { text: texto };
   }
 }
