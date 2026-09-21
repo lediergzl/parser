@@ -100,13 +100,13 @@ async function destinosActivos() {
   const grupos = await supabase.from('whatsapp_comercial_resultados').select('comercial_telegram_id,destino_id,nombre,activo').in('comercial_telegram_id', ids).eq('activo', true);
   if (grupos.error) throw grupos.error;
   const mapa = new Map((grupos.data || []).map(g => [Number(g.comercial_telegram_id), g]));
-  return mods.data.map(m => { const g = mapa.get(Number(m.comercial_telegram_id)); return g ? { comercial_telegram_id: Number(m.comercial_telegram_id), destino_id: String(g.destino_id).trim(), nombre: g.nombre || g.destino_id } : null; }).filter(Boolean);
+  return mods.data.map(m => { const g = mapa.get(Number(m.comercial_telegram_id)); return g ? { comercial_telegram_id: Number(m.comercial_telegram_id), destino_id: String(g.destino_id).trim(), nombre: g.nombre || g.destino_id, fecha_inicio: m.fecha_inicio || null } : null; }).filter(Boolean);
 }
 
 async function encolar(post) {
   const destinos = await destinosActivos();
   if (!destinos.length) return 0;
-  const filas = destinos.map(d => ({ post_id: Number(post.id), comercial_telegram_id: d.comercial_telegram_id, destino_id: d.destino_id, estado: 'pendiente', intentos: 0 }));
+  const filas = destinos.filter(d => {\n    if (!d.fecha_inicio || !post.fecha_publicacion) return true;\n    return new Date(post.fecha_publicacion).getTime() >= new Date(d.fecha_inicio).getTime();\n  }).map(d => ({ post_id: Number(post.id), comercial_telegram_id: d.comercial_telegram_id, destino_id: d.destino_id, estado: 'pendiente', intentos: 0 }));\n  if (!filas.length) return 0;
   const r = await supabase.from('whatsapp_estadisticas_outbox').upsert(filas, { onConflict: 'post_id,comercial_telegram_id', ignoreDuplicates: true });
   if (r.error) throw r.error;
   return filas.length;
@@ -169,9 +169,24 @@ async function drenarOutbox() {
       .eq('comercial_telegram_id',item.comercial_telegram_id)
       .maybeSingle();
 
+    const p = await supabase
+      .from('whatsapp_estadisticas_posts')
+      .select('id,telegram_chat_id,telegram_message_id,fecha_publicacion,texto,enlace_telegram,tipo')
+      .eq('id',item.post_id)
+      .maybeSingle();
+
+    if (!p.data) {
+      await supabase.from('whatsapp_estadisticas_outbox')
+        .update({estado:'omitido',ultimo_error:'Publicación no encontrada.'})
+        .eq('id',item.id).eq('estado','pendiente');
+      continue;
+    }
+
+    const inicioModulo = m.data && m.data.fecha_inicio ? new Date(m.data.fecha_inicio).getTime() : null;
+    const fechaPublicacion = p.data && p.data.fecha_publicacion ? new Date(p.data.fecha_publicacion).getTime() : null;
     const vigente = m.data &&
       m.data.habilitado &&
-      (!m.data.fecha_inicio || new Date(m.data.fecha_inicio).getTime() <= Date.now()) &&
+      (!inicioModulo || inicioModulo <= Date.now()) &&
       (!m.data.fecha_vencimiento || new Date(m.data.fecha_vencimiento).getTime() >= Date.now());
 
     if (!vigente) {
@@ -181,15 +196,9 @@ async function drenarOutbox() {
       continue;
     }
 
-    const p = await supabase
-      .from('whatsapp_estadisticas_posts')
-      .select('id,telegram_chat_id,telegram_message_id,texto,enlace_telegram,tipo')
-      .eq('id',item.post_id)
-      .maybeSingle();
-
-    if (!p.data) {
+    if (inicioModulo && fechaPublicacion && fechaPublicacion < inicioModulo) {
       await supabase.from('whatsapp_estadisticas_outbox')
-        .update({estado:'omitido',ultimo_error:'Publicación no encontrada.'})
+        .update({estado:'omitido',ultimo_error:'Publicación anterior al inicio del módulo.'})
         .eq('id',item.id).eq('estado','pendiente');
       continue;
     }
