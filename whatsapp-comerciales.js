@@ -1980,8 +1980,20 @@ async function resolverCanalWhatsAppPorEnlace(comercialId, enlace) {
     throw new Error('La versión de Baileys instalada no expone newsletterMetadata().');
   }
 
-  const match = url.match(new RegExp('^(?:https?:\\/\\/)?(?:www\\.)?whatsapp\\.com\\/channel\\/([^/?#\\s]+)', 'i'));
-  const invite = match ? match[1] : url.replace(/^https?:\\/\\//i, '').replace(/^www\\./i, '');
+  const lower = url.toLowerCase();
+  const marker = '/channel/';
+  const pos = lower.indexOf(marker);
+  let invite = '';
+
+  if (pos >= 0) {
+    invite = url.slice(pos + marker.length).split(/[/?#\s]/, 1)[0];
+  } else {
+    invite = url
+      .replace(/^https?:\/\//i, '')
+      .replace(/^www\./i, '')
+      .trim();
+  }
+
   if (!invite) throw new Error('Enlace de canal de WhatsApp inválido.');
 
   const metadata = await sock.newsletterMetadata('invite', invite);
@@ -1998,7 +2010,6 @@ async function resolverCanalWhatsAppPorEnlace(comercialId, enlace) {
 
   return { destino_id: destino, nombre: String(nombre || invite), enlace: url };
 }
-
 async function enviarMensajePorComercial(db, comercialId, destinoId, texto, opciones = {}) {
   const id = Number(comercialId);
   const destino = String(destinoId || '').trim();
