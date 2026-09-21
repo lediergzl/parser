@@ -401,6 +401,18 @@ async function procesarMensajeResultado(msg, origen = 'evento', idOrigen = null)
     return false;
   }
 
+  // Los resultados operativos solo son válidos para la fecha actual de Cuba.
+  // Esto evita que la recuperación automática publique hoy resultados de ayer
+  // (o de cualquier fecha histórica) aunque sigan visibles en el chat fuente.
+  const fechaHoy = fechaActualCuba();
+  if (parsed.fecha !== fechaHoy) {
+    console.log(
+      `⏭️ Resultado descartado por fecha: ${parsed.loteriaNombre} - ${parsed.nombreSorteo} ` +
+      `fecha=${parsed.fecha || 'sin fecha'}; hoy=${fechaHoy}`
+    );
+    return false;
+  }
+
   if (idOrigen != null) {
     try {
       const remitente = await msg.getSender();
@@ -459,7 +471,10 @@ async function sincronizarResultadosRecientes(entidades) {
           ? msg.date
           : (msg.date ? new Date(msg.date * 1000) : null);
 
-        if (fechaMsg && (Date.now() - fechaMsg.getTime()) > 36 * 60 * 60 * 1000) continue;
+        // La sincronización es solo de la fecha operativa actual de Cuba.
+        // No recuperamos resultados de días anteriores aunque estén dentro del
+        // margen temporal de Telegram.
+        if (fechaMsg && fechaCubaDe(fechaMsg) !== fechaActualCuba()) continue;
         if (fechaMsg && (Date.now() - fechaMsg.getTime()) < -10 * 60 * 1000) continue;
 
         try {
