@@ -1937,14 +1937,13 @@ async function conectarComercial(db, comercialId, force = false) {
   }
 }
 
-async function enviarMensajePorDestino(db, destinoId, texto) {
+async function enviarMensajePorDestino(db, destinoId, texto, opciones = {}) {
   const destino = String(destinoId || '').trim();
   if (!destino) throw new Error('Destino WhatsApp vacío.');
 
   // Si el destino pertenece a un comercial, usamos exactamente su socket.
-  // Para grupos públicos sin comercial asociado usamos cualquier socket
-  // comercial conectado como emisor. Así nunca se abre una segunda sesión
-  // Baileys solo para publicar resultados.
+  // Para destinos públicos sin comercial asociado usamos cualquier socket
+  // comercial conectado, igual que el transporte existente.
   let comercialId = null;
   try {
     const grupos = await listarGruposResultadosComerciales(db);
@@ -1963,10 +1962,13 @@ async function enviarMensajePorDestino(db, destinoId, texto) {
   if (!sock?.user?.id) {
     throw new Error('No hay ningún WhatsApp comercial conectado para enviar el destino ' + destino);
   }
-  await sock.sendMessage(destino, { text: String(texto || '') });
+
+  const payload = opciones && opciones.payload
+    ? opciones.payload
+    : { text: String(texto || '') };
+  await sock.sendMessage(destino, payload);
   return true;
 }
-
 async function desconectarComercial(db, id) {
   const numericId = Number(id);
   const timer = reconnectTimers.get(numericId);
