@@ -193,30 +193,67 @@ async function anunciarResultadoAAdmins({ loteriaNombre, nombreSorteo, fecha, fi
 }
 
 const resultadosAnunciados = new Set();
+const mensajesProcesados = new Set();
+let sincronizacionResultadosEnCurso = false;
+let temporizadorSincronizacionResultados = null;
+
+function numerosResultadoIguales(a, b) {
+  return JSON.stringify(a || null) === JSON.stringify(b || null);
+}
+
+async function buscarResultadoExistente(loteriaId, sorteoId, fecha) {
+  const { data, error } = await supabase.from('resultados_sorteo')
+    .select('*')
+    .eq('loteria_id', loteriaId)
+    .eq('sorteo_id', sorteoId)
+    .eq('fecha', fecha)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
 
 async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteoId, fijo, corrido, centena, fecha }) {
   const fechaFinal = fecha || new Date().toISOString().slice(0, 10);
-  const { data: resultado, error } = await supabase.from('resultados_sorteo')
-    .upsert([{
-      loteria_id: loteriaId,
-      sorteo_id: sorteoId,
-      fecha: fechaFinal,
-      numero_ganado: { fijo, corrido, centena },
-      fuente: 'bot_externo',
-    }], { onConflict: 'loteria_id,sorteo_id,fecha' })
-    .select('*').single();
+  const numeroGanado = { fijo, corrido, centena };
 
-  if (error) {
-    console.error('❌ Error guardando resultado:', error);
+  let existente;
+  try {
+    existente = await buscarResultadoExistente(loteriaId, sorteoId, fechaFinal);
+  } catch (e) {
+    console.error('❌ Error consultando resultado existente:', e);
     return;
   }
 
-  console.log(`✅ Resultado guardado: loteria=${loteriaId} sorteo=${sorteoId} fecha=${fechaFinal} fijo=${fijo} corrido=${corrido.join(', ')} centena=${centena}`);
+  const esMismoResultado = existente && numerosResultadoIguales(existente.numero_ganado, numeroGanado);
+
+  let resultado;
+  if (esMismoResultado) {
+    resultado = existente;
+    console.log(`ℹ️ Resultado ya estaba registrado: loteria=${loteriaId} sorteo=${sorteoId} fecha=${fechaFinal}. No se volverá a anunciar.`);
+  } else {
+    const { data, error } = await supabase.from('resultados_sorteo')
+      .upsert([{
+        loteria_id: loteriaId,
+        sorteo_id: sorteoId,
+        fecha: fechaFinal,
+        numero_ganado: numeroGanado,
+        fuente: 'bot_externo',
+      }], { onConflict: 'loteria_id,sorteo_id,fecha' })
+      .select('*').single();
+
+    if (error) {
+      console.error('❌ Error guardando resultado:', error);
+      return;
+    }
+
+    resultado = data;
+    console.log(`✅ Resultado guardado: loteria=${loteriaId} sorteo=${sorteoId} fecha=${fechaFinal} fijo=${fijo} corrido=${corrido.join(', ')} centena=${centena}`);
+  }
 
   // El resultado es un evento independiente de los premios.
-  // Se publica inmediatamente después de guardarlo; la detección de premios
-  // ocurre después y emite sus propios eventos por cada apuesta ganadora.
-  if (!resultadosAnunciados.has(resultado.id)) {
+  // Solo se emite cuando es nuevo o cuando el número publicado cambió.
+  if (!esMismoResultado && !resultadosAnunciados.has(resultado.id)) {
     resultadosAnunciados.add(resultado.id);
     const payload = {
       resultadoId: resultado.id,
@@ -233,6 +270,8 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
     bus.emit('resultado:recibido', payload);
   }
 
+  // Los premios se revisan también cuando recuperamos un resultado ya
+  // existente, pero nunca se vuelve a publicar el resultado general.
   try {
     const resumen = await detectarPremios(supabase, resultado);
     console.log(
@@ -242,6 +281,77 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
     );
   } catch (e) {
     console.error('⚠️ Error detectando premios:', e);
+  }
+}
+
+async function procesarMensajeResultado(msg, origen = 'evento') {
+  if (!msg?.message) return false;
+
+  const mensajeId = msg.id != null ? String(msg.id) : null;
+  if (mensajeId && mensajesProcesados.has(mensajeId)) return false;
+
+  const parsed = parsearMensajeResultado(msg.message);
+  if (!parsed) return false;
+
+  console.log(`📩 Resultado recibido/recuperado desde ${ORIGEN_ESPERADO} [${origen}]`);
+  console.log(msg.message);
+  console.log('✅ Resultado reconocido:', JSON.stringify(parsed));
+
+  const destino = await resolverLoteriaSorteo(parsed.loteriaNombre, parsed.nombreSorteo);
+  if (destino.error) {
+    console.log(`⚠️ No se pudo resolver lotería/sorteo para "${parsed.loteriaNombre} - ${parsed.nombreSorteo}": ${destino.error}`);
+    return false;
+  }
+
+  if (mensajeId) mensajesProcesados.add(mensajeId);
+
+  await guardarResultado({
+    loteriaNombre: parsed.loteriaNombre,
+    nombreSorteo: parsed.nombreSorteo,
+    loteriaId: destino.loteriaId,
+    sorteoId: destino.sorteoId,
+    fijo: parsed.fijo,
+    corrido: parsed.corrido,
+    centena: parsed.centena,
+    fecha: parsed.fecha,
+  });
+
+  return true;
+}
+
+async function sincronizarResultadosRecientes(entidadOrigen) {
+  if (!entidadOrigen || sincronizacionResultadosEnCurso) return;
+  sincronizacionResultadosEnCurso = true;
+
+  try {
+    const mensajes = await global.__USERBOT_CLIENT__.getMessages(entidadOrigen, { limit: 30 });
+    let reconocidos = 0;
+
+    for (const msg of [...mensajes].reverse()) {
+      if (!msg?.message) continue;
+
+      // No procesar resultados indefinidamente antiguos al reiniciar el servicio.
+      // Se revisan mensajes de las últimas 36 horas, suficiente para recuperar
+      // una interrupción de Render/reconexión sin reinyectar histórico.
+      const fechaMsg = msg.date instanceof Date
+        ? msg.date
+        : (msg.date ? new Date(msg.date * 1000) : null);
+      if (fechaMsg && (Date.now() - fechaMsg.getTime()) > 36 * 60 * 60 * 1000) continue;
+
+      try {
+        if (await procesarMensajeResultado(msg, 'sincronización')) reconocidos++;
+      } catch (e) {
+        console.error('❌ Error recuperando un mensaje de resultado:', e?.stack || e);
+      }
+    }
+
+    if (reconocidos > 0) {
+      console.log(`🔄 Sincronización: ${reconocidos} resultado(s) recuperado(s).`);
+    }
+  } catch (e) {
+    console.error('⚠️ No se pudo sincronizar resultados recientes desde Telegram:', e?.stack || e);
+  } finally {
+    sincronizacionResultadosEnCurso = false;
   }
 }
 
@@ -303,37 +413,25 @@ async function iniciarUserbotResultados() {
 
       if (!esOrigen) return;
 
-      console.log(`📩 Mensaje recibido desde ${username || ORIGEN_ESPERADO} (id ${senderId || '?'})`);
-      console.log(msg.message);
-
-      const parsed = parsearMensajeResultado(msg.message);
-      if (!parsed) {
-        console.log('ℹ️ Mensaje del origen recibido, pero no tiene un formato de resultado reconocido.');
-        return;
-      }
-
-      console.log('✅ Resultado reconocido:', JSON.stringify(parsed));
-
-      const destino = await resolverLoteriaSorteo(parsed.loteriaNombre, parsed.nombreSorteo);
-      if (destino.error) {
-        console.log(`⚠️ No se pudo resolver lotería/sorteo para "${parsed.loteriaNombre} - ${parsed.nombreSorteo}": ${destino.error}`);
-        return;
-      }
-
-      await guardarResultado({
-        loteriaNombre: parsed.loteriaNombre,
-        nombreSorteo: parsed.nombreSorteo,
-        loteriaId: destino.loteriaId,
-        sorteoId: destino.sorteoId,
-        fijo: parsed.fijo,
-        corrido: parsed.corrido,
-        centena: parsed.centena,
-        fecha: parsed.fecha,
-      });
+      await procesarMensajeResultado(msg, 'evento');
     } catch (e) {
       console.error('❌ Error procesando mensaje de resultado:', e && e.stack ? e.stack : e);
     }
   }, new NewMessage({}));
+
+  // El evento de Telegram es el camino rápido, pero no puede ser el único:
+  // una desconexión/reconexión de MTProto puede hacer que el proceso pierda
+  // un NewMessage. Este recuperador consulta periódicamente el chat del
+  // origen y repone cualquier resultado perdido.
+  await sincronizarResultadosRecientes(entidadOrigen);
+  temporizadorSincronizacionResultados = setInterval(() => {
+    sincronizarResultadosRecientes(entidadOrigen).catch(e =>
+      console.error('⚠️ Error en sincronización programada de resultados:', e?.stack || e)
+    );
+  }, 30 * 1000);
+  if (temporizadorSincronizacionResultados.unref) temporizadorSincronizacionResultados.unref();
+
+  console.log('🔄 Recuperación automática de resultados activa cada 30 segundos.');
 }
 
 async function buscarUltimoResultadoEnChat(chat) {
