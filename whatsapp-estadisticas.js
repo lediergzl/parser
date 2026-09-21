@@ -62,7 +62,8 @@ function limpiarPromocion(texto) {
 
 function formatoWhatsApp(post) {
   const partes = ['📊 *ESTADÍSTICAS*'];
-  const textoLimpio = limpiarPromocion(post.texto);\n  if (textoLimpio) partes.push(textoLimpio);
+  const textoLimpio = limpiarPromocion(post.texto);
+  if (textoLimpio) partes.push(textoLimpio);
   if (post.tipo !== 'texto') partes.push('📎 Publicación con multimedia.');
   return partes.join('\n\n');
 }
@@ -156,7 +157,11 @@ async function destinosActivos() {
 async function encolar(post) {
   const destinos = await destinosActivos();
   if (!destinos.length) return 0;
-  const filas = destinos.filter(d => {\n    if (!d.fecha_inicio || !post.fecha_publicacion) return true;\n    return new Date(post.fecha_publicacion).getTime() >= new Date(d.fecha_inicio).getTime();\n  }).map(d => ({ post_id: Number(post.id), comercial_telegram_id: d.comercial_telegram_id, destino_id: d.destino_id, estado: 'pendiente', intentos: 0 }));\n  if (!filas.length) return 0;
+  const filas = destinos.filter(d => {
+    if (!d.fecha_inicio || !post.fecha_publicacion) return true;
+    return new Date(post.fecha_publicacion).getTime() >= new Date(d.fecha_inicio).getTime();
+  }).map(d => ({ post_id: Number(post.id), comercial_telegram_id: d.comercial_telegram_id, destino_id: d.destino_id, estado: 'pendiente', intentos: 0 }));
+  if (!filas.length) return 0;
   const r = await supabase.from('whatsapp_estadisticas_outbox').upsert(filas, { onConflict: 'post_id,comercial_telegram_id', ignoreDuplicates: true });
   if (r.error) throw r.error;
   return filas.length;
