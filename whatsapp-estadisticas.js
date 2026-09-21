@@ -360,7 +360,21 @@ async function registrarComandos(bot) {
           ].join('\\n'));
         }
 
-        if (!/^https?:\\/\\/[^\\s]+whatsapp\\.com\\/channel\\//i.test(enlace) && !/^whatsapp\\.com\\/channel\\//i.test(enlace)) {
+        const enlaceNormalizado = String(enlace || '').trim();
+        const tieneCanal = (() => {
+          const s = enlaceNormalizado.toLowerCase();
+          const pos = s.indexOf('/channel/');
+          if (pos < 0) return false;
+          const prefijo = s.slice(0, pos);
+          return prefijo === 'whatsapp.com' ||
+            prefijo === 'www.whatsapp.com' ||
+            prefijo === 'http://whatsapp.com' ||
+            prefijo === 'https://whatsapp.com' ||
+            prefijo === 'http://www.whatsapp.com' ||
+            prefijo === 'https://www.whatsapp.com';
+        })();
+
+        if (!tieneCanal) {
           return ctx.reply('❌ Debes indicar el enlace del canal de WhatsApp. Ejemplo: https://whatsapp.com/channel/...');
         }
 
