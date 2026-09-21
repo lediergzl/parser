@@ -7,6 +7,10 @@ const { utils: tgUtils } = require('telegram');
 const TZ_CUBA = 'America/Havana';
 const ORIGEN = String(process.env.ESTADISTICAS_ORIGEN || '@rolottery').trim();
 const INTERVALO_MS = Math.max(60000, Number(process.env.ESTADISTICAS_INTERVALO_MS || 180000));
+// Las estadísticas se publican por lotes: se toma un grupo de publicaciones,
+// se entrega y después se espera al siguiente ciclo. Esto evita inundar el grupo
+// con un mensaje por cada publicación recién capturada.
+const LOTE_PUBLICACIONES = Math.max(1, Math.min(50, Number(process.env.ESTADISTICAS_LOTE_PUBLICACIONES || 10)));
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY);
 let entidadOrigen = null;
 let handlerRegistrado = false;
@@ -137,34 +141,127 @@ async function sincronizarHoy() {
 async function drenarOutbox() {
   let sender;
   try { sender = require('./whatsapp-comerciales'); } catch (e) { console.error('❌ Transporte estadísticas:', e.message || e); return; }
-  const r = await supabase.from('whatsapp_estadisticas_outbox').select('id,post_id,comercial_telegram_id,destino_id,intentos').eq('estado','pendiente').order('creado_at',{ascending:true}).limit(30);
+
+  // Un ciclo = un lote por destino. No vaciamos todo el outbox de golpe.
+  // El siguiente lote queda para el próximo ciclo del temporizador.
+  const r = await supabase
+    .from('whatsapp_estadisticas_outbox')
+    .select('id,post_id,comercial_telegram_id,destino_id,intentos')
+    .eq('estado','pendiente')
+    .order('creado_at',{ascending:true})
+    .limit(200);
+
   if (r.error) { console.error('❌ Outbox estadísticas:', r.error.message || r.error); return; }
-  const payloadCache = new Map();
 
+  const porDestino = new Map();
   for (const item of r.data || []) {
-    const m = await supabase.from('whatsapp_estadisticas_modulo').select('habilitado,fecha_vencimiento').eq('comercial_telegram_id',item.comercial_telegram_id).maybeSingle();
-    const vigente = m.data && m.data.habilitado && (!m.data.fecha_inicio || new Date(m.data.fecha_inicio).getTime() <= Date.now()) && (!m.data.fecha_vencimiento || new Date(m.data.fecha_vencimiento).getTime() >= Date.now());
-    if (!vigente) { await supabase.from('whatsapp_estadisticas_outbox').update({estado:'omitido',ultimo_error:'Módulo no vigente.'}).eq('id',item.id).eq('estado','pendiente'); continue; }
+    const destino = String(item.destino_id || '').trim();
+    if (!destino) continue;
+    if (!porDestino.has(destino)) porDestino.set(destino, []);
+    const lote = porDestino.get(destino);
+    if (lote.length < LOTE_PUBLICACIONES) lote.push(item);
+  }
 
-    const p = await supabase.from('whatsapp_estadisticas_posts').select('id,telegram_chat_id,telegram_message_id,texto,enlace_telegram,tipo').eq('id',item.post_id).maybeSingle();
-    if (!p.data) { await supabase.from('whatsapp_estadisticas_outbox').update({estado:'omitido',ultimo_error:'Publicación no encontrada.'}).eq('id',item.id); continue; }
+  if (!porDestino.size) return;
 
-    const intento = Number(item.intentos || 0) + 1;
-    await supabase.from('whatsapp_estadisticas_outbox').update({estado:'enviando',intentos:intento,ultimo_intento_at:new Date().toISOString(),ultimo_error:null}).eq('id',item.id).eq('estado','pendiente');
+  const payloadCache = new Map();
+  let totalLote = 0;
 
-    try {
-      let payload = payloadCache.get(Number(item.post_id));
-      if (!payload) {
-        payload = await payloadWhatsApp(p.data);
-        payloadCache.set(Number(item.post_id), payload);
+  for (const [destino, lote] of porDestino) {
+    console.log('📦 Estadísticas: preparando lote de ' + lote.length + ' publicación(es) para ' + destino + '.');
+
+    for (const item of lote) {
+      const m = await supabase
+        .from('whatsapp_estadisticas_modulo')
+        .select('habilitado,fecha_inicio,fecha_vencimiento')
+        .eq('comercial_telegram_id',item.comercial_telegram_id)
+        .maybeSingle();
+
+      const vigente = m.data &&
+        m.data.habilitado &&
+        (!m.data.fecha_inicio || new Date(m.data.fecha_inicio).getTime() <= Date.now()) &&
+        (!m.data.fecha_vencimiento || new Date(m.data.fecha_vencimiento).getTime() >= Date.now());
+
+      if (!vigente) {
+        await supabase
+          .from('whatsapp_estadisticas_outbox')
+          .update({estado:'omitido',ultimo_error:'Módulo no vigente.'})
+          .eq('id',item.id)
+          .eq('estado','pendiente');
+        continue;
       }
-      await sender.enviarMensajePorDestino(supabase, item.destino_id, '', { payload: payload });
-      await supabase.from('whatsapp_estadisticas_outbox').update({estado:'enviado',enviado_at:new Date().toISOString(),ultimo_error:null}).eq('id',item.id).eq('estado','enviando');
-      console.log('📊 Estadística enviada: comercial=' + item.comercial_telegram_id + ' destino=' + item.destino_id + ' post=' + item.post_id);
-    } catch (e) {
-      await supabase.from('whatsapp_estadisticas_outbox').update({estado:'pendiente',ultimo_error:String(e && e.message || e).slice(0,1000)}).eq('id',item.id).eq('estado','enviando');
-      console.error('⚠️ Estadística pendiente comercial=' + item.comercial_telegram_id + ':', e.message || e);
+
+      const p = await supabase
+        .from('whatsapp_estadisticas_posts')
+        .select('id,telegram_chat_id,telegram_message_id,texto,enlace_telegram,tipo')
+        .eq('id',item.post_id)
+        .maybeSingle();
+
+      if (!p.data) {
+        await supabase
+          .from('whatsapp_estadisticas_outbox')
+          .update({estado:'omitido',ultimo_error:'Publicación no encontrada.'})
+          .eq('id',item.id);
+        continue;
+      }
+
+      const intento = Number(item.intentos || 0) + 1;
+      const marcado = await supabase
+        .from('whatsapp_estadisticas_outbox')
+        .update({
+          estado:'enviando',
+          intentos:intento,
+          ultimo_intento_at:new Date().toISOString(),
+          ultimo_error:null
+        })
+        .eq('id',item.id)
+        .eq('estado','pendiente');
+
+      if (marcado.error) {
+        console.error('⚠️ No se pudo reservar estadística ' + item.id + ':', marcado.error.message || marcado.error);
+        continue;
+      }
+
+      try {
+        let payload = payloadCache.get(Number(item.post_id));
+        if (!payload) {
+          payload = await payloadWhatsApp(p.data);
+          payloadCache.set(Number(item.post_id), payload);
+        }
+
+        await sender.enviarMensajePorDestino(supabase, item.destino_id, '', { payload: payload });
+
+        await supabase
+          .from('whatsapp_estadisticas_outbox')
+          .update({
+            estado:'enviado',
+            enviado_at:new Date().toISOString(),
+            ultimo_error:null
+          })
+          .eq('id',item.id)
+          .eq('estado','enviando');
+
+        totalLote++;
+        console.log('📊 Estadística enviada: comercial=' + item.comercial_telegram_id + ' destino=' + item.destino_id + ' post=' + item.post_id);
+      } catch (e) {
+        await supabase
+          .from('whatsapp_estadisticas_outbox')
+          .update({
+            estado:'pendiente',
+            ultimo_error:String(e && e.message || e).slice(0,1000)
+          })
+          .eq('id',item.id)
+          .eq('estado','enviando');
+
+        console.error('⚠️ Estadística pendiente comercial=' + item.comercial_telegram_id + ':', e.message || e);
+      }
     }
+
+    console.log('⏸️ Estadísticas: lote publicado para ' + destino + '. Se espera hasta el próximo ciclo (' + Math.round(INTERVALO_MS / 60000) + ' min).');
+  }
+
+  if (totalLote) {
+    console.log('📦 Estadísticas: lote completo enviado (' + totalLote + ' publicación(es)).');
   }
 }
 
