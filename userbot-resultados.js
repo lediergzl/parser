@@ -213,17 +213,9 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
 
   console.log(`✅ Resultado guardado: loteria=${loteriaId} sorteo=${sorteoId} fecha=${fechaFinal} fijo=${fijo} corrido=${corrido.join(', ')} centena=${centena}`);
 
-  let ganadores = 0;
-  let registrados = 0;
-  try {
-    const resumen = await detectarPremios(supabase, resultado);
-    ganadores = resumen?.ganadores?.length || 0;
-    registrados = resumen?.registrados?.length || 0;
-    console.log('🔍 Detección de premios completada.');
-  } catch (e) {
-    console.error('⚠️ Error detectando premios:', e);
-  }
-
+  // El resultado es un evento independiente de los premios.
+  // Se publica inmediatamente después de guardarlo; la detección de premios
+  // ocurre después y emite sus propios eventos por cada apuesta ganadora.
   if (!resultadosAnunciados.has(resultado.id)) {
     resultadosAnunciados.add(resultado.id);
     const payload = {
@@ -234,13 +226,22 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
       fijo,
       corrido,
       centena,
-      ganadores,
-      registrados,
       loteriaId,
       sorteoId,
     };
     await anunciarResultadoAAdmins(payload);
     bus.emit('resultado:recibido', payload);
+  }
+
+  try {
+    const resumen = await detectarPremios(supabase, resultado);
+    console.log(
+      '🔍 Detección de premios completada: ' +
+      (resumen?.ganadores?.length || 0) + ' ganador(es), ' +
+      (resumen?.registrados?.length || 0) + ' premio(s) nuevo(s).'
+    );
+  } catch (e) {
+    console.error('⚠️ Error detectando premios:', e);
   }
 }
 
