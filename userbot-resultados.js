@@ -17,6 +17,12 @@ const sessionString = process.env.TG_SESSION || '';
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const ORIGEN_ESPERADO = process.env.RESULTADOS_ORIGEN || '@boliterostop_bot';
+const CHATS_RESULTADOS = Array.from(new Set(
+  (process.env.RESULTADOS_CHATS || ORIGEN_ESPERADO)
+    .split(',').map(x => x.trim()).filter(Boolean)
+    .concat(ORIGEN_ESPERADO)
+));
+const TZ_CUBA = 'America/Havana';
 
 const TERMINO_GENERICO = {
   midday: 'mediodia',
@@ -146,14 +152,55 @@ function parsearMensajeResultado(texto) {
   const fijo = pick3 ? pick3.slice(-2) : null;
   const corrido = pick4 ? [pick4.slice(0, 2), pick4.slice(2, 4)] : [];
 
-  let fecha = null;
-  const mFecha = texto.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  if (mFecha) {
-    const [, dd, mm, yyyy] = mFecha;
-    fecha = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
-  }
+  const fecha = parsearFechaTexto(texto, new Date());
 
   return { loteriaNombre: LOTERIA_DISPLAY[loteriaKey], nombreSorteo, fijo, corrido, centena, fecha };
+}
+
+function fechaCubaDe(fecha) {
+  const d = fecha instanceof Date ? fecha : new Date(fecha);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ_CUBA,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(d);
+}
+
+function fechaActualCuba() {
+  return fechaCubaDe(new Date());
+}
+
+function parsearFechaTexto(texto, referencia = new Date()) {
+  const s = limpiarInvisibles(texto);
+  const candidatos = [];
+
+  const iso = s.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
+  if (iso) {
+    candidatos.push(new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])));
+  }
+
+  const m = s.match(/\b(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})\b/);
+  if (m) {
+    const a = Number(m[1]), b = Number(m[2]), y = Number(m[3]);
+    // Las publicaciones de las loterías de EE. UU. usan normalmente MM/DD.
+    if (a <= 12) candidatos.push(new Date(y, a - 1, b));
+    if (b <= 12) candidatos.push(new Date(y, b - 1, a));
+  }
+
+  const ref = referencia instanceof Date ? referencia : new Date(referencia);
+  const refMs = ref.getTime();
+  const validos = candidatos.filter(d =>
+    !Number.isNaN(d.getTime()) && Math.abs(d.getTime() - refMs) <= 7 * 86400000
+  );
+  if (validos.length) {
+    validos.sort((x, y) => Math.abs(x.getTime() - refMs) - Math.abs(y.getTime() - refMs));
+    return validos[0].toISOString().slice(0, 10);
+  }
+
+  if (iso) return `${iso[1]}-${String(iso[2]).padStart(2,'0')}-${String(iso[3]).padStart(2,'0')}`;
+  return null;
 }
 
 function getAdminIds() {
@@ -197,8 +244,22 @@ const mensajesProcesados = new Set();
 let sincronizacionResultadosEnCurso = false;
 let temporizadorSincronizacionResultados = null;
 
+function normalizarNumeroGanado(n) {
+  const corrido = Array.isArray(n?.corrido) ? n.corrido.map(String) : [];
+  return {
+    fijo: n?.fijo == null ? null : String(n.fijo),
+    corrido,
+    centena: n?.centena == null ? null : String(n.centena),
+  };
+}
+
 function numerosResultadoIguales(a, b) {
-  return JSON.stringify(a || null) === JSON.stringify(b || null);
+  const x = normalizarNumeroGanado(a);
+  const y = normalizarNumeroGanado(b);
+  return x.fijo === y.fijo &&
+    x.centena === y.centena &&
+    x.corrido.length === y.corrido.length &&
+    x.corrido.every((v, i) => v === y.corrido[i]);
 }
 
 async function buscarResultadoExistente(loteriaId, sorteoId, fecha) {
@@ -214,24 +275,22 @@ async function buscarResultadoExistente(loteriaId, sorteoId, fecha) {
 }
 
 async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteoId, fijo, corrido, centena, fecha }) {
-  const fechaFinal = fecha || new Date().toISOString().slice(0, 10);
-  const numeroGanado = { fijo, corrido, centena };
+  const fechaFinal = fecha || fechaActualCuba();
+  const numeroGanado = normalizarNumeroGanado({ fijo, corrido, centena });
 
   let existente;
   try {
     existente = await buscarResultadoExistente(loteriaId, sorteoId, fechaFinal);
   } catch (e) {
     console.error('❌ Error consultando resultado existente:', e);
-    return;
+    return { ok: false, error: e };
   }
 
   const esMismoResultado = existente && numerosResultadoIguales(existente.numero_ganado, numeroGanado);
+  let resultado = existente;
+  let nuevo = false;
 
-  let resultado;
-  if (esMismoResultado) {
-    resultado = existente;
-    console.log(`ℹ️ Resultado ya estaba registrado: loteria=${loteriaId} sorteo=${sorteoId} fecha=${fechaFinal}. No se volverá a anunciar.`);
-  } else {
+  if (!esMismoResultado) {
     const { data, error } = await supabase.from('resultados_sorteo')
       .upsert([{
         loteria_id: loteriaId,
@@ -244,15 +303,18 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
 
     if (error) {
       console.error('❌ Error guardando resultado:', error);
-      return;
+      return { ok: false, error };
     }
 
     resultado = data;
-    console.log(`✅ Resultado guardado: loteria=${loteriaId} sorteo=${sorteoId} fecha=${fechaFinal} fijo=${fijo} corrido=${corrido.join(', ')} centena=${centena}`);
+    nuevo = !existente;
+    console.log(`✅ Resultado guardado/actualizado: loteria=${loteriaId} sorteo=${sorteoId} fecha=${fechaFinal} fijo=${fijo} corrido=${corrido.join(', ')} centena=${centena}`);
+  } else {
+    console.log(`ℹ️ Resultado ya estaba registrado: loteria=${loteriaId} sorteo=${sorteoId} fecha=${fechaFinal}.`);
   }
 
-  // El resultado es un evento independiente de los premios.
-  // Solo se emite cuando es nuevo o cuando el número publicado cambió.
+  if (!resultado) return { ok: false, error: new Error('Supabase no devolvió el resultado guardado.') };
+
   if (!esMismoResultado && !resultadosAnunciados.has(resultado.id)) {
     resultadosAnunciados.add(resultado.id);
     const payload = {
@@ -266,12 +328,13 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
       loteriaId,
       sorteoId,
     };
-    await anunciarResultadoAAdmins(payload);
+    // El evento de RESULTADO es independiente de PREMIOS.
+    // Se emite después de persistir el resultado para que WhatsApp pueda
+    // guardarlo en su outbox persistente.
     bus.emit('resultado:recibido', payload);
+    await anunciarResultadoAAdmins(payload);
   }
 
-  // Los premios se revisan también cuando recuperamos un resultado ya
-  // existente, pero nunca se vuelve a publicar el resultado general.
   try {
     const resumen = await detectarPremios(supabase, resultado);
     console.log(
@@ -282,16 +345,32 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
   } catch (e) {
     console.error('⚠️ Error detectando premios:', e);
   }
+
+  return { ok: true, nuevo, resultado };
 }
 
-async function procesarMensajeResultado(msg, origen = 'evento') {
+async function procesarMensajeResultado(msg, origen = 'evento', idOrigen = null) {
   if (!msg?.message) return false;
 
-  const mensajeId = msg.id != null ? String(msg.id) : null;
+  const chatId = msg?.chatId != null
+    ? String(msg.chatId)
+    : String(msg?.peerId?.channelId ?? msg?.peerId?.chatId ?? '');
+  const mensajeId = msg.id != null ? `${chatId}:${msg.id}` : null;
   if (mensajeId && mensajesProcesados.has(mensajeId)) return false;
 
   const parsed = parsearMensajeResultado(msg.message);
   if (!parsed) return false;
+
+  if (idOrigen != null) {
+    try {
+      const remitente = await msg.getSender();
+      const senderId = remitente?.id != null ? String(remitente.id) : null;
+      const username = remitente?.username ? `@${remitente.username}` : null;
+      if (senderId !== String(idOrigen) && username !== ORIGEN_ESPERADO) return false;
+    } catch (_) {
+      return false;
+    }
+  }
 
   console.log(`📩 Resultado recibido/recuperado desde ${ORIGEN_ESPERADO} [${origen}]`);
   console.log(msg.message);
@@ -303,9 +382,7 @@ async function procesarMensajeResultado(msg, origen = 'evento') {
     return false;
   }
 
-  if (mensajeId) mensajesProcesados.add(mensajeId);
-
-  await guardarResultado({
+  const guardado = await guardarResultado({
     loteriaNombre: parsed.loteriaNombre,
     nombreSorteo: parsed.nombreSorteo,
     loteriaId: destino.loteriaId,
@@ -316,38 +393,40 @@ async function procesarMensajeResultado(msg, origen = 'evento') {
     fecha: parsed.fecha,
   });
 
+  // Solo marcar el mensaje como procesado después de que Supabase confirme.
+  if (!guardado?.ok) return false;
+  if (mensajeId) mensajesProcesados.add(mensajeId);
   return true;
 }
 
-async function sincronizarResultadosRecientes(entidadOrigen) {
-  if (!entidadOrigen || sincronizacionResultadosEnCurso) return;
+async function sincronizarResultadosRecientes(entidades) {
+  if (!entidades?.length || sincronizacionResultadosEnCurso) return;
   sincronizacionResultadosEnCurso = true;
 
   try {
-    const mensajes = await global.__USERBOT_CLIENT__.getMessages(entidadOrigen, { limit: 30 });
     let reconocidos = 0;
+    for (const item of entidades) {
+      const mensajes = await global.__USERBOT_CLIENT__.getMessages(item.entity, { limit: 150 });
 
-    for (const msg of [...mensajes].reverse()) {
-      if (!msg?.message) continue;
+      for (const msg of [...mensajes].reverse()) {
+        if (!msg?.message) continue;
 
-      // No procesar resultados indefinidamente antiguos al reiniciar el servicio.
-      // Se revisan mensajes de las últimas 36 horas, suficiente para recuperar
-      // una interrupción de Render/reconexión sin reinyectar histórico.
-      const fechaMsg = msg.date instanceof Date
-        ? msg.date
-        : (msg.date ? new Date(msg.date * 1000) : null);
-      if (fechaMsg && (Date.now() - fechaMsg.getTime()) > 36 * 60 * 60 * 1000) continue;
+        const fechaMsg = msg.date instanceof Date
+          ? msg.date
+          : (msg.date ? new Date(msg.date * 1000) : null);
 
-      try {
-        if (await procesarMensajeResultado(msg, 'sincronización')) reconocidos++;
-      } catch (e) {
-        console.error('❌ Error recuperando un mensaje de resultado:', e?.stack || e);
+        if (fechaMsg && (Date.now() - fechaMsg.getTime()) > 36 * 60 * 60 * 1000) continue;
+        if (fechaMsg && (Date.now() - fechaMsg.getTime()) < -10 * 60 * 1000) continue;
+
+        try {
+          if (await procesarMensajeResultado(msg, 'sincronización', item.id)) reconocidos++;
+        } catch (e) {
+          console.error('❌ Error recuperando un mensaje de resultado:', e?.stack || e);
+        }
       }
     }
 
-    if (reconocidos > 0) {
-      console.log(`🔄 Sincronización: ${reconocidos} resultado(s) recuperado(s).`);
-    }
+    if (reconocidos > 0) console.log(`🔄 Sincronización: ${reconocidos} resultado(s) recuperado(s).`);
   } catch (e) {
     console.error('⚠️ No se pudo sincronizar resultados recientes desde Telegram:', e?.stack || e);
   } finally {
@@ -379,14 +458,21 @@ async function iniciarUserbotResultados() {
 
   global.__USERBOT_CLIENT__ = client;
 
-  let entidadOrigen = null;
-  let idOrigen = null;
-  try {
-    entidadOrigen = await client.getEntity(ORIGEN_ESPERADO);
-    idOrigen = entidadOrigen?.id != null ? String(entidadOrigen.id) : null;
-    console.log(`🎯 Origen de resultados resuelto: ${ORIGEN_ESPERADO}${idOrigen ? ` (id ${idOrigen})` : ''}`);
-  } catch (e) {
-    console.error(`❌ No se pudo resolver el origen ${ORIGEN_ESPERADO}:`, e?.message || e);
+  const entidadesResultados = [];
+  for (const chat of CHATS_RESULTADOS) {
+    try {
+      const entidad = await client.getEntity(chat);
+      let idOrigen = null;
+      try {
+        const origen = await client.getEntity(ORIGEN_ESPERADO);
+        idOrigen = origen?.id != null ? String(origen.id) : null;
+      } catch (_) {}
+
+      entidadesResultados.push({ entity: entidad, id: idOrigen });
+      console.log(`🎯 Chat de resultados resuelto: ${chat}${idOrigen ? ` | origen ${ORIGEN_ESPERADO} id ${idOrigen}` : ''}`);
+    } catch (e) {
+      console.error(`❌ No se pudo resolver el chat de resultados ${chat}:`, e?.message || e);
+    }
   }
 
   try {
@@ -396,36 +482,30 @@ async function iniciarUserbotResultados() {
     console.warn('⚠️ No se pudo verificar la identidad de la sesión del userbot:', e.message);
   }
 
-  console.log('👂 Escuchando resultados de', ORIGEN_ESPERADO);
+  console.log('👂 Escuchando resultados en:', CHATS_RESULTADOS.join(', '));
 
   client.addEventHandler(async (event) => {
     try {
       const msg = event.message;
       if (!msg || !msg.message) return;
 
-      const remitente = await msg.getSender();
-      const username = remitente?.username ? `@${remitente.username}` : null;
-      const senderId = remitente?.id != null ? String(remitente.id) : null;
+      const chatId = msg?.chatId != null ? String(msg.chatId) : String(msg?.peerId?.channelId ?? msg?.peerId?.chatId ?? '');
+      const pertenece = entidadesResultados.some(item =>
+        item.entity?.id != null && String(item.entity.id) === chatId
+      );
+      if (!pertenece) return;
 
-      const esOrigen = idOrigen
-        ? senderId === idOrigen
-        : username === ORIGEN_ESPERADO;
-
-      if (!esOrigen) return;
-
-      await procesarMensajeResultado(msg, 'evento');
+      await procesarMensajeResultado(msg, 'evento', entidadesResultados.find(item =>
+        item.entity?.id != null && String(item.entity.id) === chatId
+      )?.id);
     } catch (e) {
       console.error('❌ Error procesando mensaje de resultado:', e && e.stack ? e.stack : e);
     }
   }, new NewMessage({}));
 
-  // El evento de Telegram es el camino rápido, pero no puede ser el único:
-  // una desconexión/reconexión de MTProto puede hacer que el proceso pierda
-  // un NewMessage. Este recuperador consulta periódicamente el chat del
-  // origen y repone cualquier resultado perdido.
-  await sincronizarResultadosRecientes(entidadOrigen);
+  await sincronizarResultadosRecientes(entidadesResultados);
   temporizadorSincronizacionResultados = setInterval(() => {
-    sincronizarResultadosRecientes(entidadOrigen).catch(e =>
+    sincronizarResultadosRecientes(entidadesResultados).catch(e =>
       console.error('⚠️ Error en sincronización programada de resultados:', e?.stack || e)
     );
   }, 30 * 1000);
