@@ -1590,6 +1590,14 @@ async function conectarComercial(db, comercialId, force = false) {
           ` conflict401=${isConflict401}`
         );
 
+        // El socket ya murió. El lock no puede seguir renovándose mientras
+        // no exista un socket activo: si no lo liberamos, este mismo proceso
+        // conserva el lease y durante un redeploy la instancia nueva puede
+        // quedar esperando indefinidamente mientras la vieja sigue viva.
+        await lock?.liberar().catch(err =>
+          console.error(`⚠️ WA ${id}: no se pudo liberar el lock tras cerrar el socket:`, err?.message || err)
+        );
+
         // 401 + "conflict" NO significa que el teléfono haya desvinculado
         // la cuenta. Significa que WhatsApp expulsó este socket porque existe
         // otra conexión con las mismas credenciales (por ejemplo, una
