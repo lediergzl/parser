@@ -32,9 +32,37 @@ function enlaceMensaje(msg) {
   const username = entidadOrigen && entidadOrigen.username ? String(entidadOrigen.username) : '';
   return username && msg && msg.id ? 'https://t.me/' + username + '/' + msg.id : null;
 }
+function limpiarPromocion(texto) {
+  let t = String(texto || '');
+  if (!t) return t;
+
+  // Elimina bloques promocionales al final de una publicación sin tocar
+  // las estadísticas que aparecen antes. Se admiten varias formas de
+  // invitación a VIP/privado para no depender de una sola frase.
+  const patrones = [
+    /(?:\n|^)[^\n]*(?:interesad(?:o|a|os|as)[^\n]*(?:vip|grupo|canal|privad)|formar parte[^\n]*(?:vip|grupo|canal|privad)|entrar[^\n]*(?:vip|grupo|canal|privad)|unir(?:se)?[^\n]*(?:vip|grupo|canal|privad)|únete[^\n]*(?:vip|grupo|canal|privad)|grupo\s+vip|canal\s+vip)[^\n]*(?:\n|$)[\s\S]*$/i,
+    /(?:\n|^)[^\n]*(?:escrib(?:ir|eme|an)|escríb(?:eme|an)|contact(?:ar|ame)|mándame|mandame)[^\n]*(?:pv|privad|@\w+)[^\n]*(?:\n|$)[\s\S]*$/i,
+    /(?:\n|^)[^\n]*(?:para\s+(?:más|mas)\s+informaci[oó]n)[^\n]*(?:pv|privad|@\w+)[^\n]*(?:\n|$)[\s\S]*$/i
+  ];
+
+  for (const rx of patrones) {
+    const m = t.match(rx);
+    if (m && m.index != null) {
+      const antes = t.slice(0, m.index).trimEnd();
+      if (antes) t = antes;
+    }
+  }
+
+  // Si después del bloque promocional quedó únicamente el usuario/contacto,
+  // también lo retiramos. No se eliminan @usuarios que formen parte de una
+  // estadística si no vienen dentro de este patrón promocional.
+  t = t.replace(/\n{3,}/g, '\n\n').trim();
+  return t;
+}
+
 function formatoWhatsApp(post) {
   const partes = ['📊 *ESTADÍSTICAS*'];
-  if (post.texto) partes.push(post.texto);
+  const textoLimpio = limpiarPromocion(post.texto);\n  if (textoLimpio) partes.push(textoLimpio);
   if (post.tipo !== 'texto') partes.push('📎 Publicación con multimedia.');
   return partes.join('\n\n');
 }
