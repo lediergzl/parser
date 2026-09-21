@@ -124,6 +124,19 @@ function bettingChatKey(comercialId, whatsappJid) {
 function normalizeCommand(texto) {
   return String(texto || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
+function normalizarJidPropio(valor) {
+  const s = String(valor || '').trim().split(':')[0];
+  if (s.endsWith('@s.whatsapp.net')) return s;
+  if (/^\d+$/.test(s)) return s + '@s.whatsapp.net';
+  return s;
+}
+
+function mensajeEsPropio(sock, message) {
+  if (message?.key?.fromMe === true) return true;
+  const propio = normalizarJidPropio(sock?.user?.id);
+  const candidatos = [message?.key?.participantPn, message?.key?.senderPn, message?.key?.participant, message?.key?.senderAlt];
+  return Boolean(propio && candidatos.some(v => normalizarJidPropio(v) === propio));
+}
 
 function pngChunk(type, data) {
   let crc = 0xffffffff;
@@ -920,7 +933,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
   // en el chat privado de su propio WhatsApp. Ese mensaje y los botones
   // pueden regresar como fromMe=true, por lo que se procesa únicamente
   // si contiene una orden explícita de aprobar/rechazar una recarga WA.
-  if (message.key.fromMe) {
+  if (mensajeEsPropio(sock, message)) {
     const interactiveId = adaptIncomingInteractive(message);
     // Los comandos de configuracion pueden ejecutarse dentro de un grupo.
     // El flujo normal de clientes sigue ignorando mensajes de grupos.
