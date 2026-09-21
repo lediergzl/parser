@@ -1002,6 +1002,39 @@ async function recibirMensaje(db, sock, comercialId, message) {
     const aprobarSelf = commandSelf.match(/^\/aprobar_recarga\s+(\d+)$/);
     const rechazarSelf = commandSelf.match(/^\/rechazar_recarga\s+(\d+)$/);
 
+    if (commandSelf === '/probar_resultado') {
+      const targetJid = String(message.key.remoteJid || '').trim();
+      if (!targetJid.endsWith('@g.us')) {
+        await sock.sendMessage(targetJid || sock.user?.id, {
+          text: '⚠️ Ejecuta /probar_resultado dentro del grupo de WhatsApp asignado para resultados.'
+        }).catch(() => {});
+        return;
+      }
+
+      try {
+        const sender = require('./lib/whatsapp-sender');
+        const prueba = await sender.probarResultadoWhatsapp(db, comercialId);
+        await sock.sendMessage(targetJid, {
+          text: [
+            '🧪 PRUEBA DE RESULTADOS ENCOLADA',
+            '',
+            '👥 Grupo: ' + (prueba.nombre || 'Grupo de resultados'),
+            '🆔 ' + prueba.destinoId,
+            '',
+            'La prueba fue guardada en el outbox y se intentará enviar por el transporte WhatsApp comercial.',
+            '',
+            'Si recibes el mensaje 🧪 PRUEBA DE RESULTADOS WHATSAPP, el flujo de outbox está funcionando correctamente.'
+          ].join('\\n')
+        }).catch(() => {});
+      } catch (e) {
+        console.error('[WA PRUEBA RESULTADO] error:', e?.stack || e);
+        await sock.sendMessage(targetJid, {
+          text: '❌ No se pudo ejecutar la prueba: ' + (e?.message || e)
+        }).catch(() => {});
+      }
+      return;
+    }
+
     // Configuración del grupo de resultados del propio comercial.
     // Se ejecuta desde el WhatsApp comercial: basta enviar el comando dentro
     // del grupo que se quiere asignar.
