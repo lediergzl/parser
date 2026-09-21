@@ -4,7 +4,7 @@
 // Guarda el resultado en Supabase, ejecuta la detección de premios y avisa a
 // los administradores mediante el bot normal de Telegraf.
 // ----------------------------------------------------------------------------
-const { TelegramClient } = require('telegram');
+const { TelegramClient, utils: tgUtils } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
 const { createClient } = require('@supabase/supabase-js');
@@ -18,11 +18,28 @@ const sessionString = process.env.TG_SESSION || '';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const ORIGEN_ESPERADO = process.env.RESULTADOS_ORIGEN || '@boliterostop_bot';
 const CHATS_RESULTADOS = Array.from(new Set(
-  (process.env.RESULTADOS_CHATS || ORIGEN_ESPERADO)
+  (process.env.RESULTADOS_CHATS || `${ORIGEN_ESPERADO},@MentesMillonariasbolitachat`)
     .split(',').map(x => x.trim()).filter(Boolean)
     .concat(ORIGEN_ESPERADO)
 ));
 const TZ_CUBA = 'America/Havana';
+
+// Ninguna llamada de red debe poder colgar el procesamiento para siempre.
+function conTimeout(promesa, ms, etiqueta) {
+  let t;
+  const limite = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error(`Timeout de ${ms} ms en ${etiqueta}`)), ms);
+  });
+  return Promise.race([Promise.resolve(promesa), limite]).finally(() => clearTimeout(t));
+}
+
+// msg.chatId de GramJS es el id "marcado": -100<id> para supergrupos/canales y
+// -<id> para grupos básicos. entity.id es el id crudo. Solo coinciden en chats
+// privados, así que hay que comparar contra utils.getPeerId(entidad).
+function idChatMarcado(entidad) {
+  try { return String(tgUtils.getPeerId(entidad)); }
+  catch (_) { return entidad?.id != null ? String(entidad.id) : null; }
+}
 
 const TERMINO_GENERICO = {
   midday: 'mediodia',
@@ -115,7 +132,7 @@ async function resolverLoteriaSorteo(loteriaNombre, nombreSorteo) {
 }
 
 function extraerNumero(texto, tipo) {
-  const re = new RegExp(`(?:${tipo})\\\\s*(?:3|4)?\\\\s*(?:[:=\\\\-]|=>)?\\\\s*(\\\\d{${tipo === 'pick3' ? 3 : 4}})(?!\\\\d)`, 'i');
+  const re = new RegExp(`(?:${tipo})\\s*(?:3|4)?\\s*(?:[:=\\-]|=>)?\\s*(\\d{${tipo === 'pick3' ? 3 : 4}})(?!\\d)`, 'i');
   const m = texto.match(re);
   return m ? m[1] : null;
 }
@@ -223,14 +240,18 @@ async function anunciarResultadoAAdmins({ loteriaNombre, nombreSorteo, fecha, fi
     `Fijo: *${fijo || '—'}*`,
     `Corridos: *${corridoTexto}*`,
     `Centena: *${centena || '—'}*`, '',
-    ganadores > 0
-      ? `🏆 Ganadores detectados: *${ganadores}* (premios nuevos: ${registrados})`
-      : '✅ Sin jugadas ganadoras en este sorteo.'
-  ].join('\\n');
+    // `ganadores` es null si la detección de premios no terminó. Antes el dato
+    // no llegaba nunca al mensaje y siempre decía "Sin jugadas ganadoras".
+    ganadores == null
+      ? '⚠️ No se pudo verificar la detección de premios (revisa los logs).'
+      : (ganadores > 0
+        ? `🏆 Ganadores detectados: *${ganadores}* (premios nuevos: ${registrados})`
+        : '✅ Sin jugadas ganadoras en este sorteo.')
+  ].join('\n');
 
   for (const adminId of adminIds) {
     try {
-      await bot.telegram.sendMessage(adminId, texto, { parse_mode: 'Markdown' });
+      await conTimeout(bot.telegram.sendMessage(adminId, texto, { parse_mode: 'Markdown' }), 15000, `sendMessage admin ${adminId}`);
       console.log(`📤 Resultado enviado al bot de Telegram/admin ${adminId}.`);
     } catch (e) {
       console.error(`❌ No se pudo anunciar el resultado al admin ${adminId}:`, e?.message || e);
@@ -240,6 +261,8 @@ async function anunciarResultadoAAdmins({ loteriaNombre, nombreSorteo, fecha, fi
 
 const resultadosAnunciados = new Set();
 const mensajesProcesados = new Set();
+const mensajesNoReconocidos = new Set();
+let sincronizacionIniciadaAt = 0;
 let sincronizacionResultadosEnCurso = false;
 let temporizadorSincronizacionResultados = null;
 
@@ -314,6 +337,7 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
 
   if (!resultado) return { ok: false, error: new Error('Supabase no devolvió el resultado guardado.') };
 
+  let payloadAnuncio = null;
   if (!esMismoResultado && !resultadosAnunciados.has(resultado.id)) {
     resultadosAnunciados.add(resultado.id);
     const payload = {
@@ -328,18 +352,29 @@ async function guardarResultado({ loteriaNombre, nombreSorteo, loteriaId, sorteo
       sorteoId,
     };
     bus.emit('resultado:recibido', payload);
-    await anunciarResultadoAAdmins(payload);
+    payloadAnuncio = payload;
   }
 
+  let resumen = null;
   try {
-    const resumen = await detectarPremios(supabase, resultado);
+    resumen = await conTimeout(detectarPremios(supabase, resultado), 120000, 'detectarPremios');
     console.log(
       '🔍 Detección de premios completada: ' +
       (resumen?.ganadores?.length || 0) + ' ganador(es), ' +
       (resumen?.registrados?.length || 0) + ' premio(s) nuevo(s).'
     );
   } catch (e) {
-    console.error('⚠️ Error detectando premios:', e);
+    console.error('⚠️ Error detectando premios:', e?.message || e);
+  }
+
+  // Aviso a admins: sin `await`, para que un Telegram lento no bloquee la
+  // sincronización (el candado de sync quedaba tomado si esta llamada colgaba).
+  if (payloadAnuncio) {
+    anunciarResultadoAAdmins({
+      ...payloadAnuncio,
+      ganadores: resumen ? (resumen.ganadores?.length || 0) : null,
+      registrados: resumen ? (resumen.registrados?.length || 0) : null,
+    }).catch(e => console.error('❌ Error avisando a admins:', e?.message || e));
   }
 
   return { ok: true, nuevo, resultado };
@@ -355,7 +390,16 @@ async function procesarMensajeResultado(msg, origen = 'evento', idOrigen = null)
   if (mensajeId && mensajesProcesados.has(mensajeId)) return false;
 
   const parsed = parsearMensajeResultado(msg.message);
-  if (!parsed) return false;
+  if (!parsed) {
+    // Un formato nuevo del bot (p. ej. el "➪" de Florida) hacía que los
+    // resultados desaparecieran sin ninguna pista en los logs.
+    if (mensajeId && idOrigen != null && msg.senderId != null && String(msg.senderId) === String(idOrigen)
+        && !mensajesNoReconocidos.has(mensajeId)) {
+      mensajesNoReconocidos.add(mensajeId);
+      console.log(`ℹ️ Mensaje de ${ORIGEN_ESPERADO} sin formato de resultado reconocido (${mensajeId}): ${JSON.stringify(String(msg.message).slice(0, 300))}`);
+    }
+    return false;
+  }
 
   if (idOrigen != null) {
     try {
@@ -395,13 +439,18 @@ async function procesarMensajeResultado(msg, origen = 'evento', idOrigen = null)
 }
 
 async function sincronizarResultadosRecientes(entidades) {
-  if (!entidades?.length || sincronizacionResultadosEnCurso) return;
+  if (!entidades?.length) return;
+  if (sincronizacionResultadosEnCurso) {
+    if (Date.now() - sincronizacionIniciadaAt < 3 * 60 * 1000) return;
+    console.warn('⚠️ La sincronización anterior lleva más de 3 min sin terminar; se libera el candado.');
+  }
   sincronizacionResultadosEnCurso = true;
+  sincronizacionIniciadaAt = Date.now();
 
   try {
     let reconocidos = 0;
     for (const item of entidades) {
-      const mensajes = await global.__USERBOT_CLIENT__.getMessages(item.entity, { limit: 150 });
+      const mensajes = await conTimeout(global.__USERBOT_CLIENT__.getMessages(item.entity, { limit: 150 }), 25000, 'getMessages');
 
       for (const msg of [...mensajes].reverse()) {
         if (!msg?.message) continue;
@@ -485,14 +534,12 @@ async function iniciarUserbotResultados() {
       if (!msg || !msg.message) return;
 
       const chatId = msg?.chatId != null ? String(msg.chatId) : String(msg?.peerId?.channelId ?? msg?.peerId?.chatId ?? '');
-      const pertenece = entidadesResultados.some(item =>
-        item.entity?.id != null && String(item.entity.id) === chatId
-      );
-      if (!pertenece) return;
+      // OJO: comparar con el id marcado (-100…), no con entity.id; si no, los
+      // mensajes en vivo de grupos/canales se descartaban siempre.
+      const fuente = entidadesResultados.find(item => idChatMarcado(item.entity) === chatId);
+      if (!fuente) return;
 
-      await procesarMensajeResultado(msg, 'evento', entidadesResultados.find(item =>
-        item.entity?.id != null && String(item.entity.id) === chatId
-      )?.id);
+      await procesarMensajeResultado(msg, 'evento', fuente.id);
     } catch (e) {
       console.error('❌ Error procesando mensaje de resultado:', e && e.stack ? e.stack : e);
     }
