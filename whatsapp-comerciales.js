@@ -1400,7 +1400,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
       await reiniciarSesionWhatsApp(db, comercialId, senderJid);
     } catch (e) {
       activeBettingChats.delete(key);
-      cancelarSalidaAutomatica(key);
+      cancelarSalidaAutomaticaWhatsApp(key);
       console.error(
         `No se pudo preparar sesión WhatsApp ${comercialId}/${senderJid}:`,
         e
