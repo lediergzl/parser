@@ -929,6 +929,7 @@ function buildOpsNormal(linea, db, ex, lm) {
 function buildOpsCentena(linea, db, ex, lm) {
   const ops = [];
   const { centenas, fijosDerivados } = db;
+  const numerosBaseUnicos = [...new Set(fijosDerivados.map(pad2))];
   const corte = linea.search(/\b(parle|candado)\b/i);
   const segBase = corte !== -1 ? linea.slice(0, corte) : linea;
   const montos = ex.extractMontosAfterCon(segBase);
@@ -943,11 +944,11 @@ function buildOpsCentena(linea, db, ex, lm) {
     m1 = montos[0];
   }
   if (m1 !== null) ops.push({ tipo: 'centena', numeros: centenas.slice(), montoUnitario: m1 });
-  if (m2 !== null) ops.push({ tipo: 'fijo', numeros: fijosDerivados.slice(), montoUnitario: m2 });
-  if (m3 !== null) ops.push({ tipo: 'corrido', numeros: fijosDerivados.slice(), montoUnitario: m3 });
+  if (m2 !== null) ops.push({ tipo: 'fijo', numeros: numerosBaseUnicos.slice(), montoUnitario: m2 });
+  if (m3 !== null) ops.push({ tipo: 'corrido', numeros: numerosBaseUnicos.slice(), montoUnitario: m3 });
 
   const mp = _montoParle(linea, lm);
-  if (mp !== null) ops.push({ tipo: 'parle', numeros: fijosDerivados.slice(), pares: generarPares(fijosDerivados), montoUnitario: mp });
+  if (mp !== null) ops.push({ tipo: 'parle', numeros: numerosBaseUnicos.slice(), pares: generarPares(numerosBaseUnicos), montoUnitario: mp });
 
   const mc = _montoCandado(linea, lm);
   if (mc !== null) {
@@ -4112,44 +4113,45 @@ function preprocesarJugada(rawInput) {
       //   45 68 xc 10
       //   45 68 xc 1 2 3 10
       //   45 68 xc 1 2 3 con 10
-      // Se convierte a la gramática ya existente de centena explícita.
+      //   45 68 98 xc 1 2 3 con 10 y 10 y 10 p3
+      // Convertimos a números de 3 dígitos para conservar la semántica
+      // centena + fijo + corrido + parle.
       {
         const mXC = lineaSinTotal.match(/^(.*?)\s+xc(?:\s+(.*))?\s*$/i);
         if (mXC) {
           const base = (mXC[1] || '').trim();
           const tail = (mXC[2] || '').trim();
           const tokens = tail ? tail.split(/\s+/).filter(Boolean) : [];
-          let monto = null;
           let specs = [];
+          let rightTail = '';
 
           const conIdx = tokens.findIndex(t => /^con$/i.test(t));
           if (conIdx >= 0) {
-            if (conIdx !== tokens.length - 2 || !/^\d+(?:[.,]\d+)?$/.test(tokens[conIdx + 1])) {
-              monto = null;
-            } else {
-              monto = tokens[conIdx + 1];
-              specs = tokens.slice(0, conIdx);
-            }
+            specs = tokens.slice(0, conIdx);
+            rightTail = ['con', ...tokens.slice(conIdx + 1)].join(' ');
           } else if (tokens.length > 0) {
-            monto = tokens[tokens.length - 1];
-            specs = tokens.slice(0, -1);
+            const last = tokens[tokens.length - 1];
+            if (/^\d+(?:[.,]\d+)?$/.test(last)) {
+              specs = tokens.slice(0, -1);
+              rightTail = 'con ' + last;
+            }
           }
 
           const specsValidos = specs.length === 0 || specs.every(t => /^\d$/.test(t));
-          const montoValido = !!monto && /^\d+(?:[.,]\d+)?$/.test(monto);
-          const baseValida = !!base && /\d/.test(base);
+          const baseNums = (base.match(/\b\d{1,2}\b/g) || []).map(n => String(n).padStart(2, '0'));
+          const baseValida = baseNums.length > 0;
+          const rightValido = /^con\s+\d+(?:[.,]\d+)?(?:\s+y\s+\d+(?:[.,]\d+)?)*\s*(?:(?:p|parle|c|candado)\s*\d+(?:[.,]\d+)?)?$/i.test(rightTail);
 
-          if (baseValida && montoValido && specsValidos) {
+          if (baseValida && specsValidos && rightValido) {
             const centenasXC = specs.length ? specs : ['0','1','2','3','4','5','6','7','8','9'];
-            const basesXC = (base.match(/\b\d{1,2}\b/g) || []).map(n => String(n).padStart(2, '0'));
             const numerosXC = [];
             for (const c of centenasXC) {
-              for (const n of basesXC) numerosXC.push(c + n);
+              for (const n of baseNums) numerosXC.push(c + n);
             }
-            lineaSinTotal = `${numerosXC.join(' ')} con ${monto}`;
+            lineaSinTotal = `${numerosXC.join(' ')} ${rightTail}`.trim();
             trace('PRE_NORMALIZED', {
               rawLine: line,
-              razon: 'xc inline → centena explícita',
+              razon: 'xc inline → centena explícita conservando base y modificadores',
               normalizado: lineaSinTotal,
             });
           }
