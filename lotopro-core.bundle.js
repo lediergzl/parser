@@ -469,6 +469,13 @@ function createExpansion(deps = {}) {
       const p4 = /\b(\d{4})\b/g;
       while ((m = p4.exec(tp)) !== null) pares.push([m[1].substring(0, 2).padStart(2, '0'), m[1].substring(2).padStart(2, '0')]);
     }
+    // PARLE EXPLÍCITO SIN x/*: formar todas las combinaciones desde los números base.
+    if (tieneParleExplicito && pares.length === 0) {
+      const numsAntesDelStop = (tp.match(/\b\d{1,2}\b/g) || []).map(n => n.padStart(2, '0'));
+      for (let i = 0; i < numsAntesDelStop.length; i++) {
+        for (let j = i + 1; j < numsAntesDelStop.length; j++) pares.push([numsAntesDelStop[i], numsAntesDelStop[j]]);
+      }
+    }
     return pares;
   }
 
@@ -774,6 +781,12 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
   const lineaSinMod = linea
     .replace(/\bparle\s+con\s+[\d.,]+/gi, '')
     .replace(/\bcandado\s+con\s+[\d.,]+/gi, '');
+  if (/\bcon\s+\d+(?:[.,]\d+)?(?:\s+y\s+\d+(?:[.,]\d+)?)?\s+(?:de|a)\s+\d+/i.test(linea)) {
+    const err = { code: 'E_CON_CHAIN_CONNECTOR', line: lineaNum, message: 'No combine "con" con "de" o "a" en la misma línea. Separe las apuestas en líneas distintas.' };
+    trace('ERROR', { source: 'validarLinea', ...err });
+    errors.push(err);
+    return errors;
+  }
   const afterConMatch = lineaSinMod.match(/\bcon\s+(.+)/i);
   if (afterConMatch) {
     const afterCon = afterConMatch[1];
@@ -798,6 +811,12 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
     }
     // ── FIN PATCH semántico y ────────────────────────────────────────────────
 
+    if (!centenas.length && montosNumericos.length > 2) {
+      const err = { code: 'R004_DEMASIADOS_MONTOS', line: lineaNum, message: 'Solo se permiten hasta dos montos en una línea: fijo y corrido. El tercer monto debe ir en otra línea.' };
+      trace('ERROR', { source: 'validarLinea', ...err });
+      errors.push(err);
+      return errors;
+    }
     if (montosNumericos.length > 1 && !hasY) {
       const err = { code: 'R004_CORRIDO_SIN_Y', line: lineaNum, message: 'Para poner fijo y corrido use "y" entre los montos, por ejemplo: 23 con 50 y 30' };
       trace('ERROR', { source: 'validarLinea', ...err });
@@ -3127,31 +3146,19 @@ const _TYPO_RE_PREP = /\b(c[aá]b[dn]a?d[ao]o?|cand[ao]{2}|candago|cabdado|cnada
 
 const _LEFT_WORD_ALLOW  = new Set(['pr', 'total']);
 // FIX BUG2: 'total' nunca es válido en el lado derecho de una apuesta.
-const _RIGHT_WORD_ALLOW = new Set(['con', 'y', 'candado', 'parle', 'a', 'de']);
+const _RIGHT_WORD_ALLOW = new Set(['con', 'y', 'candado', 'parle', 'a', 'de', 'p', 'c', 'corrido']);
 // Placeholder for pair operator (NxN / N*N) during word-stripping pass.
 const _PAIR_OP_PH = '__PAROP__';
 
 function _sanitizarLadoIzquierdo(lado) {
   if (!lado) return '';
-
-  // 1. Protect valid pair operators (N x N, NxN, N*N, N * N) before word stripping.
-  //    Any x or * that sits between two digit tokens is a DSL pair operator — keep it.
-  lado = lado.replace(/(\d)\s*[xX*]\s*(\d)/g, (m, a, b) => a + _PAIR_OP_PH + b);
-
-  // 2. Eliminate word tokens not in the left-side whitelist.
+  // x/* son separadores, nunca operadores semánticos en el lado izquierdo.
+  lado = lado.replace(/[xX*×]/g, ' ');
   lado = lado.replace(/\b([a-záéíóúüñ]+)\b/gi, (tok) =>
     _LEFT_WORD_ALLOW.has(tok.toLowerCase()) ? tok : ''
   );
-
-  // 3. Restore pair operators (placeholder → x, normalized form).
-  lado = lado.replace(/__PAROP__/g, 'x');
-
-  // 4. Strip any remaining bare x or * that are NOT between digit operands
-  //    (survived because they were not adjacent to digits on both sides).
-  lado = lado.replace(/(?<!\d)\s*[xX]\s*(?!\d)/g, ' ');
-  lado = lado.replace(/(?<!\d)\s*\*\s*(?!\d)/g, ' ');
-
   return lado;
+
 }
 
 function _eliminarPalabrasNoReservadas(l) {
@@ -3275,21 +3282,28 @@ function _detectarCentenaGlobal(l) {
   // xc 3 5 con 10 → centenas 3 y 5 con monto 10
   const mXC = t.match(/^xc([0-9]*)((?:\s+[0-9])*)(.*)/);
   if (mXC) {
-    const digitsInline = mXC[1]; // "35" en "xc35"
-    const digitsSpaced = mXC[2].trim(); // "3 5" en "xc 3 5"
-    const resto = mXC[3];
-    const monto = _monto(resto);
-
-    let centenas;
+    const digitsInline = mXC[1];
+    const spaced = mXC[2].trim();
+    const resto = mXC[3].trim();
+    let centenas = 'ALL';
+    let monto = _monto(resto);
     if (digitsInline) {
       centenas = digitsInline.split('').join(',');
-    } else if (digitsSpaced) {
-      centenas = digitsSpaced.split(/\s+/).join(',');
-    } else {
-      centenas = 'ALL';
+    } else if (spaced) {
+      const tokens = spaced.split(/\s+/).filter(Boolean);
+      if (!resto) {
+        if (tokens.length === 1) monto = tokens[0];
+        else {
+          monto = tokens[tokens.length - 1];
+          centenas = tokens.slice(0, -1).join(',');
+        }
+      } else {
+        centenas = tokens.join(',');
+      }
     }
     return centenas + ':' + monto;
   }
+
 
   // ── SINTAXIS LARGA (backward compat) ─────────────────────────────────────
   if (
@@ -3385,10 +3399,8 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
   l = _normalizarBancaGuion(l);
 
   // ── NORMALIZACIÓN DE SEPARADORES NO-DSL ────────────────────────────────────
-  // Regla: el único operador entre números con significado semántico es NNxNN
-  // (exactamente dos operandos de 1-2 dígitos = par parle).
-  // Todo otro separador entre números (/, -, ,, ., x con 3+ operandos, etc.)
-  // se limpia a espacio — los números se extraen limpios.
+  // Regla: x, *, - y / entre números del lado izquierdo son SOLO separadores.
+  // La modalidad PARLE se expresa mediante "parle" / "pN".
   // Se aplica a toda la línea (no solo al lado izquierdo del con) porque
   // el RightSideSanitizer maneja el lado derecho independientemente.
   // EXCEPCIÓN: montos decimales como "10.50" o "10,50" deben preservarse.
@@ -3396,31 +3408,16 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
   // del 'con', que el RightSideSanitizer ya valida. En el lado izquierdo,
   // punto/coma entre números siempre es separador → limpiar a espacio.
   l = (function _limpiarSeparadoresNoDSL(linea) {
-    // 1. Proteger pares NNxNN válidos (exactamente 1-2 dígitos en cada lado)
-    const pares = [];
-    let protegida = linea.replace(/(\d{1,2})[xX](\d{1,2})/g, (m, a, b) => {
-      const idx = pares.length;
-      pares.push(m);
-      return `__PAR${idx}__`;
-    });
-
-    // 2. Separar en lado izquierdo y derecho del 'con'
-    const conIdx = protegida.search(/con/i);
-    const izq = conIdx === -1 ? protegida : protegida.slice(0, conIdx);
-    const der = conIdx === -1 ? '' : protegida.slice(conIdx);
-
-    // 3. En el lado izquierdo: limpiar todo separador entre números a espacio
-    //    (/  -  ,  .  *  x con 3+ operandos ya desprotegidos)
+    // x, *, - y / en el lado izquierdo son SOLO separadores.
+    // La modalidad PARLE se determina por "parle"/"pN", nunca por x/*.
+    const conIdx = linea.search(/\bcon\b/i);
+    const izq = conIdx === -1 ? linea : linea.slice(0, conIdx);
+    const der = conIdx === -1 ? '' : linea.slice(conIdx);
     const izqLimpia = izq
-      // x con 3+ operandos (20x30x40 → 20 30 40): desprotegidos, ya no son __PARn__
-      .replace(/(\d{1,2})[xX](\d{1,2}(?:[xX]\d{1,2})+)/g, (m) => m.replace(/[xX]/g, ' '))
-      .replace(/(\d)[\/\-,.](\d)/g, '$1 $2')   // separadores directos: 40/50 → 40 50
-      .replace(/(\d)\s*[\/\-,.]\s*(\d)/g, '$1 $2'); // con espacios alrededor
-
-    // 4. Restaurar pares protegidos
-    const resultado = (izqLimpia + der).replace(/__PAR(\d+)__/g, (_, i) => pares[+i]);
-
-    return resultado.replace(/\s+/g, ' ').trim();
+      .replace(/(\d)\s*[\/\-,.*xX×]\s*(?=\d)/g, '$1 ')
+      .replace(/[xX*×]/g, ' ')
+      .replace(/(\d)\s*-\s*(?=\d)/g, '$1 ');
+    return (izqLimpia + der).replace(/\s+/g, ' ').trim();
   })(l);
 
   trace('PRE_RAW', { id, rawLine });
@@ -3718,6 +3715,12 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
   l = l.replace(/\bf(\d+)/gi, '$1');
   l = l.replace(/(\d+)C\b/g, '$1');
   l = _normalizarCandadoParle(l);
+  if (!/\bcon\b/i.test(l) && !/\b(parle|candado)\b/i.test(l)) {
+    l = l.replace(/^(.*?)\s+corrido\s+(\d+(?:[.,]\d+)?)\s*$/i, '$1 con 0 y $2');
+  }
+  if (!/\bcon\b/i.test(l)) {
+    l = l.replace(/\b(?:de|a)\s+(?=\d)/ig, 'con ');
+  }
   l = l.replace(/\bponle\b/ig, 'con');
   if (/\b(parle|candado)\b/i.test(l)) {
     l = l.replace(/(\d)[ \t]+\b(a|de)[ \t]+(?=\d)/gi, (m, d, kw) => d + ' con ');
