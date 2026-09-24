@@ -918,7 +918,7 @@ function buildOpsNormal(linea, db, ex, lm) {
   const montoParleEfectivo = montoParle ?? (pares.length ? db.parleMonto : null);
 
   if (pares.length && montoParleEfectivo !== null) {
-    const numsExp = pares.flatMap(p => [pad2(p[0]), pad2(p[1])]);
+    const numsExp = [...new Set(pares.flatMap(p => [pad2(p[0]), pad2(p[1])]))];
     // FIX: solo emitir fijo/corrido si hay keyword parle explícita.
     // Pares NxN implícitos (ej: "41x40 26x27 con 50"): el "con X" ES el monto del parle,
     // no un monto fijo adicional. Emitirlo como fijo duplicaría el cobro.
@@ -933,7 +933,7 @@ function buildOpsNormal(linea, db, ex, lm) {
   }
 
   if (pares.length) {
-    const numsExp = pares.flatMap(p => [pad2(p[0]), pad2(p[1])]);
+    const numsExp = [...new Set(pares.flatMap(p => [pad2(p[0]), pad2(p[1])]))];
     if (v1 !== null) ops.push({ tipo: 'fijo', numeros: numsExp.slice(), montoUnitario: v1 });
     if (v2 !== null) ops.push({ tipo: 'corrido', numeros: numsExp.slice(), montoUnitario: v2 });
     trace('EVAL_BUILD_OPS', { stage: 'buildOpsNormal:pares', linea, ops });
@@ -4123,35 +4123,46 @@ function preprocesarJugada(rawInput) {
         }
       }
 
-      // ── EXTRACCIÓN INLINE DE xc ─────────────────────────────────────────────
-      // Soporta "23 45 con 10 xc con 5" → jugada base + token CENTENA_GLOBAL.
-      // Debe ocurrir ANTES de procesarLineaRaw para que el RIGHT_SIDE_SANITIZER
-      // nunca vea "xc" y no rechace el lado derecho como "con 10 con 10".
-      //
-      // Patrones capturados al final de la línea (case-insensitive):
-      //   xc con M           → ALL:M
-      //   xc N con M         → N:M
-      //   xc N1 N2 Nk con M  → N1,N2,Nk:M
-      //   xc3 con M          → 3:M
-      //   xc35 con M         → 3,5:M
-      // El sufijo debe ir precedido de al menos un espacio para no confundirse
-      // con tokens numéricos como "23x4" (par implícito).
-      let xcTokenInline = null;
+      // ── NORMALIZACIÓN INLINE DE xc ────────────────────────────────────────────
+      // "xc" es una instrucción de centena, NO una variante de candado.
+      // Formas soportadas:
+      //   45 68 xc 10
+      //   45 68 xc 1 2 3 10
+      //   45 68 xc 1 2 3 con 10
+      // Se convierte a la gramática ya existente de centena explícita.
       {
-        const mXCInline = lineaSinTotal.match(
-          /\s+(xc[0-9]*(?:\s+[0-9])*(?:\s+con\s+[\d.,]+)?)\s*$/i
-        );
-        if (mXCInline) {
-          const xcPart = mXCInline[1].trim();
-          const cgSpec = _detectarCentenaGlobal(xcPart);
-          if (cgSpec !== null) {
-            lineaSinTotal = lineaSinTotal.slice(0, mXCInline.index).trim();
-            xcTokenInline = `\x00CENTENA_GLOBAL\x00${cgSpec}\x00`;
+        const mXC = lineaSinTotal.match(/^(.*?)\s+xc(?:\s+(.*))?\s*$/i);
+        if (mXC) {
+          const base = (mXC[1] || '').trim();
+          const tail = (mXC[2] || '').trim();
+          const tokens = tail ? tail.split(/\s+/).filter(Boolean) : [];
+          let monto = null;
+          let specs = [];
+
+          const conIdx = tokens.findIndex(t => /^con$/i.test(t));
+          if (conIdx >= 0) {
+            if (conIdx !== tokens.length - 2 || !/^\d+(?:[.,]\d+)?$/.test(tokens[conIdx + 1])) {
+              monto = null;
+            } else {
+              monto = tokens[conIdx + 1];
+              specs = tokens.slice(0, conIdx);
+            }
+          } else if (tokens.length > 0) {
+            monto = tokens[tokens.length - 1];
+            specs = tokens.slice(0, -1);
+          }
+
+          const specsValidos = specs.length === 0 || specs.every(t => /^\d$/.test(t));
+          const montoValido = !!monto && /^\d+(?:[.,]\d+)?$/.test(monto);
+          const baseValida = !!base && /\d/.test(base);
+
+          if (baseValida && montoValido && specsValidos) {
+            const centenasXC = specs.length ? specs.join(' ') : '0 1 2 3 4 5 6 7 8 9';
+            lineaSinTotal = `${base} centena ${centenasXC} con ${monto}`;
             trace('PRE_NORMALIZED', {
               rawLine: line,
-              razon: 'sufijo xc inline extraído',
-              jugadaBase: lineaSinTotal,
-              xcToken: xcTokenInline,
+              razon: 'xc inline → centena explícita',
+              normalizado: lineaSinTotal,
             });
           }
         }
