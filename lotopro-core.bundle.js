@@ -637,7 +637,7 @@ function clasificarTokens(linea) {
     } else if (tokL === 'con') {
       postCon = true;
       resultado.push({ tok, type: 'CON' });
-    } else if (/^(parle|candado|y|al|centena|total|de|a|pr|p|c|t\d*|d\d*)$/i.test(tok)) {
+    } else if (/^(parle|candado|y|al|centena|total|de|a|pr|p|c|xc|t\d*|d\d*)$/i.test(tok)) {
       resultado.push({ tok, type: 'OP' });
       if (/^(y|de|a)$/i.test(tok)) postCon = false;
     } else {
@@ -2269,7 +2269,7 @@ const TYPO_PATTERNS = [
 
 // Palabras reservadas del DSL que NUNCA pueden ser nombre de bloque
 const DSL_KEYWORDS = new Set([
-  'con', 'y', 'parle', 'candado', 'total', 'centena', 'centenas',
+  'con', 'y', 'de', 'a', 'pr', 'xc', 'parle', 'candado', 'total', 'centena', 'centenas',
   'pareja', 'parejas', 'p', 'c', 'd', 't', 'v', 'decena', 'terminal',
   'fijo', 'corrido', 'volteo', 'bote', 'tarjeta', 'rango',
   'ponme', 'nota', 'obs', 'observacion', 'ref', 'referencia',
