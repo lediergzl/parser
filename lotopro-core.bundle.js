@@ -4158,8 +4158,13 @@ function preprocesarJugada(rawInput) {
           const baseValida = !!base && /\d/.test(base);
 
           if (baseValida && montoValido && specsValidos) {
-            const centenasXC = specs.length ? specs.join(' ') : '0 1 2 3 4 5 6 7 8 9';
-            lineaSinTotal = `${base} centena ${centenasXC} con ${monto}`;
+            const centenasXC = specs.length ? specs : ['0','1','2','3','4','5','6','7','8','9'];
+            const basesXC = (base.match(/\b\d{1,2}\b/g) || []).map(n => String(n).padStart(2, '0'));
+            const numerosXC = [];
+            for (const c of centenasXC) {
+              for (const n of basesXC) numerosXC.push(c + n);
+            }
+            lineaSinTotal = `${numerosXC.join(' ')} con ${monto}`;
             trace('PRE_NORMALIZED', {
               rawLine: line,
               razon: 'xc inline → centena explícita',
