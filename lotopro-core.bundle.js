@@ -417,7 +417,7 @@ function createExpansion(deps = {}) {
     const tieneCon = /\bcon\b/i.test(text);
     const tieneParleExplicito = /\bparle\b/i.test(text) || /(?<![a-zA-Z])p\s+\d/.test(text) || /\bp\d/.test(text);
     const tieneCandadoExplicito = /\bcandado\b/i.test(text) || /(?<![a-zA-Z])c\s+\d/.test(text) || /\bc\d/.test(text);
-    const tieneOp = /\d\s*[*xX×\-]\s*\d/.test(text);
+    const tieneOp = false;
     const tiene4 = /\b\d{4}\b/.test(text);
     const esLinea = tieneParleExplicito || tieneCandadoExplicito || tiene4 || (!tieneCon && tieneOp);
     if (tieneCon && !esLinea) { if (!tieneOp) return pares; }
@@ -455,21 +455,18 @@ function createExpansion(deps = {}) {
       tpSimple = tpSimple.slice(0, s) + ' '.repeat(e - s) + tpSimple.slice(e);
     }
 
-    const pats = [
-      /\b(\d{1,2})\s*\*\s*(\d{1,2})\b/g,
-      /\b(\d{1,2})\s*[xX]\s*(\d{1,2})\b/g,
-      /\b(\d{1,2})\s*-\s*(\d{1,2})\b/g,
-      /\b(\d{1,2})\s*×\s*(\d{1,2})\b/g,
-    ];
+    // x/*/× no son operadores: con PARLE explícito los números base forman combinaciones.
     let m;
-    for (const pat of pats) {
-      while ((m = pat.exec(tpSimple)) !== null) pares.push([m[1].padStart(2, '0'), m[2].padStart(2, '0')]);
+    if (tieneParleExplicito) {
+      const numsAntesDelStop = (tp.match(/\b\d{1,2}\b/g) || []).map(n => n.padStart(2, '0'));
+      for (let i = 0; i < numsAntesDelStop.length; i++)
+        for (let j = i + 1; j < numsAntesDelStop.length; j++) pares.push([numsAntesDelStop[i], numsAntesDelStop[j]]);
     }
-    if (tieneParleExplicito || tieneOp) {
+    if (tieneParleExplicito || tiene4) {
       const p4 = /\b(\d{4})\b/g;
-      while ((m = p4.exec(tp)) !== null) pares.push([m[1].substring(0, 2).padStart(2, '0'), m[1].substring(2).padStart(2, '0')]);
+      while ((m = p4.exec(tp)) !== null)
+        pares.push([m[1].substring(0, 2).padStart(2, '0'), m[1].substring(2).padStart(2, '0')]);
     }
-    // PARLE EXPLÍCITO SIN x/*: formar todas las combinaciones desde los números base.
     if (tieneParleExplicito && pares.length === 0) {
       const numsAntesDelStop = (tp.match(/\b\d{1,2}\b/g) || []).map(n => n.padStart(2, '0'));
       for (let i = 0; i < numsAntesDelStop.length; i++) {
@@ -481,31 +478,22 @@ function createExpansion(deps = {}) {
 
   function extractParlePairs(line) {
     const pares = extractParlePairsFromText(line);
-    const esParleImplicito = /\d{1,2}\s*[xX*]\s*\d{1,2}/.test(line);
-    // ── REGLA PALÉ MULTI-COMBINACIÓN: extracción de monto ─────────────────────
-    // Cuando hay pares NxN en la línea, el monto está SIEMPRE en "con N" (stop-token).
-    // NO usar el regex de Caso 1 que captura el primer dígito de un par como monto.
-    // Separadores intermedios (y / , / espacio) son ignorados — NO son stop-tokens.
-    // STOP TOKENS: solo "con" y "total" delimitan el fin de los pares.
-    let mParle;
-    if (esParleImplicito || /\bparle\b/i.test(line)) {
-      // Prioridad: "con N" (puede estar precedido de pares, separadores, etc.)
+    const tieneParleExplicito = /\bparle\b/i.test(line) || /(?<![a-zA-Z])p\s*\d/i.test(line);
+    // x/*/× no son un operador implícito de parle.
+    let mParle = null;
+    if (tieneParleExplicito) {
       mParle = line.match(/\bcon\s+(\d+(?:[.,]\d+)?)/i) ||
                line.match(/\bparle\b\s*con\s+(\d+(?:[.,]\d+)?)/i) ||
-               line.match(/\bp\s*(\d+(?:[.,]\d+)?)/i);
-    }
-    if (!mParle && !esParleImplicito) {
-      // Sin pares implícitos: Caso 1 con lookahead negativo para evitar capturar dígitos de par.
-      mParle = line.match(/\bparle\b(?:\s*[:=]|\s*)?(?:con\s*)?(\d+(?:[.,]\d+)?)(?!\s*[xX*]\d)/i) ||
-               line.match(/\bp\s*(\d+(?:[.,]\d+)?)/i);
+               line.match(/\bp\s*(\d+(?:[.,]\d+)?)/i) ||
+               line.match(/\bparle\b\s*[:=]?\s*(\d+(?:[.,]\d+)?)/i);
     }
     const monto = mParle ? lm(mParle[1]) : null;
     if (!pares.length && monto === null) return null;
-    if (pares.length && monto === null && !/\bparle\b/i.test(line) && !esParleImplicito) return null;
+    if (pares.length && monto === null && !tieneParleExplicito) return null;
     return { pares, monto };
   }
 
-  function extractMontosAfterCon(line) {
+  function extractMontosAfterCon  function extractMontosAfterCon(line) {
     const m = line.match(/\b(con|de|a)\b([\s\S]*)/i);
     if (!m) return [];
     const montos = [];
@@ -678,7 +666,7 @@ function buildLineaDB(lineaOriginal, lineaExpandida, ex) {
   const parleInfo = ex.extractParlePairs(lineaExpandida);
   const esPR = /\b\d{1,2}\s+pr\s+/i.test(lineaOriginal);
   // x/* ya fueron normalizados como separadores; no usar su presencia para inferir parle.
-  const esPares = /\bparle\b/i.test(lineaOriginal) || /\bp\s*\d/i.test(lineaOriginal);
+  const esPares = /\bparle\b/i.test(lineaOriginal) || /(?<![a-zA-Z])p\s*\d/i.test(lineaOriginal);
   let pares = (parleInfo && Array.isArray(parleInfo.pares)) ? parleInfo.pares : [];
   let parleMonto = (parleInfo && parleInfo.monto !== null) ? parleInfo.monto : null;
 
@@ -874,25 +862,15 @@ function validarLinea(linea, lineaOriginal, db, lineaNum, collectedNums, ex) {
 
 // ──────────────── EXTRACCIÓN DE MONTOS ──────────────────────────────────────
 function _montoParle(linea, lm) {
-  // Caso 2 (priority): "parle NxN NxN ... con N" — cuando hay pares NxN en la línea,
-  // el monto SIEMPRE está en el "con N" final. Caso 1 queda excluido para evitar
-  // capturar el primer dígito de un par (ej: "parle 44x12 y 44x21 con 50" → 44 ≠ monto).
-  if (/\bparle\b/i.test(linea) && /\d[xX*]\d/.test(linea)) {
-    // STOP TOKENS: "con" y "total" delimitan el fin de los pares; el monto está después.
-    const mc = linea.match(/\bcon\s+(\d+(?:[.,]\d+)?)/i);
-    if (mc) return lm(mc[1]);
-    // Monto inmediato tras "parle con N" también válido aquí.
-    const mc2 = linea.match(/\bparle\b\s*con\s+(\d+(?:[.,]\d+)?)/i);
-    if (mc2) return lm(mc2[1]);
-    return null;
-  }
-  // Caso 1: "parle N" o "parle: N" o "parle con N" (sin pares NxN — monto directo).
-  // El número capturado NO debe estar seguido de [xX*]\d (sería parte de un par).
-  const m = linea.match(/\bparle\b(?:\s*[:=]|\s*)(?:con\s*)?(\d+(?:[.,]\d+)?)(?!\s*[xX*]\d)/i);
-  if (m) return lm(m[1]);
-  return null;
+  // PARLE solo existe cuando se declara explícitamente con "parle"/"p".
+  // x/*/× entre números son separadores.
+  const mCon = linea.match(/\bparle\b[\s\S]*?\bcon\s+(\d+(?:[.,]\d+)?)/i);
+  if (mCon) return lm(mCon[1]);
+  const m = linea.match(/\bparle\b\s*[:=]?\s*(?:con\s*)?(\d+(?:[.,]\d+)?)/i) ||
+            linea.match(/(?<![a-zA-Z])p\s*(\d+(?:[.,]\d+)?)/i);
+  return m ? lm(m[1]) : null;
 }
-function _montoCandado(linea, lm) {
+function _montoCandadofunction _montoCandado(linea, lm) {
   let m = linea.match(/\bcandado\b(?:\s*con\s*)?(\d+(?:[.,]\d+)?)/i);
   if (!m) m = linea.match(/\bcandado\s+(\d+(?:[.,]\d+)?)/i);
   return m ? lm(m[1]) : null;
@@ -4423,22 +4401,11 @@ const PRE_PARLE_WORDS_IS = new Set(['el','la']);
 const PARLE_ALIAS_IS = /\b(pale|palé|parlet|parlé|parle)\b/gi;
 const PAIR_NORM_IS = [[/(\d+)\s*\*\s*(\d+)/g,'$1x$2'],[/(\d+)\s+[xX]\s+(\d+)/g,'$1x$2'],[/(\d+)[xX]\s+(\d+)/g,'$1x$2'],[/(\d+)\s+[xX](\d+)/g,'$1x$2']];
 function normalizarPares(line){
-  // El operador * o x entre números ES la señal de parle.
-  // Cadenas A*B*C (3+) → pares individuales NxN separados por espacio: 78*26*30 → 78x26 78x30 26x30
-  // Pares simples AxB → NxN normalizado.
-  let l = line.replace(/\b(\d{1,2})(?:\s*[*xX×]\s*\d{1,2}){2,}/g, (match) => {
-    const nums = match.split(/\s*[*xX×]\s*/);
-    const pairs = [];
-    for (let i = 0; i < nums.length; i++)
-      for (let j = i + 1; j < nums.length; j++)
-        pairs.push(nums[i] + 'x' + nums[j]);
-    return pairs.join(' ');
-  });
-  const PAIR_NORM_IS2 = [[/(\d+)\s*\*\s*(\d+)/g,'$1x$2'],[/(\d+)\s+[xX]\s+(\d+)/g,'$1x$2'],[/(\d+)[xX]\s+(\d+)/g,'$1x$2'],[/(\d+)\s+[xX](\d+)/g,'$1x$2']];
-  for(const[re,rep]of PAIR_NORM_IS2)l=l.replace(re,rep);
-  return l;
+  // x, * y × entre números son SOLO separadores del lado izquierdo.
+  // La modalidad PARLE se determina exclusivamente por "parle"/"p".
+  return String(line || '').replace(/[xX*×]/g, ' ').replace(/\s+/g, ' ').trim();
 }
-function preNormalizarParleOpeners(line){return line.replace(/\b(?:y|mas|más|aparte|tambien|también|ademas|además)\b\s+(?:\b(?:el|la|un|una)\b\s+)?\bparle\b/gi,'__PARLE_OPEN__');}
+function preNormalizarParleOpenersfunction preNormalizarParleOpeners(line){return line.replace(/\b(?:y|mas|más|aparte|tambien|también|ademas|además)\b\s+(?:\b(?:el|la|un|una)\b\s+)?\bparle\b/gi,'__PARLE_OPEN__');}
 function filtrarRuidoHumano(line){return line.trim().split(/\s+/).filter(tok=>{if(tok==='__PARLE_OPEN__')return true;const t=tok.replace(/[^a-záéíóúüñ]/gi,'').toLowerCase();if(PRE_PARLE_WORDS_IS.has(t)&&!/\d/.test(tok))return false;return!NOISE_WORDS_IS.has(t)||/\d/.test(tok);}).join(' ');}
 function segmentarLinea(rawLine,lineIndex){
   lineIndex=lineIndex||0;
