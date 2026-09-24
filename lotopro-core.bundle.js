@@ -4124,6 +4124,7 @@ function preprocesarJugada(rawInput) {
       }
 
       // ── NORMALIZACIÓN INLINE DE xc ────────────────────────────────────────────
+      let xcTokenInline = null;
       // "xc" es una instrucción de centena, NO una variante de candado.
       // Formas soportadas:
       //   45 68 xc 10
