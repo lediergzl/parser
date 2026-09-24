@@ -3577,6 +3577,13 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
   l = l.replace(/[\u{1F510}\u{1F512}\u{1F50F}]/gu, ' candado ');
 
   l = l.toLowerCase();
+
+  // "25 corrido 10" = corrido puro. Canonizar antes de eliminar palabras
+  // de modalidad para que "corrido" no se pierda.
+  if (!/\bcon\b/i.test(l) && !/\b(parle|candado)\b/i.test(l)) {
+    l = l.replace(/^(.*?)\s+corrido\s+(\d+(?:[.,]\d+)?)\s*$/i, '$1 con 0 y $2');
+  }
+
   trace('PRE_NORMALIZED', { id, rawLine, normalizado: l, paso: 'lowercase' });
 
   // Normalizar variantes acentuadas de parle/parlé/parlét ANTES del strip de no-ASCII (línea 383),
@@ -3715,9 +3722,6 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
   l = l.replace(/\bf(\d+)/gi, '$1');
   l = l.replace(/(\d+)C\b/g, '$1');
   l = _normalizarCandadoParle(l);
-  if (!/\bcon\b/i.test(l) && !/\b(parle|candado)\b/i.test(l)) {
-    l = l.replace(/^(.*?)\s+corrido\s+(\d+(?:[.,]\d+)?)\s*$/i, '$1 con 0 y $2');
-  }
   if (!/\bcon\b/i.test(l)) {
     l = l.replace(/\b(?:de|a)\s+(?=\d)/ig, 'con ');
   }
