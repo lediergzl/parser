@@ -433,28 +433,6 @@ function createExpansion(deps = {}) {
     const stopMatch = /\b(con|total)\b/i.exec(text);
     if (stopMatch) tp = text.slice(0, stopMatch.index);
 
-    // El operador * o x entre números ES la señal de parle.
-    // Cadenas A*B*C o AxBxC (3+ elementos) → todos los pares combinatorios comb(n,2).
-    // El regex simple \b(\d{1,2})\*(\d{1,2})\b solo captura el primer par de una cadena
-    // porque después de '78*26' el siguiente token es '*30' sin word boundary izquierdo.
-    let tpSimple = tp;
-    const chainRe = /\b(\d{1,2})(?:\s*[*xX×]\s*\d{1,2})+/g;
-    let chainMatch;
-    const chainedRanges = [];
-    while ((chainMatch = chainRe.exec(tp)) !== null) {
-      if (!/[*xX×].*[*xX×]/.test(chainMatch[0])) continue; // solo cadenas 3+ elementos
-      const ns = chainMatch[0].split(/\s*[*xX×]\s*/).map(n => n.padStart(2, '0'));
-      for (let i = 0; i < ns.length; i++)
-        for (let j = i + 1; j < ns.length; j++)
-          pares.push([ns[i], ns[j]]);
-      chainedRanges.push([chainMatch.index, chainMatch.index + chainMatch[0].length]);
-    }
-    // Enmascarar cadenas ya procesadas para que los patrones simples no dupliquen pares
-    for (let k = chainedRanges.length - 1; k >= 0; k--) {
-      const [s, e] = chainedRanges[k];
-      tpSimple = tpSimple.slice(0, s) + ' '.repeat(e - s) + tpSimple.slice(e);
-    }
-
     // x/*/× no son operadores: con PARLE explícito los números base forman combinaciones.
     let m;
     if (tieneParleExplicito) {
@@ -493,7 +471,7 @@ function createExpansion(deps = {}) {
     return { pares, monto };
   }
 
-  function extractMontosAfterCon  function extractMontosAfterCon(line) {
+  function extractMontosAfterCon(line) {
     const m = line.match(/\b(con|de|a)\b([\s\S]*)/i);
     if (!m) return [];
     const montos = [];
