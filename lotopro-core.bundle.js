@@ -3365,7 +3365,7 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
   // Solo se transforma cuando "corrido" está entre los números y el monto,
   // para no reinterpretar otras líneas.
   l = l.replace(
-    /^(\\s*(?:\\d{1,3}\\s+)+)corrido\\s+(\\d+(?:[.,]\\d+)?)\\s*$/i,
+    /^(\s*(?:\d{1,3}\s+)+)corrido\s+(\d+(?:[.,]\d+)?)\s*$/i,
     '$1con 0 y $2'
   );
 
