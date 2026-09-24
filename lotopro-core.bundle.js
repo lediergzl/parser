@@ -3358,6 +3358,17 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
   // La heurística: punto/coma entre números se preserva SOLO en el lado derecho
   // del 'con', que el RightSideSanitizer ya valida. En el lado izquierdo,
   // punto/coma entre números siempre es separador → limpiar a espacio.
+  // ── NORMALIZACIÓN CORRIDO PURO ─────────────────────────────────────────────
+  // "N corrido M" es una apuesta de corrido sin fijo.
+  // Se lleva a la gramática existente "N con 0 y M"; buildOpsNormal ya
+  // descarta el fijo de monto 0 y conserva el corrido como segundo monto.
+  // Solo se transforma cuando "corrido" está entre los números y el monto,
+  // para no reinterpretar otras líneas.
+  l = l.replace(
+    /^(\\s*(?:\\d{1,3}\\s+)+)corrido\\s+(\\d+(?:[.,]\\d+)?)\\s*$/i,
+    '$1con 0 y $2'
+  );
+
   l = (function _limpiarSeparadoresNoDSL(linea) {
     // x, *, - y / en el lado izquierdo son SOLO separadores.
     // La modalidad PARLE se determina por "parle"/"pN", nunca por x/*.
