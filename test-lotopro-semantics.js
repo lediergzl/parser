@@ -78,6 +78,15 @@ assertInvalid('45 68 98 con 10 y 10 y 10 p3');
 
   r = assertTotal('45 68 xc 1 2 3 10', 60);
   assert.deepStrictEqual(detalles(r)[0].numeros, ['145','168','245','268','345','368']);
+
+  // xc + fijo + corrido + parle: la centena usa 1,2,3;
+  // fijo/corrido/parle siguen usando solo los números base 45,68,98.
+  r = assertTotal('45 68 98 xc 1 2 3 con 10 y 10 y 10 p3', 159);
+  const xc = detalles(r);
+  assert.strictEqual(xc.find(d => d.tipo === 'centena').monto, 90);
+  assert.deepStrictEqual(xc.find(d => d.tipo === 'fijo').numeros, ['45','68','98']);
+  assert.deepStrictEqual(xc.find(d => d.tipo === 'corrido').numeros, ['45','68','98']);
+  assert.strictEqual(xc.find(d => d.tipo === 'parle').pares.length, 3);
 }
 
 // pr + decena.
