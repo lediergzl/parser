@@ -677,7 +677,8 @@ function buildLineaDB(lineaOriginal, lineaExpandida, ex) {
   const centenas = (beforeCon.match(/\b[0-9]{3}\b/g) || []).map(n => ex.normalizeNumToken(n)).filter(s => s && s.length === 3);
   const parleInfo = ex.extractParlePairs(lineaExpandida);
   const esPR = /\b\d{1,2}\s+pr\s+/i.test(lineaOriginal);
-  const esPares = /\d{1,2}\s*[xX]\s*\d{1,2}/.test(lineaOriginal);
+  // x/* ya fueron normalizados como separadores; no usar su presencia para inferir parle.
+  const esPares = /\bparle\b/i.test(lineaOriginal) || /\bp\s*\d/i.test(lineaOriginal);
   let pares = (parleInfo && Array.isArray(parleInfo.pares)) ? parleInfo.pares : [];
   let parleMonto = (parleInfo && parleInfo.monto !== null) ? parleInfo.monto : null;
 
@@ -2988,18 +2989,12 @@ function limpiarLineaAuto(linea) {
   if (!linea || typeof linea !== 'string') return '';
   // REGLA PALÉ: pale/palé/parlé/parlet son alias de parle — detectarlos como parle explícito.
   const tieneParleCandadoExplicito = /\b(pale|parlet|parle|candado)\b/i.test(linea);
-  const tieneParImplicito = /\d{1,2}\s*[xX*]\s*\d{1,2}/.test(linea);
-  const esParle = tieneParleCandadoExplicito || tieneParImplicito;
+  // IMPORTANTE: x/* del lado izquierdo son SOLO separadores.
+  // Nunca convierten una línea en parle por sí mismos.
+  const esParle = tieneParleCandadoExplicito;
 
   if (esParle) {
-    let prevP = '';
-    while (prevP !== linea) {
-      prevP = linea;
-      linea = linea.replace(/(\d+)\s*\*\s*(\d+)/g, '$1x$2');
-    }
     linea = linea.replace(/(\d)p\s*(\d)/gi, '$1 p$2');
-    linea = linea.replace(/((?:\d{1,2}[xX]){2,}\d{1,2})/g, m => m.split(/[xX]/).join(' '));
-    linea = linea.replace(/(\d+[xX]\d+)\s*,\s*(?=\d+[xX])/g, '$1 ');
   
 /*  
     if (tieneParleCandadoExplicito && /\bcandado\b/i.test(linea)) {
