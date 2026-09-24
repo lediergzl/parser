@@ -497,7 +497,8 @@ function createExpansion(deps = {}) {
 
   return {
     expandirTodasLasCentenas,
-    expandirPorLaCentena,    expandirVolteoNumeros,
+    expandirPorLaCentena,
+    expandirVolteoNumeros,
     expandirPatronPR,
     expandirRangos,
     normalizeNumToken,
@@ -847,7 +848,7 @@ function _montoParle(linea, lm) {
             linea.match(/(?<![a-zA-Z])p\s*(\d+(?:[.,]\d+)?)/i);
   return m ? lm(m[1]) : null;
 }
-function _montoCandadofunction _montoCandado(linea, lm) {
+function _montoCandado(linea, lm) {
   let m = linea.match(/\bcandado\b(?:\s*con\s*)?(\d+(?:[.,]\d+)?)/i);
   if (!m) m = linea.match(/\bcandado\s+(\d+(?:[.,]\d+)?)/i);
   return m ? lm(m[1]) : null;
@@ -996,7 +997,8 @@ function buildOpsCandadoGlobal(linea, collectedNums, lm) {
   const op = {
     tipo: 'candado_global',
     numeros: nums.slice(),
-    pares: generarPares(nums),    montoUnitario: unit,
+    pares: generarPares(nums),
+    montoUnitario: unit,
     totalReal: real,
     diff: diff,
     totalOriginal: lm(m[1])
@@ -1495,7 +1497,8 @@ function mapearRazonFlag(razonInterna, raw, cleaned) {
     };
   }
   if (r.includes('ponme')) {
-    return { reason: 'Instrucción operativa descartada ("ponme"). No es una jugada.', severity: 'warning', code: 'OP_INSTRUCTION' };  }
+    return { reason: 'Instrucción operativa descartada ("ponme"). No es una jugada.', severity: 'warning', code: 'OP_INSTRUCTION' };
+  }
   if (r.includes('parejas sin')) {
     return { reason: 'Parejas sin monto. Escriba "parejas con <monto>".', severity: 'error', code: 'R_PAREJAS_SIN_CON' };
   }
@@ -1994,7 +1997,8 @@ function detectarOpKind(lineaExp, db) {
     stage: 'detectarOpKind:entrada',
     lineaExp: trimmed,
     numerosBase: db.numerosBase,
-    centenas: db.centenas,    pares: db.pares,
+    centenas: db.centenas,
+    pares: db.pares,
   });
 
   // FIX: "parle NxN con X" — explicit pair with amount — must NOT be PARLE_GLOBAL.
@@ -2493,7 +2497,8 @@ function parsearBloques(rawLinesPreprocesadas, rawLinesOriginales, limpiarMonto)
       pendingName = null;
       pendingMeta = [];
       trace('PARSER_LINE', { index: i, tipo: 'SEP_WA', razon: 'separador ─── → cierra bloque' });
-      continue;    }
+      continue;
+    }
 
     // 3. Línea con dígitos (jugada)
     if (hasDigit) {
@@ -2992,7 +2997,8 @@ function _expandirRangosLinea(l) {
     const bHasDot = bStr.includes('.');
     if (aHasDot !== bHasDot) return match;
     if (aHasDot) {
-      let start = Math.round(aNum * 100);      let end   = Math.round(bNum * 100);
+      let start = Math.round(aNum * 100);
+      let end   = Math.round(bNum * 100);
       start = Math.max(0, Math.min(99, start));
       end   = Math.max(0, Math.min(99, end));
       if (start > end) return match;
@@ -3226,11 +3232,8 @@ function _detectarCentenaGlobal(l) {
   // xc3 con 10  → centena 3 con monto 10
   // xc 3 5 con 10 → centenas 3 y 5 con monto 10
   // SINTAXIS INLINE: "<números> xc [centenas] <monto>".
-  // Ejemplos confirmados:
-  //   "45 68 xc 10"        -> 045 145 ... 968 con 10
-  //   "45 68 xc 1 2 3 10" -> 145 168 245 268 345 368 con 10
-  // Los números del lado izquierdo siguen siendo números base; "xc" cambia
-  // la modalidad a centena. No se debe interpretar la "c" de "xc" como candado.
+  // "45 68 xc 10" -> todas las centenas de 45 y 68.
+  // "45 68 xc 1 2 3 10" -> solo centenas 1, 2 y 3.
   const mInline = t.match(/^((?:\d{1,2}\s+)+)xc\s*(.*)$/i);
   if (mInline) {
     const bases = mInline[1].trim().split(/\s+/).map(n => n.padStart(2, '0'));
@@ -3238,11 +3241,11 @@ function _detectarCentenaGlobal(l) {
     const nums = resto.match(/\d+(?:[.,]\d+)?/g) || [];
     if (nums.length < 1) return null;
 
-    // El último número es siempre el monto. Los anteriores, si existen,
-    // son los dígitos de centena seleccionados.
     const monto = nums[nums.length - 1];
     const seleccion = nums.slice(0, -1).filter(n => /^\d$/.test(n));
-    const centenas = seleccion.length ? seleccion : ['0','1','2','3','4','5','6','7','8','9'];
+    const centenas = seleccion.length
+      ? seleccion
+      : ['0','1','2','3','4','5','6','7','8','9'];
 
     const expandidos = [];
     for (const c of centenas) {
@@ -3378,17 +3381,6 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
   // La heurística: punto/coma entre números se preserva SOLO en el lado derecho
   // del 'con', que el RightSideSanitizer ya valida. En el lado izquierdo,
   // punto/coma entre números siempre es separador → limpiar a espacio.
-  // ── NORMALIZACIÓN CORRIDO PURO ─────────────────────────────────────────────
-  // "N corrido M" es una apuesta de corrido sin fijo.
-  // Se lleva a la gramática existente "N con 0 y M"; buildOpsNormal ya
-  // descarta el fijo de monto 0 y conserva el corrido como segundo monto.
-  // Solo se transforma cuando "corrido" está entre los números y el monto,
-  // para no reinterpretar otras líneas.
-  l = l.replace(
-    /^(\s*(?:\d{1,3}\s+)+)corrido\s+(\d+(?:[.,]\d+)?)\s*$/i,
-    '$1con 0 y $2'
-  );
-
   l = (function _limpiarSeparadoresNoDSL(linea) {
     // x, *, - y / en el lado izquierdo son SOLO separadores.
     // La modalidad PARLE se determina por "parle"/"pN", nunca por x/*.
@@ -3435,9 +3427,6 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
   {
     const cgEarly = _detectarCentenaGlobal(trimmed);
     if (cgEarly !== null) {
-      // La forma INLINE ya contiene los números base y las centenas expandidas.
-      // Se devuelve como línea DSL normal para que buildLineaDB/buildOpsCentena
-      // produzcan una operación de tipo "centena" y no una centena_global.
       if (cgEarly.startsWith('INLINE:')) {
         const inlineLine = cgEarly.slice('INLINE:'.length);
         trace('PRE_FILTERED', {
@@ -3528,7 +3517,8 @@ function procesarLineaRaw(rawLine, ledger = null, lineIndex = -1) {
         return cleaned;
       }
 
-      // Caso no recuperable: el texto no es todo ruido DSL conocido      // (ej: "Florida 2", "New York 3" — son encabezados reales de lotería).
+      // Caso no recuperable: el texto no es todo ruido DSL conocido
+      // (ej: "Florida 2", "New York 3" — son encabezados reales de lotería).
       // Registrar como PENDING_REVIEW, nunca silenciar.
       if (ledger && esLineaCandidato(rawLine)) {
         ledger.flag(
@@ -4027,7 +4017,8 @@ function preprocesarJugada(rawInput) {
     // _wasWAHeader: la línea original era un header de WA (con bracket de fecha)
     // O era "Nombre: [header_reenviado]" — el strip 1c lo resuelve y _rawStripped
     // empieza con el contenido del header interno (puede ser texto ciudad+nombre).
-    // Detectamos ambos casos para aplicar el Bug2 fix correctamente.    const _origTrim = lines[i].trim();
+    // Detectamos ambos casos para aplicar el Bug2 fix correctamente.
+    const _origTrim = lines[i].trim();
     const _wasWAHeader = /^\[/.test(_origTrim) ||
                          /^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(_origTrim) ||
                          /^[A-Za-zÀ-ɏ0-9_\-\.]{1,30}:\s+\[/.test(_origTrim);
@@ -4423,7 +4414,7 @@ function normalizarPares(line){
   // La modalidad PARLE se determina exclusivamente por "parle"/"p".
   return String(line || '').replace(/[xX*×]/g, ' ').replace(/\s+/g, ' ').trim();
 }
-function preNormalizarParleOpenersfunction preNormalizarParleOpeners(line){return line.replace(/\b(?:y|mas|más|aparte|tambien|también|ademas|además)\b\s+(?:\b(?:el|la|un|una)\b\s+)?\bparle\b/gi,'__PARLE_OPEN__');}
+function preNormalizarParleOpeners(line){return line.replace(/\b(?:y|mas|más|aparte|tambien|también|ademas|además)\b\s+(?:\b(?:el|la|un|una)\b\s+)?\bparle\b/gi,'__PARLE_OPEN__');}
 function filtrarRuidoHumano(line){return line.trim().split(/\s+/).filter(tok=>{if(tok==='__PARLE_OPEN__')return true;const t=tok.replace(/[^a-záéíóúüñ]/gi,'').toLowerCase();if(PRE_PARLE_WORDS_IS.has(t)&&!/\d/.test(tok))return false;return!NOISE_WORDS_IS.has(t)||/\d/.test(tok);}).join(' ');}
 function segmentarLinea(rawLine,lineIndex){
   lineIndex=lineIndex||0;
@@ -4527,3 +4518,631 @@ function procesarBloque(bloque, deps) {
   const MENSAJES_ERROR_PRE = {
     R_PAREJAS_SIN_CON: (lineaOrig) => {
       const monto = (lineaOrig.match(/\d+[.,]?\d*/) || [''])[0];
+      return `"${lineaOrig}" — escriba "parejas con ${monto}" para indicar el monto.`;
+    },
+  };
+  const lineasFiltradas = [];
+  for (const linea of (bloque.jugadaLines || [])) {
+    const m = typeof linea === 'string' &&
+      linea.match(/^\x00ERROR\x00([^\x00]+)\x00([^\x00]*)\x00$/);
+    if (m) {
+      const [, code, lineaOrig] = m;
+      const msgFn = MENSAJES_ERROR_PRE[code];
+      const err = {
+        code,
+        line: lineOffset + lineasFiltradas.length + 1,
+        message: msgFn ? msgFn(lineaOrig) : `Error en línea: "${lineaOrig}". Revise la sintaxis.`,
+      };
+      trace('ERROR', { stage: 'marcador_preprocesador', ...err });
+      errors.push(err);
+      hasError = true;
+      continue;
+    }
+    lineasFiltradas.push(linea);
+  }
+
+  const tokens = clasificarBloque(lineasFiltradas, lineOffset, ex, buildLineaDB);
+
+  trace('ENGINE_TOKEN', {
+    stage: 'tokens recibidos',
+    total: tokens.length,
+    resumen: tokens.map(t => ({ type: t.type, opKind: t.opKind, lineNum: t.lineNum, lineaExp: t.lineaExp })),
+  });
+
+  for (const token of tokens) {
+    const tokenId = nextId();
+    trace('ENGINE_TOKEN', { id: tokenId, token });
+
+    // ── JOINED (líneas fusionadas artificialmente — NO resetear) ──────────
+    if (token.type === LineType.JOINED) {
+      stats.skippedTokens++;
+      trace('ENGINE_TOKEN', { id: tokenId, stage: 'JOINED → skip sin reset', lineNum: token.lineNum });
+      continue;
+    }
+
+    // ── SEPARATOR ──────────────────────────────────────────────────────────
+    // Regla: la línea vacía es siempre ruido de formato cuando hay números
+    // acumulados pendientes de monto. Solo se resetea el contexto cuando
+    // collectedNums está vacío (sub-bloque ya cerrado con su 'con').
+    if (token.type === LineType.SEPARATOR) {
+      stats.skippedTokens++;
+      if (ctx.collectedNums.length === 0) {
+        ctx.reset('SEPARATOR token');
+        trace('ENGINE_SEPARATOR', { id: tokenId, reset: true, lineNum: token.lineNum });
+      } else {
+        trace('ENGINE_SEPARATOR', { id: tokenId, reset: false, reason: 'collectedNums pendientes — línea vacía ignorada', collectedNums: [...ctx.collectedNums], lineNum: token.lineNum });
+      }
+      continue;
+    }
+
+    // ── NO OPERATION (IGNORE / INVALID) ────────────────────────────────────
+    if (token.type !== LineType.OPERATION) {
+      stats.skippedTokens++;
+      trace('ENGINE_RESET_BY_INVALID', {
+        id: tokenId,
+        type: token.type,
+        lineNum: token.lineNum,
+        lineaExp: token.lineaExp,
+        lineaOrig: token.lineaOrig,
+      });
+      ctx.reset(`token tipo ${token.type}`);
+      continue;
+    }
+
+    const { opKind, lineaExp, lineaOrig, db, lineNum } = token;
+    stats.processedLines++;   // este token llegó al switch como OPERATION
+
+    trace('ENGINE_TOKEN', {
+      id: tokenId,
+      stage: 'OPERATION a procesar',
+      opKind,
+      lineaExp,
+      lineaOrig,
+      lineNum,
+      collectedNums: [...ctx.collectedNums],
+    });
+
+    // ── VALIDACIÓN ─────────────────────────────────────────────────────────
+    // CENTENA_GLOBAL tokens have db:null by design — skip validation.
+    const lineErrors = opKind === OpKind.CENTENA_GLOBAL
+      ? []
+      : validarLinea(lineaExp, lineaOrig, db, lineNum, [...ctx.collectedNums], ex);
+    if (lineErrors.length) {
+      lineErrors.forEach(e => {
+        trace('ERROR', { id: tokenId, ...e, lineaExp, lineaOrig });
+        errors.push(e);
+      });
+      hasError = true;
+      stats.errorLines++;
+      ctx.reset('error de validación');
+      continue;
+    }
+
+    let ops = [];
+
+    switch (opKind) {
+
+      // ── PARLE GLOBAL ──────────────────────────────────────────────────────
+      case OpKind.PARLE_GLOBAL:
+        trace('ENGINE_PARLE_GLOBAL_ENTER', { id: tokenId, lineNum, collectedNums: [...ctx.collectedNums] });
+        // Si el contexto está vacío pero hay un snapshot del parle anterior,
+        // reutilizarlo (caso: "parle con X" suelto tras otro parle que ya resetó).
+        if (ctx.collectedNums.length < 2 && ctx.lastParleNums.length >= 2) {
+          trace('ENGINE_PARLE_GLOBAL_ENTER', {
+            id: tokenId,
+            lineNum,
+            razon: 'collectedNums vacío → reutilizando lastParleNums',
+            lastParleNums: [...ctx.lastParleNums],
+          });
+          ctx.collectedNums = [...ctx.lastParleNums];
+        }
+        if (ctx.collectedNums.length < 2) {
+          const err = {
+            code: 'R005_PARLE_GLOBAL_MIN2',
+            line: lineNum,
+            message: `Para hacer parle necesita al menos 2 números antes del "parle con ...". Solo hay ${ctx.collectedNums.length}.`,
+          };
+          trace('ERROR', { id: tokenId, ...err });
+          errors.push(err);
+          hasError = true;
+          ctx.reset('PARLE_GLOBAL sin suficientes collectedNums');
+          continue;
+        }
+        ops = buildOpsParleGlobal(lineaExp, ctx.collectedNums, lm);
+        trace('ENGINE_PARLE_GLOBAL_OPS', { id: tokenId, ops, lineNum });
+        if (!ops.length) {
+          const err = { code: 'R005_PARLE_SIN_MONTO', line: lineNum, message: `El parle no tiene monto. Escriba "parle con" seguido del valor, por ejemplo: parle con 100` };
+          trace('ERROR', { id: tokenId, ...err });
+          errors.push(err);
+          hasError = true;
+          ctx.reset('PARLE_GLOBAL sin monto válido');
+          continue;
+        }
+        ctx.lastParleNums = [...ctx.collectedNums]; // guardar snapshot antes de resetear
+        ctx.reset('PARLE_GLOBAL procesado OK');
+        break;
+
+      // ── CANDADO GLOBAL ────────────────────────────────────────────────────
+      case OpKind.CANDADO_GLOBAL:
+        trace('ENGINE_CANDADO_GLOBAL_ENTER', { id: tokenId, lineNum, collectedNums: [...ctx.collectedNums] });
+        if (ctx.collectedNums.length < 3) {
+          const err = {
+            code: 'R006_CANDADO_GLOBAL_MIN3',
+            line: lineNum,
+            message: `Para hacer candado necesita al menos 3 números antes del "candado con ...". Solo hay ${ctx.collectedNums.length}.`,
+          };
+          trace('ERROR', { id: tokenId, ...err });
+          errors.push(err);
+          hasError = true;
+          ctx.reset('CANDADO_GLOBAL sin suficientes collectedNums');
+          continue;
+        }
+        ops = buildOpsCandadoGlobal(lineaExp, ctx.collectedNums, lm);
+        trace('ENGINE_CANDADO_GLOBAL_OPS', { id: tokenId, ops, lineNum });
+        if (!ops.length) {
+          const err = { code: 'R006_CANDADO_SIN_MONTO', line: lineNum, message: `El candado no tiene monto. Escriba "candado con" seguido del valor, por ejemplo: candado con 100` };
+          trace('ERROR', { id: tokenId, ...err });
+          errors.push(err);
+          hasError = true;
+          ctx.reset('CANDADO_GLOBAL sin monto válido');
+          continue;
+        }
+        ctx.reset('CANDADO_GLOBAL procesado OK');
+        break;
+
+      // ── CENTENA ───────────────────────────────────────────────────────────
+      case OpKind.CENTENA:
+        ops = buildOpsCentena(lineaExp, db, ex, lm);
+        trace('ENGINE_CENTENA_OPS', { id: tokenId, ops, lineNum, fijosDerivados: db.fijosDerivados });
+        trace('ENGINE_COLLECT_BEFORE', { id: tokenId, lineNum, collectedNums: [...ctx.collectedNums] });
+        ctx.collectedNums.push(...db.fijosDerivados);
+        trace('ENGINE_COLLECT_AFTER', { id: tokenId, lineNum, collectedNums: [...ctx.collectedNums], added: db.fijosDerivados });
+        // No acumulamos en jugadasBase: ya tienen centena explícita, no deben expandirse.
+        break;
+
+      // ── PARLE_ACUM ────────────────────────────────────────────────────────
+      // Par(es) NxN sin monto propio — acumular los pares para MONTO_SOLO posterior.
+      // Regla: solo se permiten pares NxN en el grupo; cualquier otro tipo es error.
+      case OpKind.PARLE_ACUM:
+        trace('ENGINE_PARLE_ACUM', { id: tokenId, lineNum, pares: db.pares });
+        ctx.collectedNums.push(...db.pares.flatMap(p => [p[0], p[1]]));
+        ctx.collectedPares = ctx.collectedPares || [];
+        ctx.collectedPares.push(...db.pares);
+        trace('ENGINE_COLLECT_AFTER', { id: tokenId, lineNum, collectedPares: ctx.collectedPares });
+        break;
+
+      // ── MONTO_SOLO ────────────────────────────────────────────────────────
+      // "con X" o "parle con X" sin números propios — aplica el monto a los
+      // pares NxN acumulados en ctx.collectedPares.
+      // Regla inviolable: el grupo debe ser SOLO pares NxN (collectedPares).
+      // Una línea en blanco (SEPARATOR) ya habrá limpiado ctx antes de llegar aquí.
+      case OpKind.MONTO_SOLO: {
+        const pares = ctx.collectedPares || [];
+        if (pares.length === 0) {
+          const err = {
+            code: 'R007_MONTO_SOLO_SIN_PARES',
+            line: lineNum,
+            message: 'Se encontró un monto suelto sin pares de parle antes. Escriba los pares primero, por ejemplo: 23x45 con 100',
+          };
+          trace('ERROR', { id: tokenId, ...err });
+          errors.push(err);
+          hasError = true;
+          ctx.reset('MONTO_SOLO sin pares acumulados');
+          ctx.collectedPares = [];
+          continue;
+        }
+        // Extraer el monto de la línea
+        const montoMatch = lineaExp.match(/con\s+([\d.]+)/i);
+        if (!montoMatch) {
+          const err = { code: 'R007_MONTO_SOLO_INVALIDO', line: lineNum, message: 'No se pudo leer el monto de esta línea. Verifique que el valor sea un número válido.' };
+          trace('ERROR', { id: tokenId, ...err });
+          errors.push(err);
+          hasError = true;
+          ctx.reset('MONTO_SOLO sin monto válido');
+          ctx.collectedPares = [];
+          continue;
+        }
+        const unit = lm(montoMatch[1]);
+        // Sintetizar lineaExp que buildOpsNormal pueda procesar:
+        // aplana los pares acumulados como "A B C D parle con X"
+        const numsPares = pares.flatMap(p => p.map(n => String(n).padStart(2, '0')));
+        const lineaSintetica = numsPares.join(' ') + ' parle con ' + montoMatch[1];
+        const dbSint = buildLineaDB(lineaSintetica, lineaSintetica, ex);
+        ops = buildOpsNormal(lineaSintetica, dbSint, ex, lm);
+        trace('ENGINE_MONTO_SOLO_OPS', { id: tokenId, lineNum, pares, unit, lineaSintetica, ops });
+        ctx.reset('MONTO_SOLO procesado OK');
+        ctx.collectedPares = [];
+        break;
+      }
+
+      // ── NORMAL ────────────────────────────────────────────────────────────
+      case OpKind.NORMAL:
+        trace('ENGINE_NORMAL_LINE', { id: tokenId, lineNum, lineaExp });
+        ops = buildOpsNormal(lineaExp, db, ex, lm);
+        trace('ENGINE_NORMAL_OPS', { id: tokenId, lineNum, ops });
+
+        if (!ops.length && db.numerosBase.length && !/\bcon\b/i.test(lineaExp)) {
+          const err = {
+            code: 'R010_NUMS_SIN_MONTO',
+            line: lineNum,
+            message: `Los números ${db.numerosBase.join(', ')} no tienen monto. Agregue "con" y el valor, por ejemplo: ${db.numerosBase.join(' ')} con 100`,
+          };
+          trace('ERROR', { id: tokenId, ...err });
+          errors.push(err);
+          hasError = true;
+          ctx.reset('NORMAL sin monto');
+          continue;
+        }
+
+        // Si hay números acumulados en el contexto (líneas previas en el mismo sub-bloque,
+        // sin separador entre ellas), los ops candado/parle inline deben aplicar sobre
+        // TODOS los números (previos + los de esta línea) SOLO cuando la línea NO tiene
+        // números propios (db.numerosBase vacío). Si la línea tiene sus propios números,
+        // el parle/candado aplica solo sobre ellos.
+        if (ctx.collectedNums.length > 0 && db.numerosBase.length === 0) {
+          const allNums = [...ctx.collectedNums, ...db.numerosBase].map(pad2);
+          ops = ops.map(op => {
+            if (op.tipo === 'candado') {
+              const totalOrig = op.totalOriginal ?? (op.montoUnitario * comb2(op.numeros.length));
+              const { unit, real, diff } = repartirExacto(totalOrig, comb2(allNums.length));
+              trace('ENGINE_CANDADO_LOCAL_EXPAND', { id: tokenId, lineNum, prevNums: [...ctx.collectedNums], allNums, unit });
+              return { ...op, numeros: allNums, pares: generarPares(allNums), montoUnitario: unit, totalReal: real, diff, totalOriginal: totalOrig };
+            }
+            if (op.tipo === 'parle') {
+              trace('ENGINE_PARLE_LOCAL_EXPAND', { id: tokenId, lineNum, prevNums: [...ctx.collectedNums], allNums });
+              return { ...op, numeros: allNums, pares: generarPares(allNums) };
+            }
+            return op;
+          });
+        }
+
+        const tieneParleLocal   = ops.some(op => op.tipo === 'parle');
+        const tieneCandadoLocal = ops.some(op => op.tipo === 'candado');
+
+        // REGLA: parle, candado y centena solo aplican sobre números FIJO.
+        // Solo acumular en collectedNums si la línea tiene al menos un op fijo.
+        // Líneas corrido-puro (solo monto de volteo, sin monto fijo) no participan.
+        const tieneFijoLocal = ops.some(op => op.tipo === 'fijo');
+        if (ops.length && tieneFijoLocal) {
+          trace('ENGINE_COLLECT_BEFORE', { id: tokenId, lineNum, collectedNums: [...ctx.collectedNums] });
+          ctx.collectedNums.push(...db.numerosBase);
+          trace('ENGINE_COLLECT_AFTER', { id: tokenId, lineNum, collectedNums: [...ctx.collectedNums], added: db.numerosBase });
+        }
+        if (tieneParleLocal || tieneCandadoLocal) {
+          // Actualizar snapshot para PARLE_GLOBAL posterior.
+          ctx.lastParleNums = [...ctx.collectedNums];
+        }
+
+        // Acumular jugadas FIJO para posible centena global posterior.
+        // Corrido no aplica en centena global.
+        for (const op of ops) {
+          if (op.tipo === 'fijo') {
+            ctx.jugadasBase.push({ numeros: op.numeros.slice(), montoUnitario: op.montoUnitario, tipo: op.tipo });
+          }
+        }
+        break;
+
+      // ── CENTENA GLOBAL ─────────────────────────────────────────────────────
+      case OpKind.CENTENA_GLOBAL: {
+        // lineaExp format: "<centenas>:<monto>"
+        // centenas = 'ALL' | comma-separated digits e.g. '3,5'
+        // monto    = numeric string or '' (empty = inherit from jugadas base)
+        const [cgSpec, cgMontoStr] = lineaExp.includes(':')
+          ? [lineaExp.slice(0, lineaExp.lastIndexOf(':')), lineaExp.slice(lineaExp.lastIndexOf(':') + 1)]
+          : [lineaExp, ''];
+        const cgMonto = cgMontoStr ? parseFloat(cgMontoStr.replace(',', '.')) : null;
+        trace('ENGINE_CENTENA_GLOBAL_ENTER', { id: tokenId, lineNum, spec: cgSpec, monto: cgMonto, jugadasBase: [...ctx.jugadasBase] });
+        if (ctx.jugadasBase.length === 0) {
+          const warn = {
+            code: 'W_CENTENA_GLOBAL_SIN_BASE',
+            line: lineNum,
+            message: 'La instrucción de centena no tiene números antes. Escriba primero los números y luego la centena.',
+          };
+          trace('ERROR', { id: tokenId, ...warn });
+          errors.push(warn);
+          hasError = true;
+          continue;
+        }
+        ops = buildOpsCentenaGlobal(cgSpec, ctx.jugadasBase, cgMonto);
+        trace('ENGINE_CENTENA_GLOBAL_OPS', { id: tokenId, lineNum, ops });
+        if (!ops.length) {
+          const warn = {
+            code: 'W_CENTENA_GLOBAL_SIN_OPS',
+            line: lineNum,
+            message: 'La centena no pudo aplicarse porque todos los números tienen más de 2 dígitos.',
+          };
+          trace('ERROR', { id: tokenId, ...warn });
+          errors.push(warn);
+          hasError = true;
+          continue;
+        }
+        // No resetear contexto: la centena global no cierra el bloque.
+        break;
+      }
+
+      default:
+        trace('ERROR', {
+          id: tokenId,
+          code: 'E_UNKNOWN_OPKIND',
+          line: lineNum,
+          message: `Error interno: tipo de operación desconocido ("${opKind}"). Contacte soporte.`,
+          token,
+        });
+        errors.push({ code: 'E_UNKNOWN_OPKIND', line: lineNum, message: `OpKind "${opKind}" desconocido.` });
+        hasError = true;
+        ctx.reset('OpKind desconocido');
+        continue;
+    }
+
+    // ── EVALUAR OPS ────────────────────────────────────────────────────────
+    for (const op of ops) {
+      trace('EVAL_OPERATION', { id: tokenId, lineNum, op });
+      const r = evaluarOperacion(op);
+      trace('EVAL_RESULT', { id: tokenId, lineNum, resultado: r });
+      total    += r.monto;
+      detalles += detalleLineaTexto(r);
+      jugadasDetalle.push({
+        tipo: r.tipo, numeros: r.numeros, pares: r.pares,
+        combinaciones: r.combinaciones, monto: r.monto,
+        monto_unitario: r.monto_unitario, linea: lineNum,
+      });
+      stats.validOps++;
+    }
+    if (ops.length) detalles += '\n';
+  }
+
+  // ── Sync totalComputed into stats before returning ─────────────────────
+  stats.totalComputed = total;
+
+  const { totalDeclarado } = bloque;
+  const diff = totalDeclarado !== null ? total - totalDeclarado : null;
+  const diffSig = diff !== null && Math.abs(diff) > 0.01;
+
+  if (diffSig) {
+    // Emit structured TOTAL_MISMATCH so AUDIT can compare declarado vs computed.
+    trace('ERROR', {
+      code:            'TOTAL_MISMATCH',
+      jugador:         bloque.nombre,
+      totalComputed:   total,
+      totalDeclarado,
+      diff,
+      message:         `El total declarado (${totalDeclarado.toFixed(2)}) no coincide con el calculado (${total.toFixed(2)}). Diferencia: ${diff.toFixed(2)}.`,
+    });
+  }
+
+  if (diff === null || diffSig) {
+    detalles += `TOTAL: ${total.toFixed(2)}`;
+    if (totalDeclarado !== null)
+      detalles += ` | DECLARADO: ${totalDeclarado.toFixed(2)} | DIF: ${diff.toFixed(2)}${Math.abs(diff) > 0.01 ? ' ⚠️' : ' ✅'}`;
+    detalles += '\n\n';
+  } else {
+    detalles = '';
+  }
+
+  const bloqueHasError = hasError || errors.length > 0;
+  if (bloqueHasError) {
+    const errSummary = errors.map(e => `⚠ ERROR línea ${e.line}: ${e.message}`).join('\n');
+    detalles = `=== JUGADOR: ${bloque.nombre} ===\n\n⛔ ERRORES (corrija antes de guardar):\n${errSummary}\n`;
+  }
+
+  trace('ENGINE_TOKEN', {
+    stage: 'procesarBloque:fin',
+    nombre: bloque.nombre,
+    total,
+    hasError: bloqueHasError,
+    totalErrores: errors.length,
+    errors,
+  });
+
+  return {
+    total:          bloqueHasError ? 0 : total,
+    jugadasDetalle: bloqueHasError ? [] : jugadasDetalle,
+    errors,
+    detalleTexto:   detalles,
+    hasError:       bloqueHasError,
+    stats,          // ENGINE_STATS para este bloque
+  };
+}
+
+function serializeJugadaLines(jugadaLines) {
+  const lines = (jugadaLines || [])
+    .map(line => {
+      if (typeof line !== 'string') return null;
+      if (line.startsWith('\x00CENTENA_GLOBAL\x00')) {
+        const spec  = line.slice('\x00CENTENA_GLOBAL\x00'.length).replace(/\x00$/, '');
+        const colon = spec.indexOf(':');
+        const nums  = colon === -1 ? spec : spec.slice(0, colon);
+        const monto = colon === -1 ? ''   : spec.slice(colon + 1).trim();
+        const xcNums = (nums && nums !== 'ALL')
+          ? ' ' + nums.split(',').map(n => n.trim()).filter(Boolean).join(' ')
+          : '';
+        return 'xc' + xcNums + (monto ? ' con ' + monto : '');
+      }
+      // BLANK_SEP -> linea vacia real (preservar salto de linea del usuario)
+      if (line === '\x00BLANK_SEP\x00') return '';
+      // Otros tokens internos -> eliminar sin dejar linea
+      if (line.startsWith('\x00')) return null;
+      return line;
+    })
+    .filter(l => l !== null);
+  // Colapsar mas de 2 lineas vacias consecutivas (max 1 linea en blanco entre jugadas)
+  const result = lines.join('\n').replace(/\n{3,}/g, '\n\n');
+  return result.trim();
+}
+
+function calcular(ctx, deps) {
+  resetTraceId();
+  const { rawInput, loteriaId, sorteoId } = ctx;
+
+  trace('INPUT_START', { rawInput, loteriaId, sorteoId });
+
+  if (!loteriaId || !sorteoId)
+    return { ok: false, error: 'MISSING_LOTERIA_SORTEO', message: 'Debe seleccionar la lotería y el sorteo antes de calcular.', totalGeneral: 0, jugadas: [], detalleTexto: '', errors: [], bloques: [] };
+  if (!rawInput || !rawInput.trim())
+    return { ok: false, error: 'EMPTY_INPUT', message: 'No hay jugadas para procesar. Escriba al menos una jugada.', totalGeneral: 0, jugadas: [], detalleTexto: '', errors: [], bloques: [] };
+
+  const { errors: parseErrors, bloques, audit } = parsearInput(rawInput, deps);
+
+  // ── NO_BET_LOSS_GUARANTEE: separar errores críticos de warnings de auditoría ──
+  // AUDIT_MISSING_CANDIDATES es CRÍTICO — abortar (candidato sin estado = pérdida).
+  // FLAGGED severity:'error' son BLOQUEANTES — una línea descartada impide certificar el total.
+  // FLAGGED severity:'warning' son no-bloqueantes — se incluyen en el resultado pero no abortan.
+  const criticalErrors   = parseErrors.filter(e => e.code === 'AUDIT_MISSING_CANDIDATES');
+  const flaggedErrors    = parseErrors.filter(e => e.status === 'FLAGGED' && e.severity === 'error');
+  const flaggedWarnings  = parseErrors.filter(e => e.status === 'FLAGGED' && e.severity !== 'error');
+  const otherErrors      = parseErrors.filter(e => e.code !== 'AUDIT_MISSING_CANDIDATES' && e.status !== 'FLAGGED');
+
+  if (criticalErrors.length || otherErrors.length || flaggedErrors.length) {
+    return {
+      ok: false,
+      error: flaggedErrors.length && !criticalErrors.length && !otherErrors.length
+        ? 'FLAGGED_LINES_PRESENT'
+        : 'PARSE_ERROR',
+      message: flaggedErrors.length
+        ? `No se puede calcular el total: ${flaggedErrors.length} línea(s) no pudieron procesarse. Revise y corrija esas líneas antes de continuar.`
+        : undefined,
+      totalGeneral: 0,
+      jugadas: [],
+      detalleTexto: '',
+      errors: [...criticalErrors, ...otherErrors, ...flaggedErrors],
+      flaggedWarnings,
+      bloques: [],
+      audit,
+    };
+  }
+
+  if (!bloques.length)
+    return { ok: false, error: 'NO_BLOQUES', message: 'No se encontraron jugadas válidas en el texto ingresado. Verifique el formato.', totalGeneral: 0, jugadas: [], detalleTexto: '', errors: [], flaggedWarnings, bloques: [], audit };
+
+  let totalGeneral = 0, detalleTexto = '';
+  const jugadas = [];
+  const hayJugadasSinNombre = bloques.some(b => b.sinNombre);
+
+  // ── ENGINE_STATS acumulado (fuente de verdad estadística) ─────────────────
+  const engineStats = {
+    processedLines: 0,   // total de tokens OPERATION intentados en todos los bloques
+    validOps:       0,   // ops generadas y evaluadas sin error
+    errorLines:     0,   // tokens con error de validación o runtime
+    skippedTokens:  0,   // SEPARATOR / JOINED / IGNORE / INVALID
+    totalComputed:  0,   // suma de montos evaluados (todos los bloques)
+    totalBloques:   0,   // cantidad de bloques procesados
+  };
+
+  // Encabezado de alertas de auditoría (jugadas flaggeadas)
+  if (flaggedWarnings.length) {
+    detalleTexto += `\n${'='.repeat(70)}\n⚠️ ALERTA: ${flaggedWarnings.length} JUGADA(S) REQUIEREN REVISIÓN\n${'='.repeat(70)}\n`;
+    for (const w of flaggedWarnings) {
+      detalleTexto += `  • Línea ${w.line}: ${w.reason}`;
+      if (w.raw) detalleTexto += ` (original: "${w.raw}")`;
+      detalleTexto += '\n';
+    }
+    detalleTexto += '\n';
+  }
+
+  if (hayJugadasSinNombre)
+    detalleTexto += `\n${'='.repeat(70)}\n⚠️ ALERTA: JUGADAS SIN NOMBRE DETECTADAS\n${'='.repeat(70)}\n\n`;
+
+  const timestamp = typeof deps.obtenerTimestampLocal === 'function'
+    ? deps.obtenerTimestampLocal()
+    : new Date().toISOString();
+
+  bloques.forEach(bloque => {
+    const r = procesarBloque(bloque, deps);
+    totalGeneral += r.total;
+    detalleTexto += r.detalleTexto;
+
+    // Accumulate ENGINE_STATS
+    if (r.stats) {
+      engineStats.processedLines += r.stats.processedLines;
+      engineStats.validOps       += r.stats.validOps;
+      engineStats.errorLines     += r.stats.errorLines;
+      engineStats.skippedTokens  += r.stats.skippedTokens;
+      engineStats.totalComputed  += r.stats.totalComputed;
+      engineStats.totalBloques++;
+    }
+
+    jugadas.push({
+      jugador_nombre: bloque.nombre, loteria_id: loteriaId, sorteo_id: sorteoId,
+      jugada_texto: serializeJugadaLines(bloque.jugadaLines),
+      jugada_original: serializeJugadaLines(bloque.jugadaLines),
+      monto_total: r.total, jugadas_detalle: r.jugadasDetalle,
+      total_declarado: bloque.totalDeclarado,
+      es_valido: bloque.totalDeclarado !== null ? Math.abs(r.total - bloque.totalDeclarado) < 0.01 : !r.hasError,
+      tiene_error: r.hasError, sin_nombre: bloque.sinNombre === true,
+      estructura_db: { raw: serializeJugadaLines(bloque.jugadaLines), detalles: r.jugadasDetalle, timestamp },
+    });
+  });
+
+  trace('ENGINE_STATS', { engineStats });
+  trace('FINAL_RESULT', { totalGeneral, totalJugadas: jugadas.length, jugadas, engineStats, audit });
+
+  // ── AUDIT: engine vs PRE — comparar lo que el engine procesó contra lo que
+  // el preprocesador declaró como aceptado. Son capas distintas y pueden divergir
+  // si hay bugs de wiring o tokens que el classifier descarta silenciosamente.
+  // FIX ENGINE_PRE_MISMATCH: PRE puede expandir 1 candidato en N sub-líneas
+  // via dividirMultiplesCon. Esto es correcto — emitir como info, nunca ERROR.
+  if (audit) {
+    const preAccepted = (audit.acceptedCount ?? 0) + (audit.recoveredCount ?? 0);
+    trace('AUDIT_ENGINE_VS_PRE', {
+      engineProcessedLines: engineStats.processedLines,
+      preAccepted,
+      diff: engineStats.processedLines - preAccepted,
+      note: 'diff >= 0 es normal: dividirMultiplesCon expande 1 candidato en N sub-líneas',
+    });
+  }
+
+  // ── CERTIFICACIÓN DEL TOTAL: el total solo puede considerarse válido si
+  // ningún bloque tiene hasError===true. Un bloque con error devuelve total=0
+  // (ver procesarBloque), pero la verificación explícita aquí garantiza que
+  // ok:true NUNCA se emita cuando hay jugadas omitidas o errores de validación.
+  const bloquesConError = jugadas.filter(j => j.tiene_error);
+  if (bloquesConError.length > 0) {
+    return {
+      ok: false,
+      error: 'BLOCK_ERRORS_PRESENT',
+      message: `No se puede calcular el total: hay ${bloquesConError.length} jugada(s) con errores que deben corregirse primero.`,
+      totalGeneral,
+      jugadas,
+      detalleTexto,
+      errors: [],
+      flaggedWarnings,
+      bloques,
+      hayJugadasSinNombre,
+      audit,
+      engineStats,
+    };
+  }
+
+  return {
+    ok: true,
+    certified: true,   // total certificado: todas las líneas procesadas sin errores ni FLAGGED
+    totalGeneral,
+    jugadas,
+    detalleTexto,
+    errors: [],
+    flaggedWarnings,   // jugadas que requieren revisión humana
+    bloques,
+    hayJugadasSinNombre,
+    audit,             // resumen completo de auditoría
+    engineStats,       // fuente de verdad estadística del engine
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// EXPOSE GLOBALS
+// ─────────────────────────────────────────────────────────────────
+global.Tracer        = { trace, enableTrace, disableTrace, setTraceFilter, resetTraceId, nextId, exposeTraceControls };
+global.Expansion     = createExpansion();
+global.Evaluator     = { buildLineaDB, validarLinea, buildOpsNormal, buildOpsCentena, buildOpsParleGlobal, buildOpsCandadoGlobal, buildOpsCentenaGlobal, evaluarOperacion, detalleLineaTexto, pad2, pad3, comb2, generarPares, repartirExacto, detectarOperadorMalEscrito, levenshtein, clasificarTokens, validarEstructuraTokens };
+global.Classifier    = { clasificarLinea, clasificarBloque, LineType, OpKind };
+global.Parser        = { parsearInput, parsearBloques, joinNumberLines, TYPO_PATTERNS };
+global.Preprocesador = { preprocesarJugada, procesarLineaRaw, stripWhatsAppMeta, limpiarLineaAuto, normalizarLineaLexica, normalizeSpaces };
+global.Utils         = { limpiarMonto };
+global.Engine        = { calcular, procesarBloque, serializeJugadaLines };
+global.BetAuditLedger = { createBetAuditLedger, esLineaCandidato, detectarLineaHuerfana, mapearRazonFlag };
+global.RightSideSanitizer = { sanitizarLadoDerecho, aplicarRightSideRule, limpiarLadoDerecho, validarPatronLadoDerecho };
+global.IntentSegmenter    = IntentSegmenter;
+
+if (typeof exposeTraceControls === 'function') exposeTraceControls();
+
+})(typeof window !== 'undefined' ? window : globalThis);
