@@ -69,40 +69,10 @@ function formatoWhatsApp(post) {
 }
 
 async function payloadWhatsApp(post) {
-  const texto = formatoWhatsApp(post);
-  if (post.tipo === 'texto' || !global.__USERBOT_CLIENT__ || !entidadOrigen) return { text: texto };
-
-  try {
-    const mensajes = await global.__USERBOT_CLIENT__.getMessages(entidadOrigen, { ids: [Number(post.telegram_message_id)] });
-    const msg = Array.isArray(mensajes) ? mensajes[0] : mensajes;
-    if (!msg || !msg.media || typeof msg.downloadMedia !== 'function') return { text: texto };
-
-    const buffer = await msg.downloadMedia({});
-    if (!buffer || !Buffer.isBuffer(buffer) || buffer.length === 0) return { text: texto };
-    const maxBytes = 20 * 1024 * 1024;
-    if (buffer.length > maxBytes) {
-      console.warn('📎 Multimedia de estadísticas demasiado grande (' + buffer.length + ' bytes); se envía enlace.');
-      return { text: texto };
-    }
-
-    if (post.tipo === 'foto') return { image: buffer, caption: texto };
-
-    const media = msg.media;
-    const mime = String(media.mimeType || 'application/octet-stream');
-    let fileName = 'estadistica-' + post.telegram_message_id;
-    const attrs = Array.isArray(media.attributes) ? media.attributes : [];
-    const attrFile = attrs.find(x => x && x.className === 'DocumentAttributeFilename' && x.fileName);
-    if (attrFile) fileName = String(attrFile.fileName);
-
-    if (mime.startsWith('video/')) return { video: buffer, mimetype: mime, caption: texto };
-
-    if (mime.startsWith('audio/')) return { audio: buffer, mimetype: mime };
-
-    return { document: buffer, mimetype: mime, fileName: fileName, caption: texto };
-  } catch (e) {
-    console.warn('⚠️ No se pudo descargar multimedia de la estadística; se envía solo el texto:', e && e.message ? e.message : e);
-    return { text: texto };
-  }
+  // Las estadísticas se distribuyen SOLO como texto.
+  // No descargamos ni reenviamos fotos, videos, audios o documentos de Telegram.
+  // Esto evita consumir ancho de banda de Render y mantiene el canal ligero.
+  return { text: formatoWhatsApp(post) };
 }
 
 async function guardarPost(msg) {
