@@ -157,13 +157,58 @@ async function destinosActivos() {
 async function encolar(post) {
   const destinos = await destinosActivos();
   if (!destinos.length) return 0;
+
   const filas = destinos.filter(d => {
     if (!d.fecha_inicio || !post.fecha_publicacion) return true;
     return new Date(post.fecha_publicacion).getTime() >= new Date(d.fecha_inicio).getTime();
-  }).map(d => ({ post_id: Number(post.id), comercial_telegram_id: d.comercial_telegram_id, destino_id: d.destino_id, estado: 'pendiente', intentos: 0 }));
+  }).map(d => ({
+    post_id: Number(post.id),
+    comercial_telegram_id: d.comercial_telegram_id,
+    destino_id: d.destino_id,
+    estado: 'pendiente',
+    intentos: 0
+  }));
+
   if (!filas.length) return 0;
-  const r = await supabase.from('whatsapp_estadisticas_outbox').upsert(filas, { onConflict: 'post_id,comercial_telegram_id', ignoreDuplicates: true });
-  if (r.error) throw r.error;
+
+  // El cambio de grupos a canales dejó algunas filas antiguas en "omitido".
+  // ignoreDuplicates=true impedía reactivarlas porque la clave única
+  // (post_id, comercial_telegram_id) seguía existiendo. Reactivamos cualquier
+  // fila que todavía NO haya sido enviada; las ya enviadas permanecen idempotentes.
+  for (const fila of filas) {
+    const existente = await supabase
+      .from('whatsapp_estadisticas_outbox')
+      .select('id,estado')
+      .eq('post_id', fila.post_id)
+      .eq('comercial_telegram_id', fila.comercial_telegram_id)
+      .maybeSingle();
+
+    if (existente.error) throw existente.error;
+
+    if (!existente.data) {
+      const insertado = await supabase
+        .from('whatsapp_estadisticas_outbox')
+        .insert(fila);
+      if (insertado.error) throw insertado.error;
+      continue;
+    }
+
+    if (existente.data.estado !== 'enviado') {
+      const reactivado = await supabase
+        .from('whatsapp_estadisticas_outbox')
+        .update({
+          destino_id: fila.destino_id,
+          estado: 'pendiente',
+          intentos: 0,
+          ultimo_error: null,
+          ultimo_intento_at: null,
+          enviado_at: null
+        })
+        .eq('id', existente.data.id);
+      if (reactivado.error) throw reactivado.error;
+    }
+  }
+
   return filas.length;
 }
 
