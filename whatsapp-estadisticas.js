@@ -185,10 +185,16 @@ async function capturar(msg, origen) {
   if (!msg || !msg.id) return false;
   try {
     const texto = String(msg.message || '').trim();
-    // Las publicaciones que solo contienen multimedia no generan ninguna
-    // notificación: no hay texto que distribuir y no debemos gastar tráfico.
+    // Cualquier publicación que tenga multimedia se descarta COMPLETA,
+    // aunque también tenga texto/caption. No queremos convertir una foto,
+    // documento, video o audio en texto porque eso sigue siendo tráfico inútil
+    // para el canal de estadísticas.
+    if (msg.media) {
+      console.log('⏭️ Estadística con multimedia: msg=' + msg.id + ' tipo=' + tipoMensaje(msg) + ' descartada completa.');
+      return false;
+    }
     if (!texto) {
-      console.log('⏭️ Estadística multimedia sin texto: msg=' + msg.id + ' descartada sin envío.');
+      console.log('⏭️ Estadística sin texto: msg=' + msg.id + ' descartada.');
       return false;
     }
     const post = await guardarPost(msg);
