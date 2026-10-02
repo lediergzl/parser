@@ -264,7 +264,7 @@ async function drenarOutbox() {
       continue;
     }
 
-    const inicioModulo = m.data && m.data.fecha_inicio ? new Date(m.data.fecha_inicio).getTime() : null;
+    // Nunca enviamos captions de publicaciones multimedia históricas.\n    if (String(p.data.tipo || '').toLowerCase() !== 'texto') {\n      await supabase.from('whatsapp_estadisticas_outbox')\n        .update({estado:'omitido',ultimo_error:'Publicación multimedia descartada; solo se envían publicaciones de texto.'})\n        .eq('id',item.id).eq('estado','pendiente');\n      console.log('⏭️ Estadística multimedia histórica omitida: post=' + item.post_id + ' tipo=' + String(p.data.tipo || 'desconocido'));\n      continue;\n    }\n\n    const inicioModulo = m.data && m.data.fecha_inicio ? new Date(m.data.fecha_inicio).getTime() : null;
     const fechaPublicacion = p.data && p.data.fecha_publicacion ? new Date(p.data.fecha_publicacion).getTime() : null;
     const vigente = m.data &&
       m.data.habilitado &&
