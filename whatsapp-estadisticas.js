@@ -61,18 +61,17 @@ function limpiarPromocion(texto) {
 }
 
 function formatoWhatsApp(post) {
-  const partes = ['📊 *ESTADÍSTICAS*'];
   const textoLimpio = limpiarPromocion(post.texto);
-  if (textoLimpio) partes.push(textoLimpio);
-  if (post.tipo !== 'texto') partes.push('📎 Publicación con multimedia.');
-  return partes.join('\n\n');
+  if (!textoLimpio) return '';
+  return ['📊 *ESTADÍSTICAS*', textoLimpio].join('\n\n');
 }
 
 async function payloadWhatsApp(post) {
-  // Las estadísticas se distribuyen SOLO como texto.
-  // No descargamos ni reenviamos fotos, videos, audios o documentos de Telegram.
-  // Esto evita consumir ancho de banda de Render y mantiene el canal ligero.
-  return { text: formatoWhatsApp(post) };
+  // SOLO texto. Una publicación multimedia sin texto útil no se envía.
+  // Nunca descargamos ni reenviamos fotos, videos, audios o documentos.
+  const texto = formatoWhatsApp(post);
+  if (!texto) return null;
+  return { text: texto };
 }
 
 async function guardarPost(msg) {
@@ -185,6 +184,13 @@ async function encolar(post) {
 async function capturar(msg, origen) {
   if (!msg || !msg.id) return false;
   try {
+    const texto = String(msg.message || '').trim();
+    // Las publicaciones que solo contienen multimedia no generan ninguna
+    // notificación: no hay texto que distribuir y no debemos gastar tráfico.
+    if (!texto) {
+      console.log('⏭️ Estadística multimedia sin texto: msg=' + msg.id + ' descartada sin envío.');
+      return false;
+    }
     const post = await guardarPost(msg);
     if (!post) return false;
     const n = await encolar(post);
@@ -290,6 +296,13 @@ async function drenarOutbox() {
       if (!payload) {
         payload = await payloadWhatsApp(p.data);
         payloadCache.set(Number(item.post_id), payload);
+      }
+
+      if (!payload) {
+        await supabase.from('whatsapp_estadisticas_outbox')
+          .update({estado:'omitido',ultimo_error:'Publicación sin texto útil; no se envía multimedia.'})
+          .eq('id',item.id).eq('estado','enviando');
+        continue;
       }
 
       await sender.enviarMensajePorComercial(supabase, item.comercial_telegram_id, item.destino_id, '', {payload});
