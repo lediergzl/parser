@@ -272,7 +272,8 @@ async function drenarOutbox() {
       console.log('⏭️ Estadística multimedia histórica omitida: post=' + item.post_id + ' tipo=' + String(p.data.tipo || 'desconocido'));
       continue;
     }
-\n    const inicioModulo = m.data && m.data.fecha_inicio ? new Date(m.data.fecha_inicio).getTime() : null;
+
+    const inicioModulo = m.data && m.data.fecha_inicio ? new Date(m.data.fecha_inicio).getTime() : null;
     const fechaPublicacion = p.data && p.data.fecha_publicacion ? new Date(p.data.fecha_publicacion).getTime() : null;
     const vigente = m.data &&
       m.data.habilitado &&
