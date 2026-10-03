@@ -12,6 +12,9 @@ const authStates = new Map();
 const locks = new Map();
 const reconnectTimers = new Map();
 const connecting = new Map();
+// Protege toda la fase de vida inicial del socket, incluida la espera del QR.
+// `connecting` solo cubre la promesa de creación de Baileys y se libera demasiado pronto.
+const socketStarting = new Map();
 const socketGenerations = new Map();
 const activeBettingChats = new Set();
 const jugarCooldowns = new Map();
@@ -1599,6 +1602,12 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
   if (existing && !force) return existing;
   if (connecting.has(socketKey)) return connecting.get(socketKey);
 
+  // Una vez creado el socket, `connecting` puede quedar libre mientras Baileys
+  // todavía está negociando/vinculando. No permitimos otra inicialización de la
+  // misma cuenta durante esa ventana. Esto evita QR duplicados y sesiones que
+  // compiten por las mismas creds.
+  if (!force && socketStarting.has(socketKey)) return socketStarting.get(socketKey) || sockets.get(socketKey) || null;
+
   if (force) {
     const timer = reconnectTimers.get(socketKey);
     if (timer) { clearTimeout(timer); reconnectTimers.delete(socketKey); }
@@ -1780,6 +1789,7 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
 
       if (connection === 'open') {
         if (socketGenerations.get(socketKey) !== generation || sockets.get(socketKey) !== sock) return;
+        socketStarting.delete(socketKey);
 
         const telefono = sock.user?.id || null;
         console.log(`✅ WA ${id}: conexión OPEN. Usuario=${telefono || 'desconocido'}`);
@@ -1886,6 +1896,7 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
         // aquí cada 3 segundos, creamos exactamente el bucle infinito de QR.
         // Dejamos la cuenta esperando una nueva solicitud manual.
         if (qrRefsEnded) {
+          socketStarting.delete(socketKey);
           await saveStatusLocal({
             estado: 'esperando_qr',
             ultimo_qr: null,
@@ -1963,6 +1974,7 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
         }
 
         sockets.delete(socketKey);
+        socketStarting.delete(socketKey);
 
         if (loggedOut) {
           await telegramText(
@@ -2059,6 +2071,7 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
   })();
 
   connecting.set(socketKey, promise);
+  socketStarting.set(socketKey, promise);
   try {
     return await promise;
   } finally {
