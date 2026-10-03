@@ -210,13 +210,14 @@ async function sincronizarHoy() {
   try {
     const mensajes = await client.getMessages(entidadOrigen, { limit: 500 });
     let n = 0;
+    console.log('🔎 Estadísticas: revisando ' + mensajes.length + ' publicación(es) de ' + ORIGEN + ' en la fecha Cuba ' + hoyCuba() + '.');
     for (const msg of [...mensajes].reverse()) {
       const fecha = msg.date instanceof Date ? msg.date : (msg.date ? new Date(Number(msg.date) * 1000) : null);
       if (fecha && fechaCuba(fecha) !== hoyCuba()) continue;
       if (!msg.message && !msg.media) continue;
       if (await capturar(msg, 'recuperación')) n++;
     }
-    if (n) console.log('🔄 Estadísticas: ' + n + ' publicación(es) recuperada(s).');
+    console.log('🔄 Estadísticas: recuperación terminó; ' + n + ' publicación(es) capturada(s) para la cola.');
   } catch (e) { console.error('⚠️ Error recuperando estadísticas:', e && e.stack ? e.stack : e); }
   finally { sincronizacionEnCurso = false; }
 }
@@ -572,13 +573,14 @@ async function iniciarEstadisticas() {
     if (!handlerRegistrado) {
       client.addEventHandler(async event => {
         try {
-          const msg = event && event.message; if (!msg || !msg.id) return;
-          const esperado = tgUtils.getPeerId(entidadOrigen);
-          const chatId = msg.chatId != null ? String(msg.chatId) : '';
-          if (chatId !== String(esperado)) return;
+          const msg = event && event.message;
+          if (!msg || !msg.id) return;
+          console.log('📥 Estadísticas: evento recibido en ' + ORIGEN + ' msg=' + msg.id + ' tipo=' + tipoMensaje(msg) + ' texto=' + String(msg.message || '').slice(0, 120).replace(/\n/g, ' '));
           await capturar(msg,'evento');
-        } catch (e) { console.error('❌ Error evento estadísticas:',e && e.stack ? e.stack : e); }
-      }, new NewMessage({}));
+        } catch (e) {
+          console.error('❌ Error evento estadísticas:',e && e.stack ? e.stack : e);
+        }
+      }, new NewMessage({ chats: [entidadOrigen] }));
       handlerRegistrado = true;
     }
     await sincronizarHoy();
