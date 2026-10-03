@@ -1681,6 +1681,7 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
     }
 
     let sock;
+    let newLoginPersistPromise = null;
     try {
       // Baileys 6.7.x puede recibir mensajes propios con addressingMode=LID
       // que intenta descifrar usando la sesión LID equivocada y termina en:
@@ -1815,19 +1816,26 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
       }
 
       if (isNewLogin) {
-        // WhatsApp emite isNewLogin=true antes del 515. En ese punto ya entregó
-        // las credenciales nuevas; debemos forzar su persistencia y esperar la
-        // cola antes de permitir que el socket se reinicie.
+        // WhatsApp emite isNewLogin=true antes del 515. Guardamos las credenciales
+        // nuevas y conservamos la promesa para que el close=515 espere a que
+        // Supabase termine antes de abrir el socket siguiente.
+        newLoginPersistPromise = (async () => {
+          try {
+            await saveCreds();
+            await authState.flush?.();
+            console.log(`💾 WA ${id} (${alias}): credenciales de nuevo login persistidas antes del reinicio 515.`);
+          } catch (persistError) {
+            console.error(`❌ WA ${id} (${alias}): no se pudieron persistir las credenciales del nuevo login:`, persistError?.message || persistError);
+            await saveStatusLocal({
+              estado: 'error',
+              ultimo_error: `No se pudieron guardar las credenciales tras vincular: ${persistError?.message || persistError}`
+            }).catch(() => {});
+            throw persistError;
+          }
+        })();
         try {
-          await saveCreds();
-          await authState.flush?.();
-          console.log(`💾 WA ${id} (${alias}): credenciales de nuevo login persistidas antes del reinicio 515.`);
-        } catch (persistError) {
-          console.error(`❌ WA ${id} (${alias}): no se pudieron persistir las credenciales del nuevo login:`, persistError?.message || persistError);
-          await saveStatusLocal({
-            estado: 'error',
-            ultimo_error: `No se pudieron guardar las credenciales tras vincular: ${persistError?.message || persistError}`
-          }).catch(() => {});
+          await newLoginPersistPromise;
+        } catch (_) {
           return;
         }
       }
@@ -1841,6 +1849,17 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
           ?? error?.statusCode
           ?? null;
         const errorText = String(error?.message || error || '');
+
+        // 515 es el reinicio normal después del emparejamiento. Si el evento
+        // isNewLogin sigue guardando creds, esperamos aquí antes de reconectar.
+        if (code === 515 && newLoginPersistPromise) {
+          try {
+            await newLoginPersistPromise;
+          } catch (_) {
+            return;
+          }
+        }
+
         const loggedOut = code === DisconnectReason.loggedOut;
         const qrRefsEnded = code === 408 && /QR refs attempts ended/i.test(errorText);
         const isConflict401 =
