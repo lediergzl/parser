@@ -94,5 +94,60 @@ end $$;
 create unique index if not exists uq_whatsapp_estadisticas_canales_comercial_cuenta
   on public.whatsapp_estadisticas_canales (comercial_telegram_id, cuenta_alias);
 
+-- También eliminamos índices UNIQUE antiguos que no estén respaldados por una constraint.
+-- Esto evita que un índice histórico (post_id, comercial_telegram_id) siga
+-- impidiendo una segunda cuenta para el mismo comercial.
+do $
+declare
+  r record;
+begin
+  for r in
+    select i.indexrelid::regclass::text as index_name
+    from pg_index i
+    join pg_class t on t.oid = i.indrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'public'
+      and i.indisunique
+      and not i.indisprimary
+      and t.relname = 'whatsapp_estadisticas_canales'
+      and i.indexrelid::regclass::text <> 'public.uq_whatsapp_estadisticas_canales_comercial_cuenta'
+      and (
+        select array_agg(a.attname::text order by a.attname::text)
+        from pg_attribute a
+        where a.attrelid = i.indrelid
+          and a.attnum = any(i.indkey)
+          and a.attnum > 0
+      ) = array['comercial_telegram_id']::text[]
+  loop
+    execute 'drop index if exists ' || r.index_name;
+  end loop;
+end $;
+
+do $
+declare
+  r record;
+begin
+  for r in
+    select i.indexrelid::regclass::text as index_name
+    from pg_index i
+    join pg_class t on t.oid = i.indrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'public'
+      and i.indisunique
+      and not i.indisprimary
+      and t.relname = 'whatsapp_estadisticas_outbox'
+      and i.indexrelid::regclass::text <> 'public.uq_whatsapp_estadisticas_outbox_post_comercial_cuenta'
+      and (
+        select array_agg(a.attname::text order by a.attname::text)
+        from pg_attribute a
+        where a.attrelid = i.indrelid
+          and a.attnum = any(i.indkey)
+          and a.attnum > 0
+      ) = array['comercial_telegram_id','post_id']::text[]
+  loop
+    execute 'drop index if exists ' || r.index_name;
+  end loop;
+end $;
+
 create unique index if not exists uq_whatsapp_estadisticas_outbox_post_comercial_cuenta
   on public.whatsapp_estadisticas_outbox (post_id, comercial_telegram_id, cuenta_alias);
