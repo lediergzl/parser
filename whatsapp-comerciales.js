@@ -1215,9 +1215,11 @@ async function recibirMensaje(db, sock, comercialId, message, accountAlias = 'pr
       const aliasConsulta = comandoVerGrupo[1] ? String(comandoVerGrupo[1]).toLowerCase() : accountAlias;
       const targetJid = String(message.key.remoteJid || '').trim();
       try {
-        const grupo = await leerGrupoResultadosComercial(db, comercialId);
+        const grupo = await leerGrupoResultadosComercial(db, comercialId, aliasConsulta);
         await sock.sendMessage(targetJid || sock.user?.id, {
-          text: grupo?.activo ? '📢 Grupo de resultados actual: ' + grupo.destino_id : 'ℹ️ No tienes un grupo de resultados asignado.'
+          text: grupo?.activo
+            ? ['📢 GRUPO DE RESULTADOS ACTUAL', '', '📱 Cuenta: ' + aliasConsulta, '👥 ' + (grupo.nombre || 'Grupo WhatsApp'), '🆔 ' + grupo.destino_id].join('\n')
+            : 'ℹ️ No tienes un grupo de resultados asignado para "' + aliasConsulta + '".'
         }).catch(() => {});
       } catch (e) {
         await sock.sendMessage(targetJid || sock.user?.id, { text: '❌ No se pudo consultar el grupo: ' + (e?.message || e) }).catch(() => {});
