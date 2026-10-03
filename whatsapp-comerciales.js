@@ -1641,7 +1641,10 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
   const generation = (socketGenerations.get(socketKey) || 0) + 1;
   socketGenerations.set(socketKey, generation);
 
-  const saveStatusLocal = (patch) => saveStatusLocal(patch, alias);\n  const sendQrLocal = (qr, options = {}) => sendQrLocal(qr, { ...options, accountAlias: alias });\n\n  const promise = (async () => {
+  const saveStatusLocal = (patch) => saveStatus(db, id, patch, alias);
+  const sendQrLocal = (qr, options = {}) => sendQr(id, qr, { ...options, accountAlias: alias });
+
+  const promise = (async () => {
     const makeWASocket = require('@whiskeysockets/baileys').default;
 
     // Igual que en lib/whatsapp-sender.js (ver wa-instance-lock.js): sin este
@@ -1786,7 +1789,7 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
           .eq(cuenta.alias === 'principal' ? 'comercial_telegram_id' : 'id', cuenta.alias === 'principal' ? id : cuenta.id)
           .maybeSingle();
 
-        qrLastSentAt.delete(Number(id));
+        qrLastSentAt.delete(socketKey);
         await saveStatusLocal({
           estado: 'conectado',
           ultimo_qr: null,
@@ -1853,7 +1856,7 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
 
           sockets.delete(socketKey);
 
-          if (!reconnectTimers.has(id)) {
+          if (!reconnectTimers.has(socketKey)) {
             const timer = setTimeout(() => {
               reconnectTimers.delete(socketKey);
               if (socketGenerations.get(socketKey) !== generation) return;
@@ -1874,7 +1877,7 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
           // Importante: solo limpiamos la sesión del comercial actual; nunca
           // la sesión global ni la de otro comercial.
           const { error: clearError } = await db
-            .from('whatsapp_comercial_session')
+            .from(cuenta.table)
             .update({
               estado: 'desconectado',
               creds: null,
@@ -1908,7 +1911,7 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
           return;
         }
 
-        if (!reconnectTimers.has(id)) {
+        if (!reconnectTimers.has(socketKey)) {
           const timer = setTimeout(() => {
             reconnectTimers.delete(socketKey);
             if (socketGenerations.get(socketKey) !== generation) return;
