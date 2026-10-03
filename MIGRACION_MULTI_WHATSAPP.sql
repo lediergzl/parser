@@ -37,3 +37,62 @@ create unique index if not exists uq_whatsapp_estadisticas_canales_comercial_cue
   on public.whatsapp_estadisticas_canales (comercial_telegram_id, cuenta_alias);
 
 -- La sesión principal sigue usando la tabla histórica y no se modifica.
+
+
+-- La cola de estadísticas también debe separar las entregas por cuenta.
+alter table public.whatsapp_estadisticas_outbox
+  add column if not exists cuenta_alias text not null default 'principal';
+
+-- El esquema anterior podía tener una unicidad solo por comercial.
+-- La eliminamos para permitir un canal independiente por cada cuenta.
+do $$
+declare
+  r record;
+begin
+  for r in
+    select c.conname
+    from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'public'
+      and t.relname = 'whatsapp_estadisticas_canales'
+      and c.contype = 'u'
+      and (
+        select array_agg(a.attname order by a.attname)
+        from pg_attribute a
+        where a.attrelid = c.conrelid
+          and a.attnum = any(c.conkey)
+      ) = array['comercial_telegram_id']::text[]
+  loop
+    execute format('alter table public.whatsapp_estadisticas_canales drop constraint %I', r.conname);
+  end loop;
+end $$;
+
+do $$
+declare
+  r record;
+begin
+  for r in
+    select c.conname
+    from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'public'
+      and t.relname = 'whatsapp_estadisticas_outbox'
+      and c.contype = 'u'
+      and (
+        select array_agg(a.attname order by a.attname)
+        from pg_attribute a
+        where a.attrelid = c.conrelid
+          and a.attnum = any(c.conkey)
+      ) = array['comercial_telegram_id','post_id']::text[]
+  loop
+    execute format('alter table public.whatsapp_estadisticas_outbox drop constraint %I', r.conname);
+  end loop;
+end $$;
+
+create unique index if not exists uq_whatsapp_estadisticas_canales_comercial_cuenta
+  on public.whatsapp_estadisticas_canales (comercial_telegram_id, cuenta_alias);
+
+create unique index if not exists uq_whatsapp_estadisticas_outbox_post_comercial_cuenta
+  on public.whatsapp_estadisticas_outbox (post_id, comercial_telegram_id, cuenta_alias);
