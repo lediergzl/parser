@@ -1602,6 +1602,11 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
   if (existing && !force) return existing;
   if (connecting.has(socketKey)) return connecting.get(socketKey);
 
+  // Incluso `force=true` debe respetar una vinculación que ya está en curso.
+  // El comando manual no puede abrir un segundo socket mientras el primero
+  // está esperando el QR o terminando el emparejamiento.
+  if (socketStarting.has(socketKey)) return socketStarting.get(socketKey) || sockets.get(socketKey) || null;
+
   // Una vez creado el socket, `connecting` puede quedar libre mientras Baileys
   // todavía está negociando/vinculando. No permitimos otra inicialización de la
   // misma cuenta durante esa ventana. Esto evita QR duplicados y sesiones que
