@@ -151,3 +151,92 @@ end $;
 
 create unique index if not exists uq_whatsapp_estadisticas_outbox_post_comercial_cuenta
   on public.whatsapp_estadisticas_outbox (post_id, comercial_telegram_id, cuenta_alias);
+
+
+-- Los resultados de cada comercial también deben tener un grupo independiente
+-- por cuenta WhatsApp (principal/secundaria).
+alter table public.whatsapp_comercial_resultados
+  add column if not exists cuenta_alias text not null default 'principal';
+
+do $$
+declare
+  r record;
+begin
+  for r in
+    select c.conname
+    from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'public'
+      and t.relname = 'whatsapp_comercial_resultados'
+      and c.contype = 'u'
+      and (
+        select array_agg(a.attname::text order by a.attname::text)
+        from pg_attribute a
+        where a.attrelid = c.conrelid
+          and a.attnum = any(c.conkey)
+      ) = array['comercial_telegram_id']::text[]
+  loop
+    execute format('alter table public.whatsapp_comercial_resultados drop constraint %I', r.conname);
+  end loop;
+end $$;
+
+do $$
+declare
+  r record;
+begin
+  for r in
+    select i.indexrelid::regclass::text as index_name
+    from pg_index i
+    join pg_class t on t.oid = i.indrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'public'
+      and i.indisunique
+      and not i.indisprimary
+      and t.relname = 'whatsapp_comercial_resultados'
+      and (
+        select array_agg(a.attname::text order by a.attname::text)
+        from pg_attribute a
+        where a.attrelid = i.indrelid
+          and a.attnum = any(i.indkey)
+          and a.attnum > 0
+      ) = array['comercial_telegram_id']::text[]
+  loop
+    execute 'drop index if exists ' || r.index_name;
+  end loop;
+end $$;
+
+create unique index if not exists uq_whatsapp_comercial_resultados_comercial_cuenta
+  on public.whatsapp_comercial_resultados (comercial_telegram_id, cuenta_alias);
+
+-- La cola de notificaciones también conserva la cuenta que debe realizar
+-- cada entrega. Las filas antiguas quedan en "principal".
+alter table public.whatsapp_notificaciones_outbox
+  add column if not exists comercial_telegram_id bigint,
+  add column if not exists cuenta_alias text not null default 'principal';
+
+do $$
+declare
+  r record;
+begin
+  for r in
+    select c.conname
+    from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'public'
+      and t.relname = 'whatsapp_notificaciones_outbox'
+      and c.contype = 'u'
+      and (
+        select array_agg(a.attname::text order by a.attname::text)
+        from pg_attribute a
+        where a.attrelid = c.conrelid
+          and c.conkey @> ARRAY[a.attnum]::smallint[]
+      ) = array['destino_id','referencia_id','tipo']::text[]
+  loop
+    execute format('alter table public.whatsapp_notificaciones_outbox drop constraint %I', r.conname);
+  end loop;
+end $$;
+
+create unique index if not exists uq_whatsapp_notificaciones_outbox_destino_cuenta
+  on public.whatsapp_notificaciones_outbox (tipo, referencia_id, destino_id, cuenta_alias);
