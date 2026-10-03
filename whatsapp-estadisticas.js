@@ -103,24 +103,24 @@ async function destinosActivos() {
   const ids = mods.data.map(x => Number(x.comercial_telegram_id)).filter(Number.isFinite);
   const canales = await supabase
     .from('whatsapp_estadisticas_canales')
-    .select('comercial_telegram_id,destino_id,nombre,activo')
+    .select('comercial_telegram_id,cuenta_alias,destino_id,nombre,activo')
     .in('comercial_telegram_id', ids)
     .eq('activo', true);
 
   if (canales.error) throw canales.error;
 
-  const mapa = new Map((canales.data || []).map(x => [Number(x.comercial_telegram_id), x]));
-  return mods.data.map(m => {
-    const canal = mapa.get(Number(m.comercial_telegram_id));
-    return canal
-      ? {
-          comercial_telegram_id: Number(m.comercial_telegram_id),
-          destino_id: String(canal.destino_id).trim(),
-          nombre: canal.nombre || canal.destino_id,
-          fecha_inicio: m.fecha_inicio || null
-        }
-      : null;
-  }).filter(Boolean);
+  const modMap = new Map(mods.data.map(m => [Number(m.comercial_telegram_id), m]));
+  return (canales.data || []).map(canal => {
+    const modulo = modMap.get(Number(canal.comercial_telegram_id));
+    if (!modulo) return null;
+    return {
+      comercial_telegram_id: Number(canal.comercial_telegram_id),
+      cuenta_alias: String(canal.cuenta_alias || 'principal').trim().toLowerCase(),
+      destino_id: String(canal.destino_id || '').trim(),
+      nombre: canal.nombre || canal.destino_id,
+      fecha_inicio: modulo.fecha_inicio || null
+    };
+  }).filter(d => d && d.destino_id);
 }
 
 async function encolar(post) {
@@ -133,6 +133,7 @@ async function encolar(post) {
   }).map(d => ({
     post_id: Number(post.id),
     comercial_telegram_id: d.comercial_telegram_id,
+    cuenta_alias: d.cuenta_alias,
     destino_id: d.destino_id,
     estado: 'pendiente',
     intentos: 0
@@ -150,6 +151,7 @@ async function encolar(post) {
       .select('id,estado')
       .eq('post_id', fila.post_id)
       .eq('comercial_telegram_id', fila.comercial_telegram_id)
+      .eq('cuenta_alias', fila.cuenta_alias)
       .maybeSingle();
 
     if (existente.error) throw existente.error;
@@ -166,6 +168,7 @@ async function encolar(post) {
       const reactivado = await supabase
         .from('whatsapp_estadisticas_outbox')
         .update({
+          cuenta_alias: fila.cuenta_alias,
           destino_id: fila.destino_id,
           estado: 'pendiente',
           intentos: 0,
@@ -231,7 +234,7 @@ async function drenarOutbox() {
   // No seguimos encadenando lotes de una cola histórica.
   const r = await supabase
     .from('whatsapp_estadisticas_outbox')
-    .select('id,post_id,comercial_telegram_id,destino_id,intentos')
+    .select('id,post_id,comercial_telegram_id,cuenta_alias,destino_id,intentos')
     .eq('estado','pendiente')
     .order('creado_at',{ascending:true})
     .limit(10);
@@ -320,13 +323,19 @@ async function drenarOutbox() {
         continue;
       }
 
-      await sender.enviarMensajePorComercial(supabase, item.comercial_telegram_id, item.destino_id, '', {payload});
+      await sender.enviarMensajePorComercial(
+        supabase,
+        item.comercial_telegram_id,
+        item.destino_id,
+        '',
+        { accountAlias: item.cuenta_alias || 'principal', payload }
+      );
 
       await supabase.from('whatsapp_estadisticas_outbox')
         .update({estado:'enviado',enviado_at:new Date().toISOString(),ultimo_error:null})
         .eq('id',item.id).eq('estado','enviando');
 
-      console.log('📊 Estadística enviada: comercial=' + item.comercial_telegram_id + ' destino=' + item.destino_id + ' post=' + item.post_id);
+      console.log('📊 Estadística enviada: comercial=' + item.comercial_telegram_id + ' cuenta=' + (item.cuenta_alias || 'principal') + ' destino=' + item.destino_id + ' post=' + item.post_id);
     } catch (e) {
       await supabase.from('whatsapp_estadisticas_outbox')
         .update({estado:'pendiente',ultimo_error:String(e && e.message || e).slice(0,1000)})
@@ -338,23 +347,30 @@ async function drenarOutbox() {
   console.log('⏸️ Estadísticas: lote terminado. No se enviará otro hasta el próximo ciclo de ' + Math.round(INTERVALO_MS / 60000) + ' min.');
 }
 
-async function configurarCanal(comercialId, enlace) {
+function normalizarAliasCuenta(alias) {
+  const valor = String(alias || 'principal').trim().toLowerCase();
+  return valor || 'principal';
+}
+
+async function configurarCanal(comercialId, enlace, cuentaAlias = 'principal') {
   const id = Number(comercialId);
+  const alias = normalizarAliasCuenta(cuentaAlias);
   if (!Number.isFinite(id)) throw new Error('ID de comercial inválido.');
 
   const sender = require('./whatsapp-comerciales');
-  const canal = await sender.resolverCanalWhatsAppPorEnlace(id, enlace);
+  const canal = await sender.resolverCanalWhatsAppPorEnlace(id, enlace, alias);
 
   const r = await supabase
     .from('whatsapp_estadisticas_canales')
     .upsert({
       comercial_telegram_id: id,
+      cuenta_alias: alias,
       enlace: canal.enlace,
       destino_id: canal.destino_id,
       nombre: canal.nombre,
       activo: true,
       actualizado_at: new Date().toISOString()
-    }, { onConflict: 'comercial_telegram_id' });
+    }, { onConflict: 'comercial_telegram_id,cuenta_alias' });
 
   if (r.error) throw r.error;
   return canal;
@@ -385,17 +401,22 @@ async function registrarComandos(bot) {
       if (accion === 'canal') {
         if (!Number.isFinite(id)) return ctx.reply('Uso: /estadisticas canal ID_COMERCIAL ENLACE_CANAL');
 
-        const enlace = p.slice(3).join(' ').trim();
+        const tercer = String(p[3] || '').trim();
+        const esEnlace = /^https?:\/\/.*\/channel\//i.test(tercer);
+        const alias = normalizarAliasCuenta(esEnlace ? 'principal' : (tercer || 'principal'));
+        const enlace = (esEnlace ? p.slice(3) : p.slice(4)).join(' ').trim();
         if (!enlace) {
           const r = await supabase
             .from('whatsapp_estadisticas_canales')
-            .select('enlace,destino_id,nombre,activo')
+            .select('cuenta_alias,enlace,destino_id,nombre,activo')
             .eq('comercial_telegram_id', id)
+            .eq('cuenta_alias', alias)
             .maybeSingle();
           if (r.error) throw r.error;
           if (!r.data) return ctx.reply('ℹ️ El comercial ' + id + ' no tiene canal de estadísticas configurado.');
           return ctx.reply([
             '📣 Canal de estadísticas — ' + id,
+            'Cuenta: ' + alias,
             'Estado: ' + (r.data.activo ? '🟢 ACTIVO' : '🔴 INACTIVO'),
             'Nombre: ' + (r.data.nombre || '—'),
             'JID: ' + r.data.destino_id,
@@ -421,27 +442,30 @@ async function registrarComandos(bot) {
           return ctx.reply('❌ Debes indicar el enlace del canal de WhatsApp. Ejemplo: https://whatsapp.com/channel/...');
         }
 
-        const canal = await configurarCanal(id, enlace);
+        const canal = await configurarCanal(id, enlace, alias);
         return ctx.reply([
           '✅ Canal de estadísticas configurado.',
           'Comercial: ' + id,
+          'Cuenta: ' + alias,
           'Canal: ' + canal.nombre,
           'JID: ' + canal.destino_id
         ].join('\\n'));
       }
 
       if (accion === 'probar_canal') {
-        if (!Number.isFinite(id)) return ctx.reply('Uso: /estadisticas probar_canal ID_COMERCIAL');
+        if (!Number.isFinite(id)) return ctx.reply('Uso: /estadisticas probar_canal ID_COMERCIAL [CUENTA]');
 
+        const alias = normalizarAliasCuenta(p[3] || 'principal');
         const canal = await supabase
           .from('whatsapp_estadisticas_canales')
-          .select('destino_id,nombre,enlace,activo')
+          .select('cuenta_alias,destino_id,nombre,enlace,activo')
           .eq('comercial_telegram_id', id)
+          .eq('cuenta_alias', alias)
           .maybeSingle();
 
         if (canal.error) throw canal.error;
-        if (!canal.data) return ctx.reply('❌ El comercial ' + id + ' no tiene un canal de estadísticas configurado.');
-        if (!canal.data.activo) return ctx.reply('❌ El canal de estadísticas del comercial ' + id + ' está inactivo.');
+        if (!canal.data) return ctx.reply('❌ El comercial ' + id + ' no tiene un canal de estadísticas configurado para la cuenta "' + alias + '".');
+        if (!canal.data.activo) return ctx.reply('❌ El canal de estadísticas del comercial ' + id + ' (' + alias + ') está inactivo.');
 
         const sender = require('./whatsapp-comerciales');
         const texto = [
@@ -451,6 +475,7 @@ async function registrarComandos(bot) {
           'Si la recibes en este canal, la entrega WhatsApp de estadísticas funciona correctamente.',
           '',
           'Comercial: ' + id,
+          'Cuenta: ' + alias,
           'Canal: ' + (canal.data.nombre || canal.data.destino_id),
           'JID: ' + canal.data.destino_id,
           'Prueba: ' + new Date().toLocaleString('es-CU', { timeZone: TZ_CUBA })
@@ -461,11 +486,12 @@ async function registrarComandos(bot) {
           id,
           canal.data.destino_id,
           '',
-          { payload: { text: texto } }
+          { accountAlias: alias, payload: { text: texto } }
         );
 
         console.log(
           '🧪 Prueba canal estadísticas enviada: comercial=' + id +
+          ' cuenta=' + alias +
           ' destino=' + canal.data.destino_id +
           ' resultado=' + String(resultado)
         );
@@ -488,7 +514,7 @@ async function registrarComandos(bot) {
         const vigente = r.data.habilitado && (!r.data.fecha_vencimiento || new Date(r.data.fecha_vencimiento).getTime() >= Date.now());
         return ctx.reply(['📊 Estadísticas — ' + id,'Estado: ' + (vigente ? '🟢 HABILITADO' : '🔴 NO VIGENTE'),'Inicio: ' + (r.data.fecha_inicio ? new Date(r.data.fecha_inicio).toLocaleString('es-CU',{timeZone:TZ_CUBA}) : '—'),'Vencimiento: ' + (r.data.fecha_vencimiento ? new Date(r.data.fecha_vencimiento).toLocaleString('es-CU',{timeZone:TZ_CUBA}) : 'sin vencimiento')].join('\n'));
       }
-      return ctx.reply('/estadisticas activar ID DIAS\n/estadisticas desactivar ID\n/estadisticas estado ID\n/estadisticas canal ID [ENLACE_CANAL]');
+      return ctx.reply('/estadisticas activar ID DIAS\n/estadisticas desactivar ID\n/estadisticas estado ID\n/estadisticas canal ID [CUENTA] ENLACE_CANAL\n/estadisticas probar_canal ID [CUENTA]');
     } catch (e) { console.error('❌ Error módulo estadísticas:',e && e.stack ? e.stack : e); return ctx.reply('❌ No se pudo actualizar el módulo de estadísticas.'); }
   });
 }
