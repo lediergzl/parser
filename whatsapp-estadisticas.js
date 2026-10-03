@@ -188,16 +188,11 @@ async function capturar(msg, origen) {
   if (!msg || !msg.id) return false;
   try {
     const texto = String(msg.message || '').trim();
-    // Cualquier publicación que tenga multimedia se descarta COMPLETA,
-    // aunque también tenga texto/caption. No queremos convertir una foto,
-    // documento, video o audio en texto porque eso sigue siendo tráfico inútil
-    // para el canal de estadísticas.
-    if (msg.media) {
-      console.log('⏭️ Estadística con multimedia: msg=' + msg.id + ' tipo=' + tipoMensaje(msg) + ' descartada completa.');
-      return false;
-    }
+    // La multimedia nunca se descarga ni se reenvía. Si la publicación
+    // trae texto/caption, ese texto SÍ se procesa. Solo se descarta una
+    // publicación que no tenga texto útil.
     if (!texto) {
-      console.log('⏭️ Estadística sin texto: msg=' + msg.id + ' descartada.');
+      console.log('⏭️ Estadística multimedia sin texto: msg=' + msg.id + ' tipo=' + tipoMensaje(msg) + ' descartada.');
       return false;
     }
     const post = await guardarPost(msg);
@@ -224,6 +219,64 @@ async function sincronizarHoy() {
     if (n) console.log('🔄 Estadísticas: ' + n + ' publicación(es) recuperada(s).');
   } catch (e) { console.error('⚠️ Error recuperando estadísticas:', e && e.stack ? e.stack : e); }
   finally { sincronizacionEnCurso = false; }
+}
+
+async function reactivarTextosMultimediaOmitidos() {
+  // Recuperación de publicaciones que fueron marcadas como omitidas por la
+  // regla anterior. Solo reactivamos las que fueron omitidas específicamente
+  // por ser multimedia y que ahora tienen texto útil. Las omisiones por
+  // módulo vencido, fecha de inicio, publicación inexistente, etc. no se tocan.
+  const r = await supabase
+    .from('whatsapp_estadisticas_outbox')
+    .select('id,post_id,ultimo_error')
+    .eq('estado', 'omitido')
+    .ilike('ultimo_error', 'Publicación multimedia%')
+    .order('id', { ascending: true })
+    .limit(100);
+
+  if (r.error) {
+    console.error('⚠️ No se pudieron revisar estadísticas multimedia omitidas:', r.error.message || r.error);
+    return;
+  }
+
+  let recuperadas = 0;
+  for (const item of r.data || []) {
+    const p = await supabase
+      .from('whatsapp_estadisticas_posts')
+      .select('id,texto')
+      .eq('id', item.post_id)
+      .maybeSingle();
+
+    if (p.error) {
+      console.error('⚠️ No se pudo revisar post de estadísticas ' + item.post_id + ':', p.error.message || p.error);
+      continue;
+    }
+
+    if (!p.data || !limpiarPromocion(p.data.texto || '')) continue;
+
+    const u = await supabase
+      .from('whatsapp_estadisticas_outbox')
+      .update({
+        estado: 'pendiente',
+        intentos: 0,
+        ultimo_error: null,
+        ultimo_intento_at: null,
+        enviado_at: null
+      })
+      .eq('id', item.id)
+      .eq('estado', 'omitido');
+
+    if (u.error) {
+      console.error('⚠️ No se pudo reactivar estadística ' + item.post_id + ':', u.error.message || u.error);
+      continue;
+    }
+
+    recuperadas++;
+  }
+
+  if (recuperadas) {
+    console.log('🔄 Estadísticas: ' + recuperadas + ' publicación(es) multimedia con texto recuperada(s).');
+  }
 }
 
 async function drenarOutbox() {
@@ -264,15 +317,6 @@ async function drenarOutbox() {
       await supabase.from('whatsapp_estadisticas_outbox')
         .update({estado:'omitido',ultimo_error:'Publicación no encontrada.'})
         .eq('id',item.id).eq('estado','pendiente');
-      continue;
-    }
-
-    // Nunca enviamos captions de publicaciones multimedia históricas.
-    if (String(p.data.tipo || '').toLowerCase() !== 'texto') {
-      await supabase.from('whatsapp_estadisticas_outbox')
-        .update({estado:'omitido',ultimo_error:'Publicación multimedia descartada; solo se envían publicaciones de texto.'})
-        .eq('id',item.id).eq('estado','pendiente');
-      console.log('⏭️ Estadística multimedia histórica omitida: post=' + item.post_id + ' tipo=' + String(p.data.tipo || 'desconocido'));
       continue;
     }
 
@@ -538,6 +582,7 @@ async function iniciarEstadisticas() {
       handlerRegistrado = true;
     }
     await sincronizarHoy();
+    await reactivarTextosMultimediaOmitidos();
     if (!timer) { timer = setInterval(() => { sincronizarHoy().catch(()=>{}); drenarOutbox().catch(()=>{}); }, INTERVALO_MS); if (timer.unref) timer.unref(); }
     await drenarOutbox();
     console.log('📊 Módulo estadísticas activo: ' + ORIGEN);
