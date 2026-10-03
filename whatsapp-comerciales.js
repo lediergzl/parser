@@ -1692,6 +1692,20 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
     if (!lock) { lock = crearLockSesionWhatsapp(db, cuenta.sessionId); locks.set(socketKey, lock); }
     await lock.esperarYAdquirir();
 
+    // Segunda barrera contra carreras: dos llamadas del mismo proceso pueden
+    // haber pasado el primer chequeo antes de que una de ellas cree el socket.
+    // Después de adquirir el lock nunca abrimos otro socket si ya existe uno
+    // vivo para esta misma cuenta.
+    const socketYaVivo = sockets.get(socketKey);
+    if (socketYaVivo?.user?.id) {
+      await lock.liberar().catch(() => {});
+      socketStarting.delete(socketKey);
+      console.log(
+        `🛡️ WA ${id} (${alias}): socket ya activo después de adquirir el lock; se reutiliza y no se crea otra sesión.`
+      );
+      return socketYaVivo;
+    }
+
     if (socketGenerations.get(socketKey) !== generation) {
       await lock.liberar().catch(() => {});
       return sockets.get(socketKey) || null;
