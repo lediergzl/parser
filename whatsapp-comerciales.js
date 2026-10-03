@@ -1822,12 +1822,20 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
           await telegramText(id, `✅ WhatsApp conectado${telefono ? `: ${telefono}` : ''}. Ya puedes recibir jugadas.`);
         }
 
-        // Despierta inmediatamente el outbox al quedar disponible un socket comercial.
+        // Despierta inmediatamente las colas persistentes al quedar disponible
+        // el socket comercial. Las estadísticas mantienen su propio límite de lote.
         try {
           const sender = require('./lib/whatsapp-sender');
           await sender.vaciarOutboxWhatsapp(db);
         } catch (outboxError) {
           console.error('[WA TRANSPORTE] Error vaciando outbox tras conectar comercial:', outboxError?.message || outboxError);
+        }
+        try {
+          if (typeof global.__DRENAR_ESTADISTICAS_OUTBOX__ === 'function') {
+            await global.__DRENAR_ESTADISTICAS_OUTBOX__();
+          }
+        } catch (estadisticasError) {
+          console.error('[WA TRANSPORTE] Error despertando outbox de estadísticas:', estadisticasError?.message || estadisticasError);
         }
       }
 
