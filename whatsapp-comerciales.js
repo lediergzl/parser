@@ -2127,6 +2127,48 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
   }
 }
 
+async function asegurarSocketComercial(db, comercialId, accountAlias = 'principal') {
+  const id = Number(comercialId);
+  const alias = String(accountAlias || 'principal').trim().toLowerCase();
+  const cuenta = await obtenerCuentaWhatsApp(db, id, alias, false);
+
+  let sock = obtenerSocketVivo(cuenta);
+  if (sock?.user?.id) return sock;
+
+  // Si la cuenta está terminando de abrirse, esperamos su promesa en vez de
+  // crear otra conexión. Esto evita carreras entre el outbox y Baileys.
+  const enInicio = socketStarting.get(cuenta.key);
+  if (enInicio) {
+    try {
+      sock = await enInicio;
+      if (sock?.user?.id) return sock;
+    } catch (_) {}
+  }
+
+  // No usamos otra cuenta del mismo comercial como sustituta. El grupo debe
+  // ser enviado por la identidad que lo tiene asignado.
+  console.log(
+    '🔄 WA TRANSPORTE: cuenta ' + id + '/' + alias +
+    ' no tiene socket vivo; solicitando recuperación de la cuenta exacta.'
+  );
+
+  try {
+    sock = await conectarComercial(db, id, false, alias);
+  } catch (error) {
+    console.error(
+      '❌ WA TRANSPORTE: no se pudo recuperar ' + id + '/' + alias + ':',
+      error?.message || error
+    );
+    throw error;
+  }
+
+  if (!sock?.user?.id) {
+    throw new Error('El WhatsApp del comercial ' + id + ' (' + alias + ') sigue sin estar conectado.');
+  }
+
+  return sock;
+}
+
 async function enviarMensajePorDestino(db, destinoId, texto, opciones = {}) {
   const destino = String(destinoId || '').trim();
   if (!destino) throw new Error('Destino WhatsApp vacío.');
