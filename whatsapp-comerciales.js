@@ -825,72 +825,6 @@ function extraerTotalDeclarado(texto) {
 
 function fechaCuba() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Havana' }).format(new Date()); }
 
-async function enviarResultadoWhatsApp(sock, remoteJid, db, comercialId, senderJid) {
-  const pref = await obtenerPreferenciaWhatsApp(db, comercialId, senderJid);
-
-  if (!pref?.loteria_id || !pref?.sorteo_id) {
-    return sock.sendMessage(remoteJid, {
-      text: '🎲 Primero selecciona la lotería y el sorteo con /loterias y /sorteo.'
-    });
-  }
-
-  const [{ data: loteria, error: loteriaError }, { data: sorteo, error: sorteoError }] = await Promise.all([
-    db.from('loterias').select('id,nombre').eq('id', pref.loteria_id).maybeSingle(),
-    db.from('sorteos').select('id,nombre,loteria_id').eq('id', pref.sorteo_id).eq('loteria_id', pref.loteria_id).maybeSingle()
-  ]);
-
-  if (loteriaError) throw loteriaError;
-  if (sorteoError) throw sorteoError;
-  if (!loteria || !sorteo) {
-    return sock.sendMessage(remoteJid, {
-      text: '❌ La lotería o el sorteo seleccionado ya no existe. Usa /loterias.'
-    });
-  }
-
-  const fecha = fechaCuba();
-  const { data: resultado, error } = await db.from('resultados_sorteo')
-    .select('id,fecha,numero_ganado,fuente')
-    .eq('loteria_id', loteria.id)
-    .eq('sorteo_id', sorteo.id)
-    .eq('fecha', fecha)
-    .maybeSingle();
-
-  if (error) throw error;
-
-  if (!resultado) {
-    return sock.sendMessage(remoteJid, {
-      text: [
-        '🎲 ' + loteria.nombre,
-        '🎰 ' + sorteo.nombre,
-        '📅 ' + fecha,
-        '',
-        '⏳ Todavía no hay un resultado registrado para este sorteo.'
-      ].join('\\n')
-    });
-  }
-
-  const ganado = resultado.numero_ganado || {};
-  const fijo = ganado.fijo == null ? '—' : String(ganado.fijo);
-  const centena = ganado.centena == null ? '—' : String(ganado.centena);
-  const corridos = Array.isArray(ganado.corrido)
-    ? ganado.corrido.map(String).join(' - ')
-    : (ganado.corrido == null ? '—' : String(ganado.corrido));
-
-  return sock.sendMessage(remoteJid, {
-    text: [
-      '🎯 RESULTADO',
-      '',
-      '🎲 Lotería: ' + loteria.nombre,
-      '🎰 Sorteo: ' + sorteo.nombre,
-      '📅 Fecha: ' + resultado.fecha,
-      '',
-      '🔵 Fijo: ' + fijo,
-      '🟢 Corrido: ' + corridos,
-      '🟡 Centena: ' + centena
-    ].join('\\n')
-  });
-}
-
 async function enviarListaJugadas(bot, db, ctx) {
   const role = await commercialRole(db, ctx.from.id);
   if (!['comercial', 'admin'].includes(role)) return ctx.reply('⛔ Solo un comercial puede usar este comando.');
@@ -1599,7 +1533,6 @@ async function recibirMensaje(db, sock, comercialId, message, accountAlias = 'pr
   }
 
   if (command === '/estado') { await enviarEstadoCliente(sock, remoteJid, db, comercialId, senderJid); return; }
-  if (command === '/resultado' || command === '/resultados') { await enviarResultadoWhatsApp(sock, remoteJid, db, comercialId, senderJid); return; }
   if (!activeBettingChats.has(key)) {
     console.log('ℹ️ WA ' + comercialId + ': mensaje ignorado fuera de sesión jid=' + remoteJid + ' sender=' + senderJid + ' text=' + JSON.stringify(texto.slice(0, 100)));
     return;
