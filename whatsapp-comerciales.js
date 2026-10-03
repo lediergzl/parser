@@ -1607,12 +1607,6 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
   // está esperando el QR o terminando el emparejamiento.
   if (socketStarting.has(socketKey)) return socketStarting.get(socketKey) || sockets.get(socketKey) || null;
 
-  // Una vez creado el socket, `connecting` puede quedar libre mientras Baileys
-  // todavía está negociando/vinculando. No permitimos otra inicialización de la
-  // misma cuenta durante esa ventana. Esto evita QR duplicados y sesiones que
-  // compiten por las mismas creds.
-  if (!force && socketStarting.has(socketKey)) return socketStarting.get(socketKey) || sockets.get(socketKey) || null;
-
   if (force) {
     const timer = reconnectTimers.get(socketKey);
     if (timer) { clearTimeout(timer); reconnectTimers.delete(socketKey); }
