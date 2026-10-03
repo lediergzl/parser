@@ -1822,8 +1822,9 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
           ?? error?.data?.statusCode
           ?? error?.statusCode
           ?? null;
-        const loggedOut = code === DisconnectReason.loggedOut;
         const errorText = String(error?.message || error || '');
+        const loggedOut = code === DisconnectReason.loggedOut;
+        const qrRefsEnded = code === 408 && /QR refs attempts ended/i.test(errorText);
         const isConflict401 =
           loggedOut &&
           /conflict|connectionreplaced|stream errored/i.test(errorText);
@@ -1841,6 +1842,28 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
         await lock?.liberar().catch(err =>
           console.error(`⚠️ WA ${id}: no se pudo liberar el lock tras cerrar el socket:`, err?.message || err)
         );
+
+        // 408 "QR refs attempts ended" significa que Baileys agotó la ventana
+        // de códigos QR sin que se completara el escaneo. NO es una caída de
+        // transporte que deba reconectarse automáticamente: si reconectamos
+        // aquí cada 3 segundos, creamos exactamente el bucle infinito de QR.
+        // Dejamos la cuenta esperando una nueva solicitud manual.
+        if (qrRefsEnded) {
+          await saveStatusLocal({
+            estado: 'esperando_qr',
+            ultimo_qr: null,
+            ultimo_error: '408 QR refs attempts ended: ventana de vinculación agotada'
+          }).catch(() => {});
+          sockets.delete(socketKey);
+          console.log(
+            `⏹️ WA ${id}: ventana de QR agotada; NO se reconectará automáticamente. Usa /wa_conectar ${alias} para generar otro QR.`
+          );
+          await telegramText(
+            id,
+            `⌛ El QR de WhatsApp "${alias}" expiró porque no fue escaneado. Usa /wa_conectar ${alias} cuando estés listo para generar uno nuevo.`
+          ).catch(() => {});
+          return;
+        }
 
         // 401 + "conflict" NO significa que el teléfono haya desvinculado
         // la cuenta. Significa que WhatsApp expulsó este socket porque existe
