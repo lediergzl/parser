@@ -317,7 +317,8 @@ async function sendQr(id, qr, options = {}) {
   const cuenta = await obtenerCuentaWhatsApp(db, id, accountAlias, false);
   const now = Date.now();
   const force = Boolean(options.force);
-  const qrKey = cuenta.key;\n  const lastSent = qrLastSentAt.get(qrKey) || 0;
+  const qrKey = cuenta.key;
+  const lastSent = qrLastSentAt.get(qrKey) || 0;
   await saveStatus(db, id, { estado: 'esperando_qr', ultimo_qr: qr, ultimo_error: null }, accountAlias);
 
   // Baileys puede rotar el QR varias veces durante una misma ventana de
