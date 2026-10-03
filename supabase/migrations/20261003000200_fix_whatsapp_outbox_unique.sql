@@ -52,7 +52,7 @@ BEGIN
       AND i.indisunique
       AND NOT i.indisprimary
       AND (
-        SELECT array_agg(a.attname::text ORDER BY array_position(i.indkey, a.attnum))
+        SELECT array_agg(a.attname::text ORDER BY array_position(i.indkey::smallint[], a.attnum))
         FROM pg_attribute a
         WHERE a.attrelid = i.indrelid
           AND a.attnum = ANY(i.indkey)
