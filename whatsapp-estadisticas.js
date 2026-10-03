@@ -585,6 +585,13 @@ async function iniciarEstadisticas() {
     }
     await sincronizarHoy();
     await reactivarTextosMultimediaOmitidos();
+    // Permite que el transporte WhatsApp despierte la cola inmediatamente
+    // cuando la cuenta pasa a OPEN, sin cambiar el límite de lotes ni el ciclo
+    // normal de 3 minutos.
+    global.__DRENAR_ESTADISTICAS_OUTBOX__ = () => drenarOutbox().catch(e =>
+      console.error('❌ Error drenando outbox de estadísticas:', e && e.stack ? e.stack : e)
+    );
+
     if (!timer) { timer = setInterval(() => { sincronizarHoy().catch(()=>{}); drenarOutbox().catch(()=>{}); }, INTERVALO_MS); if (timer.unref) timer.unref(); }
     await drenarOutbox();
     console.log('📊 Módulo estadísticas activo: ' + ORIGEN);
