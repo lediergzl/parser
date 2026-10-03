@@ -2206,6 +2206,74 @@ async function enviarMensajePorComercial(db, comercialId, destinoId, texto, opci
     ? opciones.payload
     : { text: String(texto || '') };
 
+  // Diagnóstico preventivo para grupos: "forbidden" suele significar que
+  // la cuenta salió del grupo o que el grupo está configurado para que solo
+  // administradores puedan escribir. Baileys expone ambos datos mediante
+  // groupMetadata(). No intentamos cambiar permisos automáticamente.
+  if (destino.endsWith('@g.us') && typeof sock.groupMetadata === 'function') {
+    let metadata;
+    try {
+      metadata = await sock.groupMetadata(destino);
+    } catch (metaError) {
+      const reason = metaError?.message || String(metaError);
+      throw new Error('No se pudo consultar el grupo WhatsApp ' + destino + ': ' + reason);
+    }
+
+    const participantes = Array.isArray(metadata?.participants) ? metadata.participants : [];
+    const miJid = String(sock?.user?.id || '').trim();
+    const miPn = miJid.replace(/:.*(?=@)/, '');
+
+    const equivalentes = new Set(
+      [miJid, miPn]
+        .filter(Boolean)
+        .flatMap(v => {
+          const s = String(v);
+          const base = s.split('@')[0];
+          return [s, base, base.replace(/:.*$/, '')];
+        })
+    );
+
+    const yo = participantes.find(p => {
+      const candidatos = [
+        p?.id,
+        p?.jid,
+        p?.phoneNumber,
+        p?.lid,
+        p?.pn,
+        p?.phone
+      ].filter(Boolean);
+
+      return candidatos.some(v => {
+        const s = String(v);
+        const base = s.split('@')[0];
+        return equivalentes.has(s) ||
+          equivalentes.has(base) ||
+          equivalentes.has(base.replace(/:.*$/, ''));
+      });
+    });
+
+    const esAdmin = Boolean(yo?.isAdmin || yo?.isSuperAdmin || yo?.admin === 'admin' || yo?.admin === 'superadmin');
+
+    console.log(
+      '[WA GRUPO] destino=' + destino +
+      ' nombre=' + JSON.stringify(metadata?.subject || '') +
+      ' miembros=' + participantes.length +
+      ' cuenta=' + JSON.stringify(miJid) +
+      ' miembro=' + Boolean(yo) +
+      ' admin=' + esAdmin +
+      ' announce=' + Boolean(metadata?.announce) +
+      ' addressingMode=' + String(metadata?.addressingMode || 'desconocido')
+    );
+
+    if (!yo) {
+      throw new Error('forbidden: la cuenta WhatsApp no aparece como miembro del grupo "' + String(metadata?.subject || destino) + '".');
+    }
+
+    if (metadata?.announce && !esAdmin) {
+      throw new Error('forbidden: el grupo "' + String(metadata?.subject || destino) + '" solo permite mensajes de administradores y la cuenta no es administradora.');
+    }
+  }
+
   await sock.sendMessage(destino, payload);
   return true;
 }
