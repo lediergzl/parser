@@ -238,5 +238,60 @@ begin
   end loop;
 end $$;
 
+
+
+-- El esquema anterior podía tener el UNIQUE como índice independiente.
+-- Se elimina para que ON CONFLICT pueda usar la clave que incluye la cuenta.
+do $
+declare
+  r record;
+begin
+  for r in
+    select i.indexrelid::regclass::text as index_name
+    from pg_index i
+    join pg_class t on t.oid = i.indrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'public'
+      and i.indisunique
+      and not i.indisprimary
+      and t.relname = 'whatsapp_notificaciones_outbox'
+      and (
+        select array_agg(a.attname::text order by a.attname::text)
+        from pg_attribute a
+        where a.attrelid = i.indrelid
+          and a.attnum = any(i.indkey)
+          and a.attnum > 0
+      ) = array['destino_id','referencia_id','tipo']::text[]
+  loop
+    execute 'drop index if exists ' || r.index_name;
+  end loop;
+end $;
+
+-- Lo mismo para el índice histórico de grupos de resultados por comercial.
+do $
+declare
+  r record;
+begin
+  for r in
+    select i.indexrelid::regclass::text as index_name
+    from pg_index i
+    join pg_class t on t.oid = i.indrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = 'public'
+      and i.indisunique
+      and not i.indisprimary
+      and t.relname = 'whatsapp_comercial_resultados'
+      and (
+        select array_agg(a.attname::text order by a.attname::text)
+        from pg_attribute a
+        where a.attrelid = i.indrelid
+          and a.attnum = any(i.indkey)
+          and a.attnum > 0
+      ) = array['comercial_telegram_id']::text[]
+  loop
+    execute 'drop index if exists ' || r.index_name;
+  end loop;
+end $;
+
 create unique index if not exists uq_whatsapp_notificaciones_outbox_destino_cuenta
   on public.whatsapp_notificaciones_outbox (tipo, referencia_id, destino_id, cuenta_alias);
