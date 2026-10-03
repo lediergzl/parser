@@ -2334,8 +2334,21 @@ async function registrarWhatsappComerciales(bot) {
       .order('id');
     for (const x of secundarias.data || []) cuentas.push(x);
 
+    const estadoRuntime = cuentas.map(x => {
+      const cuenta = {
+        comercial_telegram_id: Number(ctx.from.id),
+        alias: String(x.alias || 'principal').toLowerCase(),
+        key: x.alias === 'principal'
+          ? Number(ctx.from.id)
+          : String(ctx.from.id) + ':' + String(x.alias)
+      };
+      const sock = obtenerSocketVivo(cuenta);
+      return sock?.user?.id ? '🟢 socket activo' : '🔴 socket no activo';
+    });
+
     return ctx.reply('📲 CUENTAS WHATSAPP\n\n' + cuentas.map((x,i) =>
-      (i + 1) + '️⃣ ' + x.alias + '\nEstado: ' + (x.estado || 'sin configurar') +
+      (i + 1) + '️⃣ ' + x.alias + '\nEstado BD: ' + (x.estado || 'sin configurar') +
+      '\nEstado socket: ' + estadoRuntime[i] +
       (x.telefono ? '\nTeléfono: ' + x.telefono : '') +
       (x.ultimo_error ? '\nError: ' + x.ultimo_error : '')
     ).join('\n\n'));
