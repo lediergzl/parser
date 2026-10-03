@@ -580,7 +580,7 @@ async function iniciarEstadisticas() {
         } catch (e) {
           console.error('❌ Error evento estadísticas:',e && e.stack ? e.stack : e);
         }
-      }, new NewMessage({ chats: [entidadOrigen] }));
+      }, new NewMessage({ chats: [tgUtils.getPeerId(entidadOrigen)] }));
       handlerRegistrado = true;
     }
     await sincronizarHoy();
