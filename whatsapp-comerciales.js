@@ -2137,7 +2137,7 @@ async function registrarWhatsappComerciales(bot) {
   bot.command('wa_conectar', async ctx => {
     const role = await commercialRole(db, ctx.from.id);
     if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Solo un comercial puede conectar su WhatsApp.');
-    const alias = String(ctx.message?.text || '').trim().split(/s+/)[1] || 'principal';
+    const alias = String(ctx.message?.text || '').trim().split(/\s+/)[1] || 'principal';
     await ctx.reply(`📲 Preparando WhatsApp "${alias}". En unos segundos recibirás el QR aquí.`);
     try {
       await conectarComercial(db, ctx.from.id, true, alias);
