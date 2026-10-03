@@ -2265,12 +2265,12 @@ async function enviarMensajePorComercial(db, comercialId, destinoId, texto, opci
       ' addressingMode=' + String(metadata?.addressingMode || 'desconocido')
     );
 
+    // Para los resultados comerciales no exigimos privilegios de administrador.
+    // Si la cuenta pertenece al grupo, se intenta publicar. WhatsApp decidirá
+    // el permiso real del grupo en sendMessage(); esto permite usar el bot en
+    // grupos normales donde el comercial es miembro pero no admin.
     if (!yo) {
       throw new Error('forbidden: la cuenta WhatsApp no aparece como miembro del grupo "' + String(metadata?.subject || destino) + '".');
-    }
-
-    if (metadata?.announce && !esAdmin) {
-      throw new Error('forbidden: el grupo "' + String(metadata?.subject || destino) + '" solo permite mensajes de administradores y la cuenta no es administradora.');
     }
   }
 
