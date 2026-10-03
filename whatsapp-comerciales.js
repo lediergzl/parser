@@ -254,16 +254,71 @@ async function commercialRole(db, id) {
   return data?.role || 'cliente';
 }
 
-async function saveStatus(db, id, patch) {
-  await db.from('whatsapp_comercial_session').upsert({ comercial_telegram_id: id, ...patch, updated_at: new Date().toISOString() });
+async function obtenerCuentaWhatsApp(db, comercialId, alias = 'principal', crear = false) {
+  const id = Number(comercialId);
+  const nombre = String(alias || 'principal').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').slice(0, 32) || 'principal';
+
+  if (nombre === 'principal') {
+    return {
+      id: null,
+      comercial_telegram_id: id,
+      alias: 'principal',
+      key: id,
+      sessionId: `commercial:${id}`,
+      table: 'whatsapp_comercial_session',
+      column: 'comercial_telegram_id',
+      value: id
+    };
+  }
+
+  let { data, error } = await db.from('whatsapp_comercial_cuentas')
+    .select('id,comercial_telegram_id,alias,estado,telefono,ultimo_qr,ultimo_error')
+    .eq('comercial_telegram_id', id)
+    .eq('alias', nombre)
+    .maybeSingle();
+  if (error) throw error;
+
+  if (!data && crear) {
+    const r = await db.from('whatsapp_comercial_cuentas').insert({
+      comercial_telegram_id: id,
+      alias: nombre,
+      estado: 'desconectado'
+    }).select('id,comercial_telegram_id,alias,estado,telefono,ultimo_qr,ultimo_error').single();
+    if (r.error) throw r.error;
+    data = r.data;
+  }
+
+  if (!data) throw new Error(`La cuenta WhatsApp "${nombre}" no está registrada. Usa /wa_conectar ${nombre}.`);
+
+  return {
+    ...data,
+    alias: String(data.alias),
+    key: `${id}:${String(data.alias)}`,
+    sessionId: `commercial-account:${Number(data.id)}`,
+    table: 'whatsapp_comercial_cuentas',
+    column: 'id',
+    value: Number(data.id)
+  };
+}
+
+async function saveStatus(db, id, patch, alias = 'principal') {
+  const cuenta = await obtenerCuentaWhatsApp(db, id, alias, false);
+  const payload = { ...patch, updated_at: new Date().toISOString() };
+  if (cuenta.alias === 'principal') {
+    await db.from(cuenta.table).upsert({ comercial_telegram_id: id, ...payload });
+  } else {
+    await db.from(cuenta.table).update(payload).eq('id', cuenta.id);
+  }
 }
 
 async function sendQr(id, qr, options = {}) {
   const db = supa();
+  const accountAlias = String(options.accountAlias || 'principal');
+  const cuenta = await obtenerCuentaWhatsApp(db, id, accountAlias, false);
   const now = Date.now();
   const force = Boolean(options.force);
-  const lastSent = qrLastSentAt.get(Number(id)) || 0;
-  await saveStatus(db, id, { estado: 'esperando_qr', ultimo_qr: qr, ultimo_error: null });
+  const qrKey = cuenta.key;\n  const lastSent = qrLastSentAt.get(qrKey) || 0;
+  await saveStatus(db, id, { estado: 'esperando_qr', ultimo_qr: qr, ultimo_error: null }, accountAlias);
 
   // Baileys puede rotar el QR varias veces durante una misma ventana de
   // vinculación. No inundamos Telegram con imágenes casi idénticas: el QR
@@ -272,7 +327,7 @@ async function sendQr(id, qr, options = {}) {
     console.log(`⏳ WA ${id}: QR actualizado en Supabase, envío a Telegram omitido por throttle.`);
     return false;
   }
-  qrLastSentAt.set(Number(id), now);
+  qrLastSentAt.set(qrKey, now);
 
   const ok = await telegramPhoto(
     id,
@@ -1532,39 +1587,49 @@ async function recibirMensaje(db, sock, comercialId, message) {
   }
 }
 
-async function conectarComercial(db, comercialId, force = false) {
+async function conectarComercial(db, comercialId, force = false, accountAlias = 'principal') {
   const id = Number(comercialId);
   if (!Number.isFinite(id)) throw new Error('comercialId inválido');
+  const alias = String(accountAlias || 'principal').trim().toLowerCase();
+  const cuenta = await obtenerCuentaWhatsApp(db, id, alias, alias !== 'principal');
+  const socketKey = cuenta.key;
 
-  const existing = sockets.get(id);
+  const existing = sockets.get(socketKey);
   if (existing && !force) return existing;
-  if (connecting.has(id)) return connecting.get(id);
+  if (connecting.has(socketKey)) return connecting.get(socketKey);
 
   if (force) {
-    const timer = reconnectTimers.get(id);
-    if (timer) { clearTimeout(timer); reconnectTimers.delete(id); }
+    const timer = reconnectTimers.get(socketKey);
+    if (timer) { clearTimeout(timer); reconnectTimers.delete(socketKey); }
 
     if (existing) {
       try { existing.end?.(new Error('reconnect')); } catch (_) {}
-      sockets.delete(id);
+      sockets.delete(socketKey);
     }
 
     // /wa_conectar significa "volver a vincular".
     // Si quedó una credencial inválida después de un 401, no debemos cargarla
     // otra vez y esperar que el mismo QR repare una sesión revocada.
     // Limpiamos SOLO la sesión de este comercial antes de crear el socket nuevo.
-    const { error: resetError } = await db
-      .from('whatsapp_comercial_session')
-      .update({
-        estado: 'esperando_qr',
-        creds: null,
-        keys: null,
-        telefono: null,
-        ultimo_qr: null,
-        ultimo_error: null,
-        updated_at: new Date().toISOString()
-      })
-      .eq('comercial_telegram_id', id);
+    const { error: resetError } = cuenta.alias === 'principal'
+      ? await db.from(cuenta.table).update({
+          estado: 'esperando_qr',
+          creds: null,
+          keys: null,
+          telefono: null,
+          ultimo_qr: null,
+          ultimo_error: null,
+          updated_at: new Date().toISOString()
+        }).eq(cuenta.alias === 'principal' ? 'comercial_telegram_id' : 'id', cuenta.alias === 'principal' ? id : cuenta.id)
+      : await db.from(cuenta.table).update({
+          estado: 'esperando_qr',
+          creds: null,
+          keys: null,
+          telefono: null,
+          ultimo_qr: null,
+          ultimo_error: null,
+          updated_at: new Date().toISOString()
+        }).eq('id', cuenta.id);
 
     if (resetError) {
       throw new Error(`No se pudo reiniciar la sesión de WhatsApp: ${resetError.message}`);
@@ -1573,10 +1638,10 @@ async function conectarComercial(db, comercialId, force = false) {
     console.log(`🧹 WA ${id}: sesión reiniciada manualmente; se generará un QR nuevo.`);
   }
 
-  const generation = (socketGenerations.get(id) || 0) + 1;
-  socketGenerations.set(id, generation);
+  const generation = (socketGenerations.get(socketKey) || 0) + 1;
+  socketGenerations.set(socketKey, generation);
 
-  const promise = (async () => {
+  const saveStatusLocal = (patch) => saveStatusLocal(patch, alias);\n  const sendQrLocal = (qr, options = {}) => sendQrLocal(qr, { ...options, accountAlias: alias });\n\n  const promise = (async () => {
     const makeWASocket = require('@whiskeysockets/baileys').default;
 
     // Igual que en lib/whatsapp-sender.js (ver wa-instance-lock.js): sin este
@@ -1586,29 +1651,29 @@ async function conectarComercial(db, comercialId, force = false) {
     // sobre el mismo estado Signal corrompen las claves de sync y provocan
     // el ciclo "conecta -> Connection Failure -> 401 -> QR nuevo" que nunca
     // se estabiliza aunque el QR se escanee correctamente.
-    let lock = locks.get(id);
-    if (!lock) { lock = crearLockSesionWhatsapp(db, `commercial:${id}`); locks.set(id, lock); }
+    let lock = locks.get(socketKey);
+    if (!lock) { lock = crearLockSesionWhatsapp(db, cuenta.sessionId); locks.set(socketKey, lock); }
     await lock.esperarYAdquirir();
 
-    if (socketGenerations.get(id) !== generation) {
+    if (socketGenerations.get(socketKey) !== generation) {
       await lock.liberar().catch(() => {});
-      return sockets.get(id) || null;
+      return sockets.get(socketKey) || null;
     }
 
     let authState;
     try {
-      authState = await useSupabaseAuthState(db, `commercial:${id}`);
+      authState = await useSupabaseAuthState(db, cuenta.sessionId);
     } catch (error) {
       await lock.liberar().catch(() => {});
       throw error;
     }
 
-    authStates.set(id, authState);
+    authStates.set(socketKey, authState);
     const { state, saveCreds } = authState;
 
-    if (socketGenerations.get(id) !== generation) {
+    if (socketGenerations.get(socketKey) !== generation) {
       await lock.liberar().catch(() => {});
-      return sockets.get(id) || null;
+      return sockets.get(socketKey) || null;
     }
 
     let sock;
@@ -1655,7 +1720,7 @@ async function conectarComercial(db, comercialId, force = false) {
     }
 
     sock.__lotoComercialId = id;
-    sockets.set(id, sock);
+    sockets.set(socketKey, sock);
 
     // Si otra instancia adquiere el lease porque este proceso perdió la
     // renovación, este socket DEBE cerrarse inmediatamente. Mantenerlo vivo
@@ -1668,7 +1733,7 @@ async function conectarComercial(db, comercialId, force = false) {
 
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('connection.update', async update => {
-      if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
+      if (socketGenerations.get(socketKey) !== generation || sockets.get(socketKey) !== sock) return;
 
       const { connection, lastDisconnect, qr, isNewLogin, receivedPendingNotifications } = update;
 
@@ -1696,7 +1761,7 @@ async function conectarComercial(db, comercialId, force = false) {
         const yaRegistrado = Boolean(state?.creds?.registered || state?.creds?.me || sock.user?.id);
         if (yaRegistrado) {
           console.log(`🛡️ WA ${id}: QR ignorado porque la sesión ya está registrada (${sock.user?.id || 'creds registrados'}).`);
-          await saveStatus(db, id, {
+          await saveStatusLocal({
             estado: 'conectado',
             ultimo_qr: null,
             telefono: sock.user?.id || null,
@@ -1704,25 +1769,25 @@ async function conectarComercial(db, comercialId, force = false) {
           });
         } else {
           console.log(`📲 WA ${id}: QR nuevo generado; guardando y enviando el más reciente.`);
-          await sendQr(id, qr).catch(e => console.error(`QR ${id}:`, e));
+          await sendQrLocal(qr).catch(e => console.error(`QR ${id}:`, e));
         }
       }
 
       if (connection === 'open') {
-        if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
+        if (socketGenerations.get(socketKey) !== generation || sockets.get(socketKey) !== sock) return;
 
         const telefono = sock.user?.id || null;
         console.log(`✅ WA ${id}: conexión OPEN. Usuario=${telefono || 'desconocido'}`);
 
         // Evita repetir el aviso de conexión en Telegram cada vez que Baileys
         // reconstruye/reconecta el socket con la misma sesión.
-        const { data: estadoAnterior } = await db.from('whatsapp_comercial_session')
+        const { data: estadoAnterior } = await db.from(cuenta.table)
           .select('estado,telefono')
-          .eq('comercial_telegram_id', id)
+          .eq(cuenta.alias === 'principal' ? 'comercial_telegram_id' : 'id', cuenta.alias === 'principal' ? id : cuenta.id)
           .maybeSingle();
 
         qrLastSentAt.delete(Number(id));
-        await saveStatus(db, id, {
+        await saveStatusLocal({
           estado: 'conectado',
           ultimo_qr: null,
           telefono,
@@ -1746,7 +1811,7 @@ async function conectarComercial(db, comercialId, force = false) {
       }
 
       if (connection === 'close') {
-        if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
+        if (socketGenerations.get(socketKey) !== generation || sockets.get(socketKey) !== sock) return;
 
         const error = lastDisconnect?.error;
         const code = error?.output?.statusCode
@@ -1780,23 +1845,23 @@ async function conectarComercial(db, comercialId, force = false) {
         // debemos borrar creds/keys: hacerlo convierte un conflicto temporal
         // en un logout permanente y obliga a escanear QR otra vez.
         if (isConflict401) {
-          await saveStatus(db, id, {
+          await saveStatusLocal({
             estado: 'conectando',
             ultimo_qr: null,
             ultimo_error: `401 conflict: ${errorText}`
           }).catch(() => {});
 
-          sockets.delete(id);
+          sockets.delete(socketKey);
 
           if (!reconnectTimers.has(id)) {
             const timer = setTimeout(() => {
-              reconnectTimers.delete(id);
-              if (socketGenerations.get(id) !== generation) return;
-              conectarComercial(db, id).catch(e =>
+              reconnectTimers.delete(socketKey);
+              if (socketGenerations.get(socketKey) !== generation) return;
+              conectarComercial(db, id, false, alias).catch(e =>
                 console.error(`reconnect WA ${id} tras conflict:`, e)
               );
             }, 5000);
-            reconnectTimers.set(id, timer);
+            reconnectTimers.set(socketKey, timer);
           }
           return;
         }
@@ -1819,7 +1884,7 @@ async function conectarComercial(db, comercialId, force = false) {
               ultimo_error: `401 loggedOut: ${error?.message || 'Connection Failure'}`,
               updated_at: new Date().toISOString()
             })
-            .eq('comercial_telegram_id', id);
+            .eq(cuenta.alias === 'principal' ? 'comercial_telegram_id' : 'id', cuenta.alias === 'principal' ? id : cuenta.id);
 
           if (clearError) {
             console.error(`❌ WA ${id}: no se pudieron limpiar creds/keys tras 401:`, clearError);
@@ -1827,13 +1892,13 @@ async function conectarComercial(db, comercialId, force = false) {
             console.log(`🧹 WA ${id}: sesión comercial eliminada tras loggedOut (401).`);
           }
         } else {
-          await saveStatus(db, id, {
+          await saveStatusLocal({
             estado: 'conectando',
             ultimo_error: String(error?.message || error || '')
           });
         }
 
-        sockets.delete(id);
+        sockets.delete(socketKey);
 
         if (loggedOut) {
           await telegramText(
@@ -1845,17 +1910,17 @@ async function conectarComercial(db, comercialId, force = false) {
 
         if (!reconnectTimers.has(id)) {
           const timer = setTimeout(() => {
-            reconnectTimers.delete(id);
-            if (socketGenerations.get(id) !== generation) return;
-            conectarComercial(db, id).catch(e => console.error(`reconnect WA ${id}:`, e));
+            reconnectTimers.delete(socketKey);
+            if (socketGenerations.get(socketKey) !== generation) return;
+            conectarComercial(db, id, false, alias).catch(e => console.error(`reconnect WA ${id}:`, e));
           }, 3000);
-          reconnectTimers.set(id, timer);
+          reconnectTimers.set(socketKey, timer);
         }
       }
     });
 
     sock.ev.on('messages.upsert', async event => {
-      if (socketGenerations.get(id) !== generation || sockets.get(id) !== sock) return;
+      if (socketGenerations.get(socketKey) !== generation || sockets.get(socketKey) !== sock) return;
       if (event.requestId) return;
 
       for (const message of event.messages || []) {        try {
@@ -1929,11 +1994,11 @@ async function conectarComercial(db, comercialId, force = false) {
     return sock;
   })();
 
-  connecting.set(id, promise);
+  connecting.set(socketKey, promise);
   try {
     return await promise;
   } finally {
-    if (connecting.get(id) === promise) connecting.delete(id);
+    if (connecting.get(socketKey) === promise) connecting.delete(socketKey);
   }
 }
 
@@ -1969,10 +2034,11 @@ async function enviarMensajePorDestino(db, destinoId, texto, opciones = {}) {
   await sock.sendMessage(destino, payload);
   return true;
 }
-async function resolverCanalWhatsAppPorEnlace(comercialId, enlace) {
+async function resolverCanalWhatsAppPorEnlace(comercialId, enlace, accountAlias = 'principal') {
   const id = Number(comercialId);
+  const cuenta = await obtenerCuentaWhatsApp(supa(), id, accountAlias, false);
   const url = String(enlace || '').trim();
-  const sock = sockets.get(id);
+  const sock = sockets.get(cuenta.key);
   if (!sock?.user?.id) {
     throw new Error('El WhatsApp del comercial ' + id + ' no está conectado.');
   }
@@ -2012,13 +2078,15 @@ async function resolverCanalWhatsAppPorEnlace(comercialId, enlace) {
 }
 async function enviarMensajePorComercial(db, comercialId, destinoId, texto, opciones = {}) {
   const id = Number(comercialId);
+  const accountAlias = String(opciones?.accountAlias || 'principal').trim().toLowerCase();
+  const cuenta = await obtenerCuentaWhatsApp(db, id, accountAlias, false);
   const destino = String(destinoId || '').trim();
   if (!Number.isFinite(id)) throw new Error('Comercial WhatsApp inválido.');
   if (!destino) throw new Error('Canal WhatsApp vacío.');
 
-  const sock = sockets.get(id);
+  const sock = sockets.get(cuenta.key);
   if (!sock?.user?.id) {
-    throw new Error('El WhatsApp del comercial ' + id + ' no está conectado.');
+    throw new Error('El WhatsApp del comercial ' + id + ' (' + accountAlias + ') no está conectado.');
   }
 
   const payload = opciones && opciones.payload
@@ -2029,23 +2097,25 @@ async function enviarMensajePorComercial(db, comercialId, destinoId, texto, opci
   return true;
 }
 
-async function desconectarComercial(db, id) {
+async function desconectarComercial(db, id, accountAlias = 'principal') {
   const numericId = Number(id);
-  const timer = reconnectTimers.get(numericId);
-  if (timer) { clearTimeout(timer); reconnectTimers.delete(numericId); }
-  socketGenerations.set(numericId, (socketGenerations.get(numericId) || 0) + 1);
-  const sock = sockets.get(numericId);
-  if (sock) { try { sock.logout(); } catch (_) { try { sock.end?.(); } catch (_) {} } sockets.delete(numericId); }
-  for (const key of activeBettingChats) {
-    if (key.startsWith('' + numericId + ':')) {
-      activeBettingChats.delete(key);
-      cancelarSalidaAutomaticaWhatsApp(key);
+  const alias = String(accountAlias || 'principal').trim().toLowerCase();
+  const cuenta = await obtenerCuentaWhatsApp(db, numericId, alias, false);
+  const key = cuenta.key;
+  const timer = reconnectTimers.get(key);
+  if (timer) { clearTimeout(timer); reconnectTimers.delete(key); }
+  socketGenerations.set(key, (socketGenerations.get(key) || 0) + 1);
+  const sock = sockets.get(key);
+  if (sock) { try { sock.logout(); } catch (_) { try { sock.end?.(); } catch (_) {} } sockets.delete(key); }
+  for (const chatKey of activeBettingChats) {
+    if (chatKey.startsWith('' + numericId + ':')) {
+      activeBettingChats.delete(chatKey);
+      cancelarSalidaAutomatica(chatKey);
     }
   }
-  for (const alias of [...waIdentityAliases.keys()]) {
-    if (alias.startsWith('' + numericId + ':')) waIdentityAliases.delete(alias);
-  }
-  await db.from('whatsapp_comercial_session').update({ estado: 'desconectado', creds: null, keys: null, ultimo_qr: null, updated_at: new Date().toISOString() }).eq('comercial_telegram_id', id);
+  const sessionPatch = { estado: 'desconectado', creds: null, keys: null, ultimo_qr: null, updated_at: new Date().toISOString() };
+  if (cuenta.alias === 'principal') await db.from(cuenta.table).update(sessionPatch).eq('comercial_telegram_id', numericId);
+  else await db.from(cuenta.table).update(sessionPatch).eq('id', cuenta.id);
 }
 
 function statusFor(id) {
@@ -2063,34 +2133,52 @@ async function registrarWhatsappComerciales(bot) {
   bot.command('wa_conectar', async ctx => {
     const role = await commercialRole(db, ctx.from.id);
     if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Solo un comercial puede conectar su WhatsApp.');
-    await ctx.reply('📲 Preparando tu conexión de WhatsApp. En unos segundos recibirás el QR aquí.');
-    try { await conectarComercial(db, ctx.from.id, true); } catch (e) { console.error(e); await ctx.reply(`❌ No se pudo iniciar WhatsApp: ${e.message}`); }
+    const alias = String(ctx.message?.text || '').trim().split(/s+/)[1] || 'principal';
+    await ctx.reply(`📲 Preparando WhatsApp "${alias}". En unos segundos recibirás el QR aquí.`);
+    try {
+      await conectarComercial(db, ctx.from.id, true, alias);
+    } catch (e) {
+      console.error(e);
+      await ctx.reply(`❌ No se pudo iniciar WhatsApp "${alias}": ${e.message}`);
+    }
   });
 
   bot.command('wa_qr', async ctx => {
     const role = await commercialRole(db, ctx.from.id);
     if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Solo un comercial puede usar este comando.');
-    const { data } = await db.from('whatsapp_comercial_session').select('ultimo_qr,estado,telefono').eq('comercial_telegram_id', ctx.from.id).maybeSingle();
-    if (data?.estado === 'conectado') return ctx.reply(`✅ WhatsApp ya está conectado${data.telefono ? ` (${data.telefono})` : ''}. No hay ningún QR pendiente.`);
-    if (!data?.ultimo_qr) return ctx.reply('ℹ️ No hay un QR pendiente. Usa /wa_conectar.');
-    await sendQr(ctx.from.id, data.ultimo_qr, { force: true });
+    const alias = String(ctx.message?.text || '').trim().split(/\s+/)[1] || 'principal';
+    try {
+      const cuenta = await obtenerCuentaWhatsApp(db, ctx.from.id, alias, false);
+      const table = cuenta.table;
+      const column = cuenta.alias === 'principal' ? 'comercial_telegram_id' : 'id';
+      const value = cuenta.alias === 'principal' ? ctx.from.id : cuenta.id;
+      const { data } = await db.from(table).select('ultimo_qr,estado,telefono').eq(column, value).maybeSingle();
+      if (data?.estado === 'conectado') return ctx.reply(`✅ WhatsApp "${alias}" ya está conectado${data.telefono ? ` (${data.telefono})` : ''}. No hay ningún QR pendiente.`);
+      if (!data?.ultimo_qr) return ctx.reply(`ℹ️ No hay un QR pendiente para "${alias}". Usa /wa_conectar ${alias}.`);
+      await sendQr(ctx.from.id, data.ultimo_qr, { force: true, accountAlias: alias });
+    } catch (e) {
+      return ctx.reply('❌ ' + (e.message || e));
+    }
   });
 
   bot.command('wa_canal_estadisticas', async ctx => {
     const role = await commercialRole(db, ctx.from.id);
     if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Solo un comercial puede configurar su canal de estadísticas.');
 
-    const enlace = String(ctx.message?.text || '').trim().split(/\s+/).slice(1).join(' ').trim();
+    const parts = String(ctx.message?.text || '').trim().split(/\s+/);
+    const alias = parts[1] && !parts[1].includes('whatsapp.com/') ? parts[1].toLowerCase() : 'principal';
+    const enlace = (parts[1] && parts[1].includes('whatsapp.com/') ? parts.slice(1) : parts.slice(2)).join(' ').trim();
+
     if (!enlace) {
-      const r = await db
-        .from('whatsapp_estadisticas_canales')
+      const r = await db.from('whatsapp_estadisticas_canales')
         .select('enlace,destino_id,nombre,activo')
         .eq('comercial_telegram_id', ctx.from.id)
+        .eq('cuenta_alias', alias)
         .maybeSingle();
       if (r.error) return ctx.reply('❌ No se pudo consultar el canal: ' + r.error.message);
-      if (!r.data) return ctx.reply('ℹ️ No tienes un canal de estadísticas configurado.');
+      if (!r.data) return ctx.reply(`ℹ️ No tienes un canal de estadísticas configurado para "${alias}".`);
       return ctx.reply([
-        '📣 Tu canal de estadísticas',
+        '📣 Canal de estadísticas — ' + alias,
         'Estado: ' + (r.data.activo ? '🟢 ACTIVO' : '🔴 INACTIVO'),
         'Nombre: ' + (r.data.nombre || '—'),
         'JID: ' + r.data.destino_id,
@@ -2099,27 +2187,18 @@ async function registrarWhatsappComerciales(bot) {
     }
 
     try {
-      const canal = await resolverCanalWhatsAppPorEnlace(ctx.from.id, enlace);
-      const r = await db
-        .from('whatsapp_estadisticas_canales')
-        .upsert({
-          comercial_telegram_id: Number(ctx.from.id),
-          enlace: canal.enlace,
-          destino_id: canal.destino_id,
-          nombre: canal.nombre,
-          activo: true,
-          actualizado_at: new Date().toISOString()
-        }, { onConflict: 'comercial_telegram_id' });
-
+      const canal = await resolverCanalWhatsAppPorEnlace(ctx.from.id, enlace, alias);
+      const r = await db.from('whatsapp_estadisticas_canales').upsert({
+        comercial_telegram_id: Number(ctx.from.id),
+        cuenta_alias: alias,
+        enlace: canal.enlace,
+        destino_id: canal.destino_id,
+        nombre: canal.nombre,
+        activo: true,
+        actualizado_at: new Date().toISOString()
+      }, { onConflict: 'comercial_telegram_id,cuenta_alias' });
       if (r.error) throw r.error;
-
-      return ctx.reply([
-        '✅ Canal de estadísticas configurado.',
-        'Nombre: ' + canal.nombre,
-        'JID: ' + canal.destino_id,
-        '',
-        'Las estadísticas del módulo se publicarán en este canal.'
-      ].join('\n'));
+      return ctx.reply(['✅ Canal de estadísticas configurado.', 'Cuenta WhatsApp: ' + alias, 'Nombre: ' + canal.nombre, 'JID: ' + canal.destino_id].join('\n'));
     } catch (e) {
       console.error('❌ Error configurando canal de estadísticas:', e);
       return ctx.reply('❌ No pude configurar el canal: ' + String(e?.message || e));
@@ -2129,15 +2208,36 @@ async function registrarWhatsappComerciales(bot) {
   bot.command('wa_estado', async ctx => {
     const role = await commercialRole(db, ctx.from.id);
     if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Sin permiso.');
-    const { data } = await db.from('whatsapp_comercial_session').select('estado,telefono,ultimo_error,ultimo_mensaje_at').eq('comercial_telegram_id', ctx.from.id).maybeSingle();
-    return ctx.reply(`📲 WhatsApp\nEstado: ${data?.estado || statusFor(ctx.from.id)}${data?.telefono ? `\nTeléfono: ${data.telefono}` : ''}${data?.ultimo_error ? `\nError: ${data.ultimo_error}` : ''}${data?.ultimo_mensaje_at ? `\nÚltimo mensaje: ${data.ultimo_mensaje_at}` : ''}`);
+
+    const cuentas = [{ alias: 'principal', estado: null, telefono: null, ultimo_error: null }];
+    const principal = await db.from('whatsapp_comercial_session')
+      .select('estado,telefono,ultimo_error,ultimo_mensaje_at')
+      .eq('comercial_telegram_id', ctx.from.id).maybeSingle();
+    if (principal.data) Object.assign(cuentas[0], principal.data);
+
+    const secundarias = await db.from('whatsapp_comercial_cuentas')
+      .select('alias,estado,telefono,ultimo_error')
+      .eq('comercial_telegram_id', ctx.from.id)
+      .order('id');
+    for (const x of secundarias.data || []) cuentas.push(x);
+
+    return ctx.reply('📲 CUENTAS WHATSAPP\n\n' + cuentas.map((x,i) =>
+      (i + 1) + '️⃣ ' + x.alias + '\nEstado: ' + (x.estado || 'sin configurar') +
+      (x.telefono ? '\nTeléfono: ' + x.telefono : '') +
+      (x.ultimo_error ? '\nError: ' + x.ultimo_error : '')
+    ).join('\n\n'));
   });
 
   bot.command('wa_desconectar', async ctx => {
     const role = await commercialRole(db, ctx.from.id);
     if (!['comercial','admin'].includes(role)) return ctx.reply('⛔ Sin permiso.');
-    await desconectarComercial(db, ctx.from.id);
-    await ctx.reply('✅ WhatsApp desconectado.');
+    const alias = String(ctx.message?.text || '').trim().split(/\s+/)[1] || 'principal';
+    try {
+      await desconectarComercial(db, ctx.from.id, alias);
+      await ctx.reply('✅ WhatsApp "' + alias + '" desconectado.');
+    } catch (e) {
+      await ctx.reply('❌ ' + (e.message || e));
+    }
   });
 
   bot.command('wa_comerciales', async ctx => {
@@ -2146,13 +2246,29 @@ async function registrarWhatsappComerciales(bot) {
     if (!data?.length) return ctx.reply('No hay comerciales definidos.');
     const ids = data.map(x => x.telegram_id);
     const { data: sessions } = await db.from('whatsapp_comercial_session').select('comercial_telegram_id,estado,telefono').in('comercial_telegram_id', ids);
-    const map = new Map((sessions || []).map(x => [Number(x.comercial_telegram_id), x]));
-    return ctx.reply(data.map(x => { const s = map.get(Number(x.telegram_id)); return `👤 ${x.first_name || x.username || x.telegram_id}\nID: ${x.telegram_id}\nWhatsApp: ${s?.estado || 'sin configurar'}${s?.telefono ? `\n${s.telefono}` : ''}`; }).join('\n\n'));
+    const { data: cuentas } = await db.from('whatsapp_comercial_cuentas').select('comercial_telegram_id,alias,estado,telefono').in('comercial_telegram_id', ids).order('id');
+    const map = new Map((sessions || []).map(x => [Number(x.comercial_telegram_id), [x]]));
+    for (const x of cuentas || []) {
+      const k = Number(x.comercial_telegram_id);
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(x);
+    }
+    return ctx.reply(data.map(x => {
+      const ss = map.get(Number(x.telegram_id)) || [];
+      return '👤 ' + (x.first_name || x.username || x.telegram_id) + '\nID: ' + x.telegram_id + '\n' +
+        (ss.length ? ss.map(s => 'WhatsApp "' + (s.alias || 'principal') + '": ' + (s.estado || 'sin configurar') + (s.telefono ? ' — ' + s.telefono : '')).join('\n') : 'WhatsApp: sin configurar');
+    }).join('\n\n'));
   });
 
   const { data: comerciales } = await db.from('users').select('telegram_id').eq('role','comercial');
-  for (const c of comerciales || []) conectarComercial(db, c.telegram_id).catch(e => console.error(`No se pudo restaurar WhatsApp del comercial ${c.telegram_id}:`, e));
-  console.log(`✅ WhatsApp multi-comercial listo (${(comerciales || []).length} comerciales)`);
+  for (const x of comerciales || []) {
+    conectarComercial(db, x.telegram_id).catch(e => console.error(`No se pudo restaurar WhatsApp del comercial ${x.telegram_id}: ${e}`));
+    const { data: cuentas } = await db.from('whatsapp_comercial_cuentas').select('alias').eq('comercial_telegram_id', x.telegram_id);
+    for (const cuenta of cuentas || []) {
+      conectarComercial(db, x.telegram_id, false, cuenta.alias).catch(e => console.error(`No se pudo restaurar WhatsApp ${cuenta.alias} del comercial ${x.telegram_id}: ${e}`));
+    }
+  }
+  console.log(`✅ WhatsApp multi-comercial listo (${(comerciales || []).length} comerciales; múltiples cuentas por comercial habilitadas)`);
 }
 
 module.exports = { registrarWhatsappComerciales, conectarComercial, desconectarComercial, procesarJugadaWhatsApp, enviarMensajePorDestino, enviarMensajePorComercial, resolverCanalWhatsAppPorEnlace };
