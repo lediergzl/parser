@@ -342,6 +342,24 @@ async function sendQr(id, qr, options = {}) {
   return ok;
 }
 
+function obtenerSocketVivo(cuenta) {
+  if (!cuenta) return null;
+
+  const exacto = sockets.get(cuenta.key);
+  if (exacto?.user?.id) return exacto;
+
+  // Defensa contra discrepancias de tipo/clave durante una reconexión.
+  // La instancia viva queda etiquetada con su comercial y alias al crearse.
+  for (const candidato of sockets.values()) {
+    if (!candidato) continue;
+    if (Number(candidato.__lotoComercialId) !== Number(cuenta.comercial_telegram_id)) continue;
+    if (String(candidato.__lotoCuentaAlias || 'principal').toLowerCase() !== String(cuenta.alias || 'principal').toLowerCase()) continue;
+    if (candidato.user?.id) return candidato;
+  }
+
+  return exacto || null;
+}
+
 function normalizarWhatsAppKey(value) {
   const v = String(value || '').trim().toLowerCase();
   const pn = v.match(/^(\d+)(?::\d+)?@s\.whatsapp\.net$/);
@@ -1740,6 +1758,8 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
     }
 
     sock.__lotoComercialId = id;
+    sock.__lotoCuentaAlias = alias;
+    sock.__lotoSocketKey = socketKey;
     sockets.set(socketKey, sock);
 
     // Si otra instancia adquiere el lease porque este proceso perdió la
@@ -2129,9 +2149,10 @@ async function resolverCanalWhatsAppPorEnlace(comercialId, enlace, accountAlias 
   const id = Number(comercialId);
   const cuenta = await obtenerCuentaWhatsApp(supa(), id, accountAlias, false);
   const url = String(enlace || '').trim();
-  const sock = sockets.get(cuenta.key);
+  const sock = obtenerSocketVivo(cuenta);
   if (!sock?.user?.id) {
-    throw new Error('El WhatsApp del comercial ' + id + ' no está conectado.');
+    console.warn('[WA TRANSPORTE] Socket no encontrado para comercial=' + id + ' cuenta=' + accountAlias + ' key=' + cuenta.key + ' sockets=' + JSON.stringify([...sockets.entries()].map(([k, s]) => ({ key: String(k), comercial: s?.__lotoComercialId ?? null, cuenta: s?.__lotoCuentaAlias ?? null, usuario: s?.user?.id || null }))));
+    throw new Error('El WhatsApp del comercial ' + id + ' (' + accountAlias + ') no está conectado.');
   }
   if (!sock.newsletterMetadata) {
     throw new Error('La versión de Baileys instalada no expone newsletterMetadata().');
@@ -2175,8 +2196,9 @@ async function enviarMensajePorComercial(db, comercialId, destinoId, texto, opci
   if (!Number.isFinite(id)) throw new Error('Comercial WhatsApp inválido.');
   if (!destino) throw new Error('Canal WhatsApp vacío.');
 
-  const sock = sockets.get(cuenta.key);
+  const sock = obtenerSocketVivo(cuenta);
   if (!sock?.user?.id) {
+    console.warn('[WA TRANSPORTE] Socket no encontrado para comercial=' + id + ' cuenta=' + accountAlias + ' key=' + cuenta.key + ' sockets=' + JSON.stringify([...sockets.entries()].map(([k, s]) => ({ key: String(k), comercial: s?.__lotoComercialId ?? null, cuenta: s?.__lotoCuentaAlias ?? null, usuario: s?.user?.id || null }))));
     throw new Error('El WhatsApp del comercial ' + id + ' (' + accountAlias + ') no está conectado.');
   }
 
