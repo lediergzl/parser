@@ -1075,7 +1075,7 @@ async function notificarComercialJugadaWhatsApp(sock, db, comercialId, betId) {
   }
 }
 
-async function recibirMensaje(db, sock, comercialId, message) {
+async function recibirMensaje(db, sock, comercialId, message, accountAlias = 'principal') {
   if (!message?.key?.id) return;
 
   // El comercial recibe las solicitudes de recarga de clientes WhatsApp
@@ -1102,7 +1102,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
 
       try {
         const sender = require('./lib/whatsapp-sender');
-        const prueba = await sender.probarResultadoWhatsapp(db, comercialId);
+        const prueba = await sender.probarResultadoWhatsapp(db, comercialId, accountAlias);
         await sock.sendMessage(targetJid, {
           text: [
             '🧪 PRUEBA DE RESULTADOS ENCOLADA',
@@ -1128,8 +1128,10 @@ async function recibirMensaje(db, sock, comercialId, message) {
     // Se ejecuta desde el WhatsApp comercial: basta enviar el comando dentro
     // del grupo que se quiere asignar.
     const comandosAsignarGrupo = new Set(['/wa_grupo_resultados', '/asignargrupo', '/asignar_grupo']);
+    const partesGrupo = String(textoSelf || '').trim().split(/\s+/);
+    const aliasGrupo = partesGrupo[1] ? String(partesGrupo[1]).toLowerCase() : accountAlias;
 
-    if (comandosAsignarGrupo.has(commandSelf)) {
+    if (comandosAsignarGrupo.has(commandSelf) || (partesGrupo[0] === '/wa_grupo_resultados' && /^[a-z0-9_-]{1,32}$/.test(aliasGrupo))) {
       const targetJid = String(message.key.remoteJid || '').trim();
       if (!targetJid.endsWith('@g.us')) {
         await sock.sendMessage(targetJid || sock.user?.id, {
@@ -1143,12 +1145,13 @@ async function recibirMensaje(db, sock, comercialId, message) {
           const metadata = await sock.groupMetadata(targetJid);
           nombreGrupo = String(metadata?.subject || '').trim() || null;
         } catch (_) {}
-        const grupo = await guardarGrupoResultadosComercial(db, comercialId, targetJid, nombreGrupo);
+        const grupo = await guardarGrupoResultadosComercial(db, comercialId, targetJid, nombreGrupo, aliasGrupo);
         await sock.sendMessage(targetJid, {
           text: [
             '✅ GRUPO DE RESULTADOS ASIGNADO',
             '',
             '👤 Comercial: ' + comercialId,
+            '📱 Cuenta: ' + aliasGrupo,
             '👥 ' + (nombreGrupo || 'Grupo WhatsApp'),
             '🆔 ' + grupo.destino_id,
             '',
@@ -1157,7 +1160,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
             '🏆 premios correspondientes a las jugadas de este comercial',
             '',
             'No necesitas copiar el ID manualmente.',
-            'Para cambiarlo, ejecuta /asignargrupo dentro del nuevo grupo.'
+            'Para cambiarlo en esta cuenta, ejecuta /wa_grupo_resultados dentro del nuevo grupo.'
           ].join('\n')
         }).catch(() => {});
       } catch (e) {
@@ -1195,7 +1198,7 @@ async function recibirMensaje(db, sock, comercialId, message) {
     if (commandSelf === '/mi_grupo' || commandSelf === '/migrupo') {
       const targetJid = String(message.key.remoteJid || '').trim();
       try {
-        const grupo = await leerGrupoResultadosComercial(db, comercialId);
+        const grupo = await leerGrupoResultadosComercial(db, comercialId, accountAlias);
         await sock.sendMessage(targetJid || sock.user?.id, {
           text: grupo?.activo
             ? ['📢 GRUPO DE RESULTADOS ACTUAL', '', '👥 ' + (grupo.nombre || 'Grupo WhatsApp'), '🆔 ' + grupo.destino_id].join('\n')
@@ -1207,7 +1210,9 @@ async function recibirMensaje(db, sock, comercialId, message) {
       return;
     }
 
-    if (commandSelf === '/wa_ver_grupo_resultados') {
+    const comandoVerGrupo = commandSelf.match(/^\/wa_ver_grupo_resultados(?:\s+([a-z0-9_-]{1,32}))?$/);
+    if (comandoVerGrupo) {
+      const aliasConsulta = comandoVerGrupo[1] ? String(comandoVerGrupo[1]).toLowerCase() : accountAlias;
       const targetJid = String(message.key.remoteJid || '').trim();
       try {
         const grupo = await leerGrupoResultadosComercial(db, comercialId);
@@ -2040,7 +2045,7 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
             }
           }
 
-          await recibirMensaje(db, sock, id, message);
+          await recibirMensaje(db, sock, id, message, alias);
         } catch (error) {
           console.error(
             `❌ Error procesando mensaje WhatsApp del comercial ${id}:`,
