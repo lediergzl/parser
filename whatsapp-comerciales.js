@@ -2521,4 +2521,4 @@ async function registrarWhatsappComerciales(bot) {
   console.log(`✅ WhatsApp multi-comercial listo (${(comerciales || []).length} comerciales; múltiples cuentas por comercial habilitadas)`);
 }
 
-module.exports = { registrarWhatsappComerciales, conectarComercial, desconectarComercial, procesarJugadaWhatsApp, enviarMensajePorDestino, enviarMensajePorComercial, resolverCanalWhatsAppPorEnlace };
+module.exports = { registrarWhatsappComerciales, conectarComercial, desconectarComercial, procesarJugadaWhatsApp, enviarMensajePorDestino, enviarMensajePorComercial, asegurarSocketComercial, resolverCanalWhatsAppPorEnlace };
