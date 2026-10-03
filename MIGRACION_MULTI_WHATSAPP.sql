@@ -58,7 +58,7 @@ begin
       and t.relname = 'whatsapp_estadisticas_canales'
       and c.contype = 'u'
       and (
-        select array_agg(a.attname order by a.attname)
+        select array_agg(a.attname::text order by a.attname::text)
         from pg_attribute a
         where a.attrelid = c.conrelid
           and a.attnum = any(c.conkey)
