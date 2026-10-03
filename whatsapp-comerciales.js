@@ -1814,6 +1814,24 @@ async function conectarComercial(db, comercialId, force = false, accountAlias = 
         }
       }
 
+      if (isNewLogin) {
+        // WhatsApp emite isNewLogin=true antes del 515. En ese punto ya entregó
+        // las credenciales nuevas; debemos forzar su persistencia y esperar la
+        // cola antes de permitir que el socket se reinicie.
+        try {
+          await saveCreds();
+          await authState.flush?.();
+          console.log(`💾 WA ${id} (${alias}): credenciales de nuevo login persistidas antes del reinicio 515.`);
+        } catch (persistError) {
+          console.error(`❌ WA ${id} (${alias}): no se pudieron persistir las credenciales del nuevo login:`, persistError?.message || persistError);
+          await saveStatusLocal({
+            estado: 'error',
+            ultimo_error: `No se pudieron guardar las credenciales tras vincular: ${persistError?.message || persistError}`
+          }).catch(() => {});
+          return;
+        }
+      }
+
       if (connection === 'close') {
         if (socketGenerations.get(socketKey) !== generation || sockets.get(socketKey) !== sock) return;
 
