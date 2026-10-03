@@ -2110,7 +2110,7 @@ async function desconectarComercial(db, id, accountAlias = 'principal') {
   for (const chatKey of activeBettingChats) {
     if (chatKey.startsWith('' + numericId + ':')) {
       activeBettingChats.delete(chatKey);
-      cancelarSalidaAutomatica(chatKey);
+      cancelarSalidaAutomaticaWhatsApp(chatKey);
     }
   }
   const sessionPatch = { estado: 'desconectado', creds: null, keys: null, ultimo_qr: null, updated_at: new Date().toISOString() };
